@@ -1120,8 +1120,26 @@ namespace Brovan.Core.Helpers
 
         public MappedMemoryBytes(byte[] Data)
         {
+            if (Data == null || Data.Length == 0)
+                throw new ArgumentNullException(nameof(Data));
             ManagedData = Data ?? Array.Empty<byte>();
             Length = ManagedData.Length;
+        }
+
+        public MappedMemoryBytes(Span<byte> Data)
+        {
+            if (Data.IsEmpty || Data.Length == 0)
+                throw new ArgumentNullException(nameof(Data));
+            BasePtr = (byte*)&Data;
+            Length = Data.Length;
+        }
+
+        public MappedMemoryBytes(ReadOnlySpan<byte> Data)
+        {
+            if (Data.IsEmpty || Data.Length == 0)
+                throw new ArgumentNullException(nameof(Data));
+            BasePtr = (byte*)&Data;
+            Length = Data.Length;
         }
 
         public MappedMemoryBytes(string Path)

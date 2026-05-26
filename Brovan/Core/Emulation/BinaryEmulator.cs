@@ -509,7 +509,7 @@ namespace Brovan.Core.Emulation
         /// <param name="Data">Data to be emulated based on the architecture and mode.</param>
         /// <exception cref="NullReferenceException"></exception>
         /// <exception cref="UnicornException"></exception>
-        public BinaryEmulator(IGuestEnvironment Guest, BinaryEmulatorSettings Settings, Mode mode, Arch arch, byte[] Data, BinaryFile Binary = null)
+        public BinaryEmulator(IGuestEnvironment Guest, BinaryEmulatorSettings Settings, Mode mode, Arch arch, ReadOnlySpan<byte> Data, BinaryFile Binary = null)
         {
             if (Data == null || Data.Length == 0)
                 throw new NullReferenceException(nameof(Data));

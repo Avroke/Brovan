@@ -2543,7 +2543,7 @@ namespace Brovan.Core
 
                     if (!CodeSection || !MainCodeSection)
                     {
-                        Reason = $"{(!CodeSection ? "No Code Section available in the binary" : "The seciton containing the EntryPoint is not found")}.";
+                        Reason = $"{(!CodeSection ? "No Code Section available in the binary" : "The section containing the EntryPoint is not found")}.";
                         return BinaryCorruptionStatus.Corrupted;
                     }
 
@@ -2727,6 +2727,28 @@ namespace Brovan.Core
         /// <exception cref="ArgumentNullException"></exception>
         /// <exception cref="OverflowException"></exception>
         public BinaryFile(byte[] BinaryData, bool Quick)
+        {
+            if (BinaryData == null || BinaryData.Length == 0)
+                throw new NullReferenceException("Binary data cannot be null or empty.");
+            PE = new PortableExecutable();
+            ELF = new ELF();
+            DotNet = new DotNet();
+            Data = new MappedMemoryBytes(BinaryData);
+            this.Quick = Quick;
+            ParseBinary(Data.AsSpan());
+            this.Location = null;
+        }
+
+        /// <summary>
+        /// Initialize the Binary File instance with a <see cref="ReadOnlySpan{T}"/>.
+        /// </summary>
+        /// <param name="BinaryData">The span of the binary to be parsed.</param>
+        /// <exception cref="NullReferenceException"></exception>
+        /// <exception cref="ArgumentOutOfRangeException"></exception>
+        /// <exception cref="IndexOutOfRangeException"></exception>
+        /// <exception cref="ArgumentNullException"></exception>
+        /// <exception cref="OverflowException"></exception>
+        public BinaryFile(ReadOnlySpan<byte> BinaryData, bool Quick)
         {
             if (BinaryData == null || BinaryData.Length == 0)
                 throw new NullReferenceException("Binary data cannot be null or empty.");

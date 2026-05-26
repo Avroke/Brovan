@@ -2309,7 +2309,7 @@ namespace Brovan.EmulationMenu
                         EntryAddress = PendingGenericEntryAddress,
                         StackSize = PendingGenericStackSize
                     }, PendingWindowsBlobLaunchMode);
-                    Emulator = new BinaryEmulator(Windows, EmulatorSettings, PendingGenericMode, PendingGenericArch, Binary.GetBinaryData().ToArray(), Binary);
+                    Emulator = new BinaryEmulator(Windows, EmulatorSettings, PendingGenericMode, PendingGenericArch, Binary.GetBinaryData(), Binary);
                     MappedMainModuleBase = Windows.BlobMappedBase;
 
                     SetBlobEntryPoint(PendingGenericLoadAddress, MappedMainModuleBase, PendingGenericEntryAddress);
@@ -2322,7 +2322,7 @@ namespace Brovan.EmulationMenu
                         EntryAddress = PendingGenericEntryAddress,
                         StackSize = PendingGenericStackSize
                     });
-                    Emulator = new BinaryEmulator(Linux, EmulatorSettings, PendingGenericMode, PendingGenericArch, Binary.GetBinaryData().ToArray(), Binary);
+                    Emulator = new BinaryEmulator(Linux, EmulatorSettings, PendingGenericMode, PendingGenericArch, Binary.GetBinaryData(), Binary);
                     MappedMainModuleBase = Linux.BlobMappedBase;
 
                     SetBlobEntryPoint(PendingGenericLoadAddress, MappedMainModuleBase, PendingGenericEntryAddress);
@@ -2330,7 +2330,7 @@ namespace Brovan.EmulationMenu
                 else if (UseGenericGuest)
                 {
                     GenericGuest Generic = new GenericGuest(PendingGenericArch, PendingGenericMode, PendingGenericLoadAddress, PendingGenericEntryAddress, PendingGenericStackSize);
-                    Emulator = new BinaryEmulator(Generic, EmulatorSettings, PendingGenericMode, PendingGenericArch, Binary.GetBinaryData().ToArray(), Binary);
+                    Emulator = new BinaryEmulator(Generic, EmulatorSettings, PendingGenericMode, PendingGenericArch, Binary.GetBinaryData(), Binary);
                     MappedMainModuleBase = Generic.MappedBase;
 
                     SetBlobEntryPoint(PendingGenericLoadAddress, MappedMainModuleBase, PendingGenericEntryAddress);
@@ -2387,6 +2387,7 @@ namespace Brovan.EmulationMenu
                     string PcName = PendingGenericArch == Core.Emulation.Arch.X86 ? (PendingGenericMode == Mode.MODE_64 ? "RIP" : "EIP") : "PC";
                     PrintHighlight($"[+] Generic guest ready. Blob mapped at 0x{MappedMainModuleBase:X}. Use set {PcName.ToLowerInvariant()} <address>, continue, or step.", true);
                 }
+
                 if (!string.IsNullOrEmpty(Command))
                 {
                     try
