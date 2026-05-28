@@ -1516,9 +1516,17 @@ namespace Brovan.EmulationMenu
                             break;
                         }
 
-                        string Disassembled = Disassembler.DisassembleToStringEmu(DisasmData, DisasmAddress, Binary, 0, true);
+                        X86Instruction[] Instructions = Disassembler.DisassembleBinary(DisasmData, DisasmAddress, Binary, 0, true);
+                        if (Instructions.Length == 0)
+                        {
+                            string Disassembled = Disassembler.DisassembleToStringEmu(DisasmData, DisasmAddress, Binary, 0, true);
+                            Console.WriteLine($"\n{Disassembled}\n");
+                            break;
+                        }
 
-                        Console.WriteLine($"\n{Disassembled}\n");
+                        Console.WriteLine();
+                        PrintHighlightedDisassembly(Instructions, true, true);
+                        Console.WriteLine();
                     }
                     else
                     {

@@ -6,6 +6,7 @@ using System.Text;
 using System.Threading.Tasks;
 using Brovan.Core.Emulation.OS.Windows;
 using Brovan.Core.Emulation.OS.Linux;
+using Brovan.EmulationMenu;
 using Brovan.Core.Emulation;
 using Brovan.Core.Emulation.Guests;
 using Brovan.Analysis;
@@ -13,6 +14,7 @@ using static Brovan.Variables;
 using static Brovan.Core.Helpers.BinaryHelpers;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 using static Brovan.Core.Helpers.Utils;
 
 namespace Brovan
@@ -267,11 +269,17 @@ namespace Brovan
 
         internal static string FormatInstructionForDebugger(X86Instruction Instruction)
         {
-            string Text = Instruction.Mnemonic ?? string.Empty;
-            if (!string.IsNullOrEmpty(Instruction.Operand))
-                Text += " " + Instruction.Operand;
+            return AsmConsoleFormatter.FormatInstructionForDebugger(Instruction);
+        }
 
-            return $"0x{Instruction.Address:X}: {Text}";
+        internal static void PrintHighlightedInstruction(X86Instruction Instruction, bool Current = false, bool ShowAddress = true)
+        {
+            AsmConsoleRenderer.WriteInstruction(Instruction, Current, ShowAddress);
+        }
+
+        internal static void PrintHighlightedDisassembly(X86Instruction[] Instructions, bool HighlightFirst = true, bool ShowAddress = true)
+        {
+            AsmConsoleRenderer.WriteInstructions(Instructions, HighlightFirst, ShowAddress);
         }
 
         internal static void PrintStoppedInstruction(string Prefix, ulong Address)

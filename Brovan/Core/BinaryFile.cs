@@ -2093,7 +2093,7 @@ namespace Brovan.Core
                         LibraryName = DllName,
                         FunctionName = FunctionName,
                         ImportAddressRVA = ImportAddressRVA,
-                        ImportLookupRVA = ((uint)PE.ImageBase + (ThunkRva + (uint)(i * PointerSize))),
+                        ImportLookupRVA = ((ThunkRva + (uint)(i * PointerSize))),
                         Offset = IATEntryOffset,
                         IsOrdinal = IsOrdinal,
                         Ordinal = IsOrdinal ? (ushort)(ThunkValue & 0xFFFF) : (ushort)0
@@ -2527,7 +2527,7 @@ namespace Brovan.Core
                         if (Section.VirtualAddress < 0 || Section.VirtualSize < 0 || Section.RawSize < 0 || Section.RawOffset < 0 || Section.RawOffset > Data.Length)
                             return BinaryCorruptionStatus.Corrupted;
 
-                        if (Section.Characteristics.HasFlag(SectionCharacteristics.ContainsCode))
+                        if (Section.Characteristics.HasFlag(SectionCharacteristics.ContainsCode) || Section.Characteristics.HasFlag(SectionCharacteristics.MemExecute))
                         {
                             CodeSection = true;
 
