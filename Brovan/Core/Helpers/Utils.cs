@@ -82,7 +82,6 @@ namespace Brovan.Core.Helpers
             }
         }
 
-
         /// <summary>
         /// Prepare the console for virtual terminal processing and Unicode output.
         /// </summary>

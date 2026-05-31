@@ -722,7 +722,7 @@ namespace Brovan.Analysis
         }
 
         [MethodImpl(MethodImplOptions.AggressiveOptimization)]
-        public X86Instruction[] DisassembleBinary(byte[] Code, ulong BaseOffset = 0, BinaryFile Binary = null, int MaxInstructions = 0, bool Emulator = false)
+        public X86Instruction[] DisassembleBinary(byte[] Code, ulong BaseOffset = 0, BinaryFile Binary = null!, int MaxInstructions = 0, bool Emulator = false)
         {
             if (Code == null || Code.Length == 0)
                 throw new NullReferenceException("The code byte array cannot be null or empty.");
@@ -851,7 +851,7 @@ namespace Brovan.Analysis
         }
 
         [MethodImpl(MethodImplOptions.AggressiveOptimization)]
-        public string DisassembleToString(byte[] Code, ulong BaseOffset = 0, BinaryFile Binary = null, int MaxInstructions = 0, bool ShowOffset = true)
+        public string DisassembleToString(byte[] Code, ulong BaseOffset = 0, BinaryFile Binary = null!, int MaxInstructions = 0, bool ShowOffset = true)
         {
             if (Code == null || Code.Length == 0)
                 throw new NullReferenceException("The code byte array cannot be null or empty.");
@@ -924,7 +924,7 @@ namespace Brovan.Analysis
         }
 
         [MethodImpl(MethodImplOptions.AggressiveOptimization)]
-        public string DisassembleToStringEmu(byte[] Code, ulong BaseOffset = 0, BinaryFile Binary = null, int MaxInstructions = 0, bool ShowOffset = true)
+        public string DisassembleToStringEmu(byte[] Code, ulong BaseOffset = 0, BinaryFile Binary = null!, int MaxInstructions = 0, bool ShowOffset = true)
         {
             return DisassembleToString(Code, BaseOffset, Binary, MaxInstructions, ShowOffset);
         }

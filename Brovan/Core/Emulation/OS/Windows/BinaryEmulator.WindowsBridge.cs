@@ -946,7 +946,7 @@ namespace Brovan.Core.Emulation
                     continue;
 
                 if (!_emulator.SetMemoryProtection(AlignedBase, AlignedEnd - AlignedBase, Range.Protection))
-                    return false;
+                    continue;
 
                 uint EffectiveWinProtect = Range.WinProtect != 0 ? Range.WinProtect : (WinHelper != null ? (uint)WinHelper.ConvertInternalToWinProtect(Range.Protection) : 0);
                 AlignedRanges.Add((AlignedBase, AlignedEnd, Range.Protection, EffectiveWinProtect));

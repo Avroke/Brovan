@@ -912,7 +912,7 @@ namespace Brovan.Core.Emulation
         /// <returns>returns true if successful, otherwise false.</returns>
         public bool AddHook(ulong Begin, ulong End, Hooks HookType, IntPtr ReturnHook)
         {
-            if (NoHooks &&!IsWhitelistedHookType(HookType)) return true;
+            if (NoHooks && !IsWhitelistedHookType(HookType)) return true;
             if (DisposedCheck())
                 return false;
 

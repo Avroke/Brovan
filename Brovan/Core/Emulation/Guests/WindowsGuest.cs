@@ -61,7 +61,7 @@ namespace Brovan.Core.Emulation.Guests
         /// </summary>
         /// <param name="Blob">Optional raw blob mapping information.</param>
         /// <param name="BlobLaunchMode">Startup path to use for raw blobs.</param>
-        public WindowsGuest(BlobData Blob = null, WindowsBlobLaunchMode BlobLaunchMode = WindowsBlobLaunchMode.Ntdll)
+        public WindowsGuest(BlobData Blob = null!, WindowsBlobLaunchMode BlobLaunchMode = WindowsBlobLaunchMode.Ntdll)
         {
             _blob = Blob;
             _blobLaunchMode = BlobLaunchMode;
@@ -703,7 +703,7 @@ namespace Brovan.Core.Emulation.Guests
             return Thread?.ThreadId ?? 0;
         }
 
-        public void QueueUserModeException(BinaryEmulator Instance, NTSTATUS Status, ExceptionInformation Info = null)
+        public void QueueUserModeException(BinaryEmulator Instance, NTSTATUS Status, ExceptionInformation Info = null!)
         {
             if (Instance._binary == null || (!IsBlob && Instance._binary.FileFormat != BinaryFormat.PE))
                 return;
@@ -914,7 +914,7 @@ namespace Brovan.Core.Emulation.Guests
             return Thread;
         }
 
-        public EmulatedThread CreateEmulatedThread(BinaryEmulator Instance, ulong StartAddress, string Name = null, ulong Parameter = 0, ulong? StackSizeOverride = null, int BasePriority = 8)
+        public EmulatedThread CreateEmulatedThread(BinaryEmulator Instance, ulong StartAddress, string Name = null!, ulong Parameter = 0, ulong? StackSizeOverride = null, int BasePriority = 8)
         {
             return CreateEmulatedThread(Instance, StartAddress, Name, Parameter, StackSizeOverride, BasePriority, 0, false);
         }

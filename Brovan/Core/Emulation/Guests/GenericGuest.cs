@@ -185,7 +185,7 @@ namespace Brovan.Core.Emulation.Guests
             return 0;
         }
 
-        public EmulatedThread CreateEmulatedThread(BinaryEmulator Instance, ulong StartAddress, string Name = null, ulong Parameter = 0, ulong? StackSizeOverride = null, int BasePriority = 8)
+        public EmulatedThread CreateEmulatedThread(BinaryEmulator Instance, ulong StartAddress, string Name = null!, ulong Parameter = 0, ulong? StackSizeOverride = null, int BasePriority = 8)
         {
             Instance.TriggerEventMessage("[!] Generic guest threading is not supported.", LogFlags.General);
             return null;

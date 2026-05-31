@@ -62,7 +62,7 @@ namespace Brovan.Core.Emulation
                 return string.Equals(A, Other.A, StringComparison.Ordinal) && string.Equals(B, Other.B, StringComparison.Ordinal);
             }
 
-            public override bool Equals(object Obj)
+            public override bool Equals(object? Obj)
             {
                 return Obj is EndpointPairKey Other && Equals(Other);
             }

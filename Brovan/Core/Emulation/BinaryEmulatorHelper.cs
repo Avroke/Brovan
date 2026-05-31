@@ -92,7 +92,7 @@ namespace Brovan.Core.Emulation
         bool HandleInvalidMemory(BinaryEmulator Instance, MemoryType Type, ulong Address, uint Size, ulong Value);
 
         ulong CreateInitialThread(BinaryEmulator Instance);
-        EmulatedThread CreateEmulatedThread(BinaryEmulator Instance, ulong StartAddress, string Name = null, ulong Parameter = 0, ulong? StackSizeOverride = null, int BasePriority = 8);
+        EmulatedThread CreateEmulatedThread(BinaryEmulator Instance, ulong StartAddress, string Name = null!, ulong Parameter = 0, ulong? StackSizeOverride = null, int BasePriority = 8);
         void OnThreadContextLoaded(BinaryEmulator Instance, EmulatedThread Thread);
         bool HasPendingGuestWork(BinaryEmulator Instance, EmulatedThread Thread);
         bool IsHandleSignaled(BinaryEmulator Instance, ulong Handle);

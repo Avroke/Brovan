@@ -509,7 +509,7 @@ namespace Brovan.Core.Emulation
         /// <param name="Data">Data to be emulated based on the architecture and mode.</param>
         /// <exception cref="NullReferenceException"></exception>
         /// <exception cref="UnicornException"></exception>
-        public BinaryEmulator(IGuestEnvironment Guest, BinaryEmulatorSettings Settings, Mode mode, Arch arch, ReadOnlySpan<byte> Data, BinaryFile Binary = null)
+        public BinaryEmulator(IGuestEnvironment Guest, BinaryEmulatorSettings Settings, Mode mode, Arch arch, ReadOnlySpan<byte> Data, BinaryFile Binary = null!)
         {
             if (Data == null || Data.Length == 0)
                 throw new NullReferenceException(nameof(Data));
@@ -1618,7 +1618,7 @@ namespace Brovan.Core.Emulation
             return ContextAddress;
         }
 
-        public EmulatedThread CreateEmulatedThread(ulong StartAddress, string Name = null, ulong Parameter = 0, ulong? StackSizeOverride = null, int BasePriority = 8)
+        public EmulatedThread CreateEmulatedThread(ulong StartAddress, string Name = null!, ulong Parameter = 0, ulong? StackSizeOverride = null, int BasePriority = 8)
         {
             return Guest.CreateEmulatedThread(this, StartAddress, Name, Parameter, StackSizeOverride, BasePriority);
         }
@@ -2987,7 +2987,7 @@ namespace Brovan.Core.Emulation
         /// <param name="Count">Instruction count limit. A value of 0 disables the instruction limit.</param>
         /// <param name="Snapshot">Snapshot to return to it's state after emulation.</param>
         /// <returns>returns true if emulation succeeded, false otherwise.</returns>
-        public bool EmulateFunction(string FunctionName, ulong[] Arguments = null, uint Timeout = 0, uint Count = 0, EmulatorSnapshot Snapshot = null, bool LogErrors = true)
+        public bool EmulateFunction(string FunctionName, ulong[] Arguments = null!, uint Timeout = 0, uint Count = 0, EmulatorSnapshot Snapshot = null, bool LogErrors = true)
         {
             if (Disposed)
                 return false;
@@ -3084,7 +3084,7 @@ namespace Brovan.Core.Emulation
         /// <param name="Count">Instruction count limit. A value of 0 disables the instruction limit.</param>
         /// <param name="Snapshot">Snapshot to return to it's state after emulation.</param>
         /// <returns>returns true if emulation succeeded, false otherwise.</returns>
-        public bool EmulateFunction(BinaryFunction Function, ulong[] Arguments = null, uint Timeout = 0, uint Count = 0, EmulatorSnapshot Snapshot = null, bool LogErrors = true)
+        public bool EmulateFunction(BinaryFunction Function, ulong[] Arguments = null!, uint Timeout = 0, uint Count = 0, EmulatorSnapshot Snapshot = null, bool LogErrors = true)
         {
             if (Disposed)
                 return false;
