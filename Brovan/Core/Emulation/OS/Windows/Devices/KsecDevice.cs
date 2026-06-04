@@ -9,12 +9,12 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private const uint IOCTL_KSEC_RNG = 0x390004;
         private const uint IOCTL_KSEC_RNG_REKEY = 0x390008;
-        private const uint IOCTL_KSEC_ENCRYPT_MEMORY = 0x39000C;
-        private const uint IOCTL_KSEC_DECRYPT_MEMORY = 0x390010;
-        private const uint IOCTL_KSEC_ENCRYPT_MEMORY_CROSS_PROCESS = 0x390014;
-        private const uint IOCTL_KSEC_DECRYPT_MEMORY_CROSS_PROCESS = 0x390018;
-        private const uint IOCTL_KSEC_ENCRYPT_MEMORY_SAME_LOGON = 0x39001C;
-        private const uint IOCTL_KSEC_DECRYPT_MEMORY_SAME_LOGON = 0x390020;
+        private const uint IOCTL_KSEC_ENCRYPT_MEMORY = 0x39000E;
+        private const uint IOCTL_KSEC_DECRYPT_MEMORY = 0x390012;
+        private const uint IOCTL_KSEC_ENCRYPT_MEMORY_CROSS_PROCESS = 0x390016;
+        private const uint IOCTL_KSEC_DECRYPT_MEMORY_CROSS_PROCESS = 0x39001A;
+        private const uint IOCTL_KSEC_ENCRYPT_MEMORY_SAME_LOGON = 0x39001E;
+        private const uint IOCTL_KSEC_DECRYPT_MEMORY_SAME_LOGON = 0x390022;
         private const uint IOCTL_KSEC_CLIENT_HANDSHAKE = 0x390400;
 
         public NTSTATUS Create(BinaryEmulator Instance, string DevicePath, byte[] EaBuffer, out string InternalPath, out WinDeviceDelegate Handler)
