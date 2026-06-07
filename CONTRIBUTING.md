@@ -76,6 +76,10 @@ A good bug report should include:
 
 Clear bug reports make it much easier to fix problems quickly.
 
+## Some stuff to work on
+
+You can look at <a href="https://github.com/AdvDebug/Brovan/blob/main/IDEAS.md">IDEAS.md</a> as a start, containing some ideas that came on the top of my head. but improvements can be made anywhere, as the project still has a lot to be worked on.
+
 ## Need help?
 
 If something is unclear, open an issue for the project. It is fine to ask questions before making a pull request. you can also contact me on discord if you want to ask privately.
