@@ -968,6 +968,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public List<WinSection> WinSections = new List<WinSection>();
         public List<WinPort> WinPorts = new List<WinPort>();
         public List<WinEtwRegistration> WinEtwRegistrations = new List<WinEtwRegistration>();
+        public List<WinJob> WinJobs = new List<WinJob>();
         public ulong EtwNotificationEventHandle;
         internal PebLdrTracker LdrTracker;
         public readonly Dictionary<ulong, WinWindow> WinWindows = new();
@@ -4016,6 +4017,83 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return null;
 
             return HandleManager.GetObjectByHandle<WinEvent>(Handle);
+        }
+
+        public WinHandle CreateJobHandle(string Name, AccessMask Permissions)
+        {
+            if (string.IsNullOrEmpty(Name))
+                Name = "Job_" + GenerateRandomPID().ToString();
+
+            WinJob Job = WinJobs.FirstOrDefault(j => j.Name.Equals(Name, StringComparison.OrdinalIgnoreCase));
+            if (Job == null)
+            {
+                Job = new WinJob { Name = Name };
+                WinJobs.Add(Job);
+            }
+
+            WinHandle Handle = HandleManager.AddHandle(Job, Permissions);
+            WinHandles.Add(Handle);
+            return Handle;
+        }
+
+        public WinJob? GetJobByHandle(ulong Handle, AccessMask Purpose)
+        {
+            if (!HandleManager.HandleExists(Handle, HandleType.JobHandle))
+                return null;
+
+            if (!HandleManager.CheckAccess(Handle, Purpose))
+                return null;
+
+            return HandleManager.GetObjectByHandle<WinJob>(Handle);
+        }
+
+        public bool IsProcessInJob(ulong ProcessHandle, ulong JobHandle)
+        {
+            WinProcess Process = null;
+
+            if (ProcessHandle == HandleManager.CurrentProcess || ProcessHandle == uint.MaxValue)
+                Process = WinProcesses.FirstOrDefault(p => p.PID == PID);
+            else
+                Process = GetProcessByHandle(ProcessHandle, AccessMask.GiveTemp);
+
+            if (Process == null)
+                return false;
+
+            if (JobHandle == 0)
+                return Process.JobObjectHandle != 0;
+
+            WinJob Job = GetJobByHandle(JobHandle, AccessMask.GiveTemp);
+            if (Job == null)
+                return false;
+
+            return Process.JobObjectHandle == JobHandle || Job.ProcessIds.Contains(Process.PID);
+        }
+
+        public NTSTATUS AssignProcessToJobHandle(ulong JobHandle, ulong ProcessHandle)
+        {
+            WinJob Job = GetJobByHandle(JobHandle, AccessMask.GiveTemp);
+            if (Job == null)
+                return NTSTATUS.STATUS_INVALID_HANDLE;
+
+            WinProcess Process;
+
+            if (ProcessHandle == HandleManager.CurrentProcess || ProcessHandle == uint.MaxValue)
+                Process = WinProcesses.FirstOrDefault(p => p.PID == PID);
+            else
+                Process = GetProcessByHandle(ProcessHandle, AccessMask.GiveTemp);
+
+            if (Process == null)
+                return NTSTATUS.STATUS_INVALID_HANDLE;
+
+            if (Process.JobObjectHandle != 0 && Process.JobObjectHandle != JobHandle)
+                return NTSTATUS.STATUS_ACCESS_DENIED;
+
+            Process.JobObjectHandle = JobHandle;
+
+            if (!Job.ProcessIds.Contains(Process.PID))
+                Job.ProcessIds.Add(Process.PID);
+
+            return NTSTATUS.STATUS_SUCCESS;
         }
 
         public WinHandle CreateSemaphoreHandle(string Name, int InitialCount, int MaximumCount, AccessMask Permissions)

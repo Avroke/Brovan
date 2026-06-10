@@ -145,7 +145,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_INVALID_LOCK_RANGE = 0xC00001A1,
         STATUS_MUTANT_NOT_OWNED = 0xC0000046,
         STATUS_SEMAPHORE_LIMIT_EXCEEDED = 0xC0000047,
-        STATUS_NOT_A_REPARSE_POINT = 0xC0000275
+        STATUS_NOT_A_REPARSE_POINT = 0xC0000275,
+        STATUS_PROCESS_IN_JOB = 0x00000124,
     }
 
     public enum THREADINFOCLASS : int
@@ -778,6 +779,27 @@ namespace Brovan.Core.Emulation.OS.Windows
         KeyValuePartialInformationAlign64 = 4
     }
 
+    public enum JOBOBJECTINFOCLASS : uint
+    {
+        JobObjectBasicAccountingInformation = 1,
+        JobObjectBasicLimitInformation = 2,
+        JobObjectBasicProcessIdList = 3,
+        JobObjectBasicUIRestrictions = 4,
+        JobObjectEndOfJobTimeInformation = 6,
+        JobObjectAssociateCompletionPortInformation = 7,
+        JobObjectBasicAndIoAccountingInformation = 8,
+        JobObjectExtendedLimitInformation = 9,
+        JobObjectGroupInformation = 11,
+        JobObjectNotificationLimitInformation = 12,
+        JobObjectLimitViolationInformation = 13,
+        JobObjectGroupInformationEx = 14,
+        JobObjectCpuRateControlInformation = 15,
+        JobObjectNetRateControlInformation = 32,
+        JobObjectNotificationLimitInformation2 = 33,
+        JobObjectLimitViolationInformation2 = 34,
+        JobObjectReserved1Information = 35
+    }
+
     [Flags]
     public enum AccessMask : uint
     {
@@ -895,7 +917,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         WaitCompletionPacketHandle = 12,
         Window = 13,
         EtwRegistrationHandle = 14,
-        SemaphoreHandle = 15
+        SemaphoreHandle = 15,
+        JobHandle = 16
     }
 
     public sealed class WinToken : IHandleObject
@@ -989,6 +1012,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public BinaryArchitecture Arch;
         public WinToken PrimaryToken;
         public ulong InstrumentationCallback;
+        public ulong JobObjectHandle;
 
         public string ObjectId => PID.ToString();
         public HandleType ObjectType => HandleType.ProcessHandle;
@@ -1529,5 +1553,54 @@ namespace Brovan.Core.Emulation.OS.Windows
         public PortAlpcHandler Handler;
         public string ObjectId => Name;
         public HandleType ObjectType => HandleType.PortHandle;
+    }
+
+    public sealed class WinJob : IHandleObject
+    {
+        public string Name;
+        public bool IsTerminated;
+        public List<uint> ProcessIds = new List<uint>();
+
+        public ulong PerProcessUserTimeLimit;
+        public ulong PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public ulong MinimumWorkingSetSize;
+        public ulong MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public ulong Affinity;
+        public uint PriorityClass;
+        public uint SchedulingClass;
+
+        public uint UiRestrictionsClass;
+        public uint EndOfJobTimeAction;
+
+        public ulong CompletionPort;
+        public ulong CompletionKey;
+
+        public ulong ProcessMemoryLimit;
+        public ulong JobMemoryLimit;
+        public ulong PeakProcessMemoryUsed;
+        public ulong PeakJobMemoryUsed;
+
+        public ulong IoReadBytesLimit;
+        public ulong IoWriteBytesLimit;
+        public ulong NotificationPerJobUserTimeLimit;
+        public ulong NotificationJobMemoryLimit;
+        public uint NotificationRateControlTolerance;
+        public uint NotificationRateControlToleranceInterval;
+        public uint NotificationLimitFlags;
+
+        public uint CpuRateControlFlags;
+        public uint CpuRateControlValue;
+        public uint CpuRateControlWeight;
+        public ushort CpuRateControlMinRate;
+        public ushort CpuRateControlMaxRate;
+
+        public ulong NetRateControlMaxBandwidth;
+        public uint NetRateControlFlags;
+        public byte NetRateControlDscpTag;
+
+        public string ObjectId => Name;
+        public HandleType ObjectType => HandleType.JobHandle;
     }
 }
