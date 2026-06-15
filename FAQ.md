@@ -38,8 +38,8 @@ At a high level, the primary way a binary can interact with the host is through 
 * Path traversal attempts are blocked.
 * Symlink-based escapes are prevented.
 * Direct writes to host files are not permitted.
-* Windows cannot access linux's VFS and vice versa
-* Terminal output are done with the `LightEscaped` option which prevents some dangerous console output but only allow safe text-styling and ANSI escape.
+* Windows cannot access linux's VFS and vice versa.
+* Terminal output is filtered using the `LightEscaped` option, which blocks potentially dangerous console control sequences while allowing safe text styling and ANSI escape sequences.
 
 Read access is more permissive, but only when the host environment is compatible with the emulated binary. When compatibility requirements are not met, filesystem operations generally fall back to Brovan's VirtualFS implementation instead.
 
