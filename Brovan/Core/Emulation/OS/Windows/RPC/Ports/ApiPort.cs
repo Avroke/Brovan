@@ -125,6 +125,30 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
             if (ApiIndex == 0)
             {
+                if (TryReadClientConnectData(Reply, out uint ServerId, out _, out _))
+                {
+                    switch (ServerId)
+                    {
+                        case CSRSRV_INDEX:
+                            HandleCsrSrvConnect(Reply, Instance);
+                            break;
+                        case BASESRV_INDEX:
+                            HandleBaseSrvConnect(Reply, Instance);
+                            break;
+                        case CONSRV_INDEX:
+                            HandleConSrvConnect(Reply, Instance);
+                            break;
+                        case USERSRV_INDEX:
+                            HandleUserSrvConnect(Reply, Instance);
+                            break;
+                        default:
+                            WriteCsrStatus(Reply, NTSTATUS.STATUS_SUCCESS);
+                            break;
+                    }
+
+                    return Reply;
+                }
+
                 switch (DllIndex)
                 {
                     case CSRSRV_INDEX:
@@ -246,28 +270,30 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
             TryReadClientConnectData(Reply, out uint ServerId, out ulong ConnectionInfo, out uint ConnectionInfoSize);
 
-            if (!Instance.WinHelper.EnsureUserSharedInfo(out ulong psi, out ulong aheList, out uint handleEntrySize))
+            if (!Instance.WinHelper.EnsureUserSharedInfo(out ulong psi, out ulong aheList, out _))
                 return;
 
-            const int UserConnectSharedInfoOffset = 0x08;
+            const int UserConnectHeaderSize = 0x08;
+            const int UserConnectSharedInfoSize = 0x80;
+            const int UserConnectTotalSize = UserConnectHeaderSize + UserConnectSharedInfoSize;
 
-            Span<byte> Data = stackalloc byte[0x28];
+            Span<byte> Data = stackalloc byte[UserConnectTotalSize];
             Data.Clear();
-            WriteU64(Data, UserConnectSharedInfoOffset + 0x00, psi);
-            WriteU64(Data, UserConnectSharedInfoOffset + 0x08, aheList);
-            WriteU32(Data, UserConnectSharedInfoOffset + 0x10, handleEntrySize);
-            WriteU32(Data, UserConnectSharedInfoOffset + 0x14, 0u);
-            WriteU64(Data, UserConnectSharedInfoOffset + 0x18, 0UL);
 
-            WriteU64(Reply, OffCsrDataStart + 0x000, psi);
-            WriteU64(Reply, OffCsrDataStart + 0x008, aheList);
-            WriteU32(Reply, OffCsrDataStart + 0x010, handleEntrySize);
-            WriteU32(Reply, OffCsrDataStart + 0x014, 0u);
-            WriteU64(Reply, OffCsrDataStart + 0x018, 0UL);
+            if (ConnectionInfo != 0 && ConnectionInfoSize >= (uint)UserConnectHeaderSize && Instance.IsRegionMapped(ConnectionInfo, (ulong)UserConnectHeaderSize))
+            {
+                Span<byte> ExistingHeader = stackalloc byte[UserConnectHeaderSize];
+                if (Instance.ReadMemory(ConnectionInfo, ExistingHeader, (uint)UserConnectHeaderSize))
+                    ExistingHeader.CopyTo(Data);
+            }
+
+            WriteU64(Data, UserConnectHeaderSize + 0x00, psi);
+            WriteU64(Data, UserConnectHeaderSize + 0x08, aheList);
+            WriteU64(Data, UserConnectHeaderSize + 0x10, 0UL);
+            WriteU64(Data, UserConnectHeaderSize + 0x18, 0UL);
 
             uint UserConnectWriteSize = Math.Max(ConnectionInfoSize, (uint)Data.Length);
             TryWriteClientConnectData(Reply, Instance, Data, ServerId, ConnectionInfo, UserConnectWriteSize);
-            Instance.WinHelper.InitializeUser32SharedInfoGlobals(psi, aheList, handleEntrySize);
         }
 
         private static void HandleCsrSrvApi(byte[] Reply, uint ApiIndex, BinaryEmulator Instance)

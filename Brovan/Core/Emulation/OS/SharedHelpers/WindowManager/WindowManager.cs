@@ -1,0 +1,121 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace Brovan.Core.Emulation.OS.SharedHelpers
+{
+    public enum LinuxDisplayBackend
+    {
+        None,
+        X11,
+        Wayland
+    }
+
+    public enum WindowState
+    {
+        Normal,
+        Minimized,
+        Maximized,
+        Fullscreen
+    }
+
+    public sealed record WindowOptions
+    {
+        public string Title { get; init; } = string.Empty;
+        public string AppId { get; init; } = string.Empty;
+        public int Width { get; init; } = 800;
+        public int Height { get; init; } = 600;
+        public int X { get; init; } = 0;
+        public int Y { get; init; } = 0;
+        public bool Visible { get; init; } = true;
+        public bool Resizable { get; init; } = true;
+        public bool Decorated { get; init; } = true;
+        public bool Center { get; init; } = false;
+        public WindowState State { get; init; } = WindowState.Normal;
+    }
+
+    public struct WindowData
+    {
+        public string Title;
+        public string Class;
+        public int Width;
+        public int Height;
+        public int X;
+        public int Y;
+        public bool Show;
+        public bool Resizable;
+        public bool Decorated;
+        public bool Center;
+        public WindowState State;
+
+        public WindowOptions ToOptions()
+        {
+            return new WindowOptions
+            {
+                Title = Title ?? string.Empty,
+                AppId = Class ?? string.Empty,
+                Width = Width > 0 ? Width : 800,
+                Height = Height > 0 ? Height : 600,
+                X = X,
+                Y = Y,
+                Visible = Show,
+                Resizable = Resizable,
+                Decorated = Decorated,
+                Center = Center,
+                State = State,
+            };
+        }
+    }
+
+    public interface IDisplayConnection : IDisposable
+    {
+        IWindow CreateWindow(WindowOptions options);
+
+        void PumpEvents();
+
+        bool IsConnected { get; }
+
+        IntPtr NativeHandle { get; }
+    }
+
+    public interface IWindow : IDisposable
+    {
+        string Title { get; set; }
+
+        int Width { get; set; }
+
+        int Height { get; set; }
+
+        bool Visible { get; set; }
+
+        WindowState State { get; set; }
+
+        bool Resizable { get; }
+
+        bool Decorated { get; set; }
+
+        void Present();
+
+        IntPtr NativeHandle { get; }
+
+        void Show();
+
+        void Hide();
+
+        void Close();
+    }
+
+    public static class WindowManagerFactory
+    {
+        public static IDisplayConnection Create()
+        {
+            if (OperatingSystem.IsWindows())
+                return new WindowsWinManager();
+
+            if (OperatingSystem.IsLinux())
+                return new LinuxWinManager();
+
+            throw new PlatformNotSupportedException("No supported window backend is available for this platform.");
+        }
+    }
+}

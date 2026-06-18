@@ -892,4 +892,52 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
     }
+
+    internal static class Win32kMessageOnlyParent
+    {
+        public const ulong HwndMessage = 0xFFFFFFFFFFFFFFFDUL;
+
+        public static WinWindow Ensure(BinaryEmulator Instance)
+        {
+            if (Instance == null)
+                return null;
+
+            if (Instance.WinHelper.GetWindow(HwndMessage) is WinWindow Existing)
+                return Existing;
+
+            WinWindow Window = new WinWindow
+            {
+                Hwnd = HwndMessage,
+                ClassName = "#HWND_MESSAGE_PARENT",
+                Title = string.Empty,
+                Visible = false,
+                Destroyed = false,
+                Minimized = false,
+                Maximized = false,
+                Style = 0,
+                ExStyle = 0,
+                X = 0,
+                Y = 0,
+                Width = 0,
+                Height = 0,
+                OwnerThreadId = 0,
+                ParentHwnd = 0,
+                OwnerHwnd = 0,
+                InstanceHandle = 0,
+                MenuHandle = 0,
+                CreateParam = 0,
+                UserData = 0,
+                ClientWindowAddress = 0,
+                ClientClassAddress = 0,
+                ClientTextAddress = 0,
+                ClientTextBytes = 0,
+                UserHandleEntryAddress = 0,
+                WndProc = 0,
+                Dirty = false,
+            };
+
+            Instance.WinHelper.WinWindows[HwndMessage] = Window;
+            return Window;
+        }
+    }
 }

@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using Brovan.Core.Helpers;
 using System.Text;
 using System.Buffers.Binary;
+using Brovan.Core.Emulation.OS.SharedHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
@@ -15,6 +16,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private Random RandomGen = new Random();
         private Dictionary<uint, bool> PIDs = new Dictionary<uint, bool>();
+        private IDisplayConnection DesktopDisplay;
+        private IWindow DesktopWindow;
+        private string DesktopWindowTitle;
 
         private static IReadOnlyDictionary<string, IWinDevice> BuildDeviceRegistry()
         {
@@ -981,6 +985,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const ulong UserWindowObjectSize = 0x200;
         private const ulong UserClassObjectSize = 0x100;
         private const ulong UserDesktopInfoSize = 0x48;
+        private const ulong UserSharedInfoMirrorSize = 0x1B54;
         private const byte UserHandleTypeWindow = 1;
         private ushort NextUserHandleIndex = 1;
         private ushort NextUserHandleUniq = 1;
@@ -989,6 +994,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private ulong UserDesktopInfoAddress;
         private ulong UserDesktopOwnerAddress;
         private ulong UserSharedInfoMirrorAddress;
+        private ulong UserSharedDelta;
         public ulong ActiveWindow;
         public ulong FocusWindow;
 
@@ -1019,6 +1025,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 }
             }
+
+            DesktopWindowTitle = string.IsNullOrWhiteSpace(FileName) ? "Brovan" : FileName;
 
             if (Binary.PE.Subsystem.HasFlag(Subsystem.WindowsCui))
             {
@@ -2290,50 +2298,53 @@ namespace Brovan.Core.Emulation.OS.Windows
             return ServerInfo != 0 && HandleTable != 0;
         }
 
-        /// <summary>
-        /// Seeds the user32 globals that cache USER shared handle-table metadata for ValidateHwnd.
-        /// </summary>
-        public void InitializeUser32SharedInfoGlobals(ulong ServerInfo, ulong HandleTable, uint EntrySize)
+        public bool TryBuildUserConnectData(uint Version, uint DispatchCount, uint RequestedSize, out byte[] Data)
         {
-            WinModule User32 = WinModules.FirstOrDefault(Module =>
-                Module != null &&
-                Module.MappedBase != 0 &&
-                Module.SizeOfImage != 0 &&
-                string.Equals(Module.Name, "user32.dll", StringComparison.OrdinalIgnoreCase));
+            Data = null;
 
-            if (User32 == null)
-                return;
+            if (!EnsureUserSharedInfo(out ulong ServerInfo, out ulong HandleTable, out _))
+                return false;
 
-            ulong Base = User32.MappedBase;
-            WriteUser32Global(Base + 0xD0278, HandleTable, 8);
-            WriteUser32Global(Base + 0xD0280, EntrySize, 4);
+            ulong DisplayInfo = EnsureUserDesktopInfo();
+            if (DisplayInfo == 0)
+                return false;
 
-            Span<byte> SharedInfo = Shared.GetSpan(0x28);
-            SharedInfo.Slice(0, 0x28).Clear();
-            WriteU64(SharedInfo, 0x00, ServerInfo);
-            WriteU64(SharedInfo, 0x08, HandleTable);
-            WriteU32(SharedInfo, 0x10, EntrySize);
-            WriteU32(SharedInfo, 0x14, 0u);
-            WriteU64(SharedInfo, 0x18, 0UL);
-            Emulator._emulator.WriteMemory(Base + 0xD0480, SharedInfo.Slice(0, 0x28));
-        }
+            ulong SharedDelta = ComputeUserSharedDelta(ServerInfo, HandleTable, DisplayInfo);
+            if (SharedDelta == 0)
+                SharedDelta = 0x1000;
 
-        private void WriteUser32Global(ulong Address, ulong Value, uint Size)
-        {
-            if (Size == 4)
+            int PointerSize = Emulator._binary.Architecture == BinaryArchitecture.x64 ? 8 : 4;
+            int HeaderSize = PointerSize == 8 ? 0x10 : 0x0C;
+            int MinimumSize = HeaderSize + (PointerSize * 4);
+            int BufferSize = RequestedSize > (uint)MinimumSize ? (int)RequestedSize : MinimumSize;
+
+            Data = new byte[BufferSize];
+            WriteU32(Data, 0x00, Version);
+            WriteU32(Data, 0x04, 0u);
+            WriteU32(Data, 0x08, DispatchCount);
+
+            if (PointerSize == 8)
             {
-                if (Emulator.IsRegionMapped(Address, 4))
-                    Emulator._emulator.WriteMemory(Address, (uint)Value, 4);
-                return;
+                WriteU64(Data, 0x10, ServerInfo);
+                WriteU64(Data, 0x18, HandleTable);
+                WriteU64(Data, 0x20, DisplayInfo);
+                WriteU64(Data, 0x28, SharedDelta);
+            }
+            else
+            {
+                WriteU32(Data, 0x0C, (uint)ServerInfo);
+                WriteU32(Data, 0x10, (uint)HandleTable);
+                WriteU32(Data, 0x14, (uint)DisplayInfo);
+                WriteU32(Data, 0x18, (uint)SharedDelta);
             }
 
-            if (Emulator.IsRegionMapped(Address, 8))
-                Emulator._emulator.WriteMemory(Address, Value, 8);
+            UserSharedDelta = SharedDelta;
+            return true;
         }
 
         private ulong EnsureUserServerInfo()
         {
-            if (UserServerInfoAddress != 0 && Emulator.IsRegionMapped(UserServerInfoAddress, 0x1C00))
+            if (UserServerInfoAddress != 0 && Emulator.IsRegionMapped(UserServerInfoAddress, UserSharedInfoMirrorSize))
                 return UserServerInfoAddress;
 
             const ulong Size = 0x2000;
@@ -2344,7 +2355,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!WriteZeroMemory(Address, (uint)Size))
                 return 0;
 
-            Emulator._emulator.WriteMemory(Address + 0x04, UserHandleEntryCount, 4);
             Emulator._emulator.WriteMemory(Address + 0x08, (ulong)UserHandleEntryCount, 8);
 
             UserServerInfoAddress = Address;
@@ -2395,6 +2405,28 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Emulator._emulator.WriteMemory(ThreadInfo + 0x828, 0UL, 8);
                 Emulator._emulator.WriteMemory(ThreadInfo + 0x838, 0u, 4);
             }
+        }
+
+        private ulong ComputeUserSharedDelta(ulong ServerInfo, ulong HandleTable, ulong DisplayInfo)
+        {
+            ulong Delta = 0;
+
+            if (ServerInfo != 0 && HandleTable != 0)
+            {
+                Delta = HandleTable > ServerInfo ? HandleTable - ServerInfo : ServerInfo - HandleTable;
+            }
+
+            if (Delta == 0 && ServerInfo != 0 && DisplayInfo != 0)
+            {
+                Delta = DisplayInfo > ServerInfo ? DisplayInfo - ServerInfo : ServerInfo - DisplayInfo;
+            }
+
+            if (Delta == 0 && HandleTable != 0 && DisplayInfo != 0)
+            {
+                Delta = HandleTable > DisplayInfo ? HandleTable - DisplayInfo : DisplayInfo - HandleTable;
+            }
+
+            return Delta;
         }
 
         private ulong EnsureUserDesktopInfo()
@@ -2637,7 +2669,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private IEnumerable<ulong> EnumerateUserSharedInfoMirrors()
         {
-            if (UserSharedInfoMirrorAddress != 0 && Emulator.IsRegionMapped(UserSharedInfoMirrorAddress, 0x1B54))
+            if (UserSharedInfoMirrorAddress != 0 && Emulator.IsRegionMapped(UserSharedInfoMirrorAddress, UserSharedInfoMirrorSize))
             {
                 yield return UserSharedInfoMirrorAddress;
                 yield break;
@@ -2812,10 +2844,77 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         /// <summary>
-        /// Retained as a presentation boundary for future renderers. The current Win32k layer does not render windows to the host console.
+        /// Presents the current foreground Win32k window through the host window manager.
         /// </summary>
         public void PresentDesktop()
         {
+            try
+            {
+                EnsureDesktopWindow();
+                if (DesktopWindow == null)
+                    return;
+
+                WinWindow Window = GetWindow(GetForegroundWindow());
+                if (Window == null)
+                    Window = GetTopLevelWindow();
+
+                if (Window != null)
+                {
+                    DesktopWindow.Title = string.IsNullOrWhiteSpace(Window.Title) ? DesktopWindowTitle : Window.Title;
+                    DesktopWindow.Width = Math.Max((int)Window.Width, 1);
+                    DesktopWindow.Height = Math.Max((int)Window.Height, 1);
+                    DesktopWindow.Visible = Window.Visible && !Window.Destroyed;
+                    DesktopWindow.State = Window.Minimized ? WindowState.Minimized : Window.Maximized ? WindowState.Maximized : WindowState.Normal;
+                }
+                else
+                {
+                    DesktopWindow.Title = DesktopWindowTitle;
+                    DesktopWindow.Visible = true;
+                    DesktopWindow.State = WindowState.Normal;
+                }
+
+                DesktopWindow.Present();
+            }
+            catch
+            {
+            }
+        }
+
+        private void EnsureDesktopWindow()
+        {
+            if (DesktopWindow != null)
+                return;
+
+            if (DesktopDisplay == null)
+                DesktopDisplay = WindowManagerFactory.Create();
+
+            if (DesktopDisplay == null || !DesktopDisplay.IsConnected)
+                return;
+
+            DesktopWindow = DesktopDisplay.CreateWindow(new WindowOptions
+            {
+                Title = DesktopWindowTitle,
+                AppId = "Brovan",
+                Width = 1280,
+                Height = 720,
+                Visible = true,
+                Resizable = true,
+                Decorated = true,
+                Center = true,
+                State = WindowState.Normal,
+            });
+        }
+
+        private WinWindow GetTopLevelWindow()
+        {
+            for (int i = TopLevelWindows.Count - 1; i >= 0; i--)
+            {
+                ulong Hwnd = TopLevelWindows[i];
+                if (WinWindows.TryGetValue(Hwnd, out WinWindow Window) && Window != null && !Window.Destroyed)
+                    return Window;
+            }
+
+            return null;
         }
 
         public WinWindow GetWindow(ulong Hwnd)
@@ -2861,6 +2960,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public bool DestroyWindow(ulong Hwnd)
         {
+            if (Hwnd == Win32kMessageOnlyParent.HwndMessage)
+                return false;
+
             if (!WinWindows.TryGetValue(Hwnd, out WinWindow Window))
                 return false;
 
@@ -3199,37 +3301,37 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private void InitializeSyntheticRegistryDefaults()
         {
-            Dictionary<string, bool> KeyCache = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+            Dictionary<string, bool> KeyCache = new Dictionary<string, bool>(128, StringComparer.OrdinalIgnoreCase);
             Hive DefaultHive = RegHives != null && RegHives.Length != 0 ? RegHives[0] : null;
             string UserProfile = "C:\\Users\\User";
             string UserRoot = "\\Registry\\User\\" + CurrentUserSid;
             string ExplorerRoot = UserRoot + "\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer";
 
-            AddSyntheticRegistryKey("\\Registry\\User", KeyCache, DefaultHive);
-            AddSyntheticRegistryKey(UserRoot, KeyCache, DefaultHive);
-            AddSyntheticRegistryKey("\\Registry\\User\\.DEFAULT", KeyCache, DefaultHive);
-            AddSyntheticRegistryKey(UserRoot + "\\" + CurrentUserSid, KeyCache, DefaultHive);
-            AddSyntheticRegistryKey(ExplorerRoot + "\\SessionInfo\\0", KeyCache, DefaultHive);
-            SetSyntheticRegistryString(UserRoot + "\\Volatile Environment", "USERPROFILE", 2, UserProfile, KeyCache, DefaultHive);
-            SetSyntheticRegistryString(UserRoot + "\\Volatile Environment", "HOMEDRIVE", 1, "C:", KeyCache, DefaultHive);
-            SetSyntheticRegistryString(UserRoot + "\\Volatile Environment", "HOMEPATH", 1, "\\Users\\User", KeyCache, DefaultHive);
-            SetSyntheticRegistryString(UserRoot + "\\Volatile Environment", "APPDATA", 2, "%USERPROFILE%\\AppData\\Roaming", KeyCache, DefaultHive);
-            SetSyntheticRegistryString(UserRoot + "\\Volatile Environment", "LOCALAPPDATA", 2, "%USERPROFILE%\\AppData\\Local", KeyCache, DefaultHive);
+            AddSyntheticRegistryKeyTrusted("\\Registry\\User", KeyCache, DefaultHive);
+            AddSyntheticRegistryKeyTrusted(UserRoot, KeyCache, DefaultHive);
+            AddSyntheticRegistryKeyTrusted("\\Registry\\User\\.DEFAULT", KeyCache, DefaultHive);
+            AddSyntheticRegistryKeyTrusted(UserRoot + "\\" + CurrentUserSid, KeyCache, DefaultHive);
+            AddSyntheticRegistryKeyTrusted(ExplorerRoot + "\\SessionInfo\\0", KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(UserRoot + "\\Volatile Environment", "USERPROFILE", 2, UserProfile, KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(UserRoot + "\\Volatile Environment", "HOMEDRIVE", 1, "C:", KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(UserRoot + "\\Volatile Environment", "HOMEPATH", 1, "\\Users\\User", KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(UserRoot + "\\Volatile Environment", "APPDATA", 2, "%USERPROFILE%\\AppData\\Roaming", KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(UserRoot + "\\Volatile Environment", "LOCALAPPDATA", 2, "%USERPROFILE%\\AppData\\Local", KeyCache, DefaultHive);
 
             string ProfileListKey = "\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList\\" + CurrentUserSid;
-            AddSyntheticRegistryKey(ProfileListKey, KeyCache, DefaultHive);
-            SetSyntheticRegistryString(ProfileListKey, "ProfileImagePath", 2, "%SystemDrive%\\Users\\User", KeyCache, DefaultHive);
-            SetSyntheticRegistryDword(ProfileListKey, "Flags", 0, KeyCache, DefaultHive);
-            SetSyntheticRegistryDword(ProfileListKey, "State", 0, KeyCache, DefaultHive);
-            SetSyntheticRegistryDword(ProfileListKey, "RefCount", 0, KeyCache, DefaultHive);
+            AddSyntheticRegistryKeyTrusted(ProfileListKey, KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(ProfileListKey, "ProfileImagePath", 2, "%SystemDrive%\\Users\\User", KeyCache, DefaultHive);
+            SetSyntheticRegistryDwordTrusted(ProfileListKey, "Flags", 0, KeyCache, DefaultHive);
+            SetSyntheticRegistryDwordTrusted(ProfileListKey, "State", 0, KeyCache, DefaultHive);
+            SetSyntheticRegistryDwordTrusted(ProfileListKey, "RefCount", 0, KeyCache, DefaultHive);
 
             InitializeSyntheticWindowsVersionRegistryDefaults(KeyCache, DefaultHive);
             InitializeSyntheticKnownFolderDescriptions(UserProfile, KeyCache, DefaultHive);
 
             string KnownFolderSettings = "\\Registry\\Machine\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\KnownFolderSettings";
-            AddSyntheticRegistryKey(KnownFolderSettings, KeyCache, DefaultHive);
-            SetSyntheticRegistryDword(KnownFolderSettings, "CacheTimeout", 0, KeyCache, DefaultHive);
-            SetSyntheticRegistryDword(KnownFolderSettings, "BackgroundRetryInterval", 0, KeyCache, DefaultHive);
+            AddSyntheticRegistryKeyTrusted(KnownFolderSettings, KeyCache, DefaultHive);
+            SetSyntheticRegistryDwordTrusted(KnownFolderSettings, "CacheTimeout", 0, KeyCache, DefaultHive);
+            SetSyntheticRegistryDwordTrusted(KnownFolderSettings, "BackgroundRetryInterval", 0, KeyCache, DefaultHive);
 
             AddSyntheticDirectory(UserProfile);
             AddSyntheticDirectory(UserProfile + "\\AppData");
@@ -3246,8 +3348,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             string UserShellFolders = ExplorerRoot + "\\User Shell Folders";
             string ShellFolders = ExplorerRoot + "\\Shell Folders";
 
-            AddSyntheticRegistryKey(UserShellFolders, KeyCache, DefaultHive);
-            AddSyntheticRegistryKey(ShellFolders, KeyCache, DefaultHive);
+            AddSyntheticRegistryKeyTrusted(UserShellFolders, KeyCache, DefaultHive);
+            AddSyntheticRegistryKeyTrusted(ShellFolders, KeyCache, DefaultHive);
 
             (string Name, string ExpandValue, string ResolvedValue)[] Folders =
             {
@@ -3272,57 +3374,57 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             foreach ((string Name, string ExpandValue, string ResolvedValue) in Folders)
             {
-                SetSyntheticRegistryString(UserShellFolders, Name, 2, ExpandValue, KeyCache, DefaultHive);
-                SetSyntheticRegistryString(ShellFolders, Name, 1, ResolvedValue, KeyCache, DefaultHive);
+                SetSyntheticRegistryStringTrusted(UserShellFolders, Name, 2, ExpandValue, KeyCache, DefaultHive);
+                SetSyntheticRegistryStringTrusted(ShellFolders, Name, 1, ResolvedValue, KeyCache, DefaultHive);
                 AddSyntheticDirectory(ResolvedValue);
             }
 
             string MachineExplorerRoot = "\\Registry\\Machine\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer";
             string CommonUserShellFolders = MachineExplorerRoot + "\\User Shell Folders";
             string CommonShellFolders = MachineExplorerRoot + "\\Shell Folders";
-            AddSyntheticRegistryKey(CommonUserShellFolders, KeyCache, DefaultHive);
-            AddSyntheticRegistryKey(CommonShellFolders, KeyCache, DefaultHive);
+            AddSyntheticRegistryKeyTrusted(CommonUserShellFolders, KeyCache, DefaultHive);
+            AddSyntheticRegistryKeyTrusted(CommonShellFolders, KeyCache, DefaultHive);
 
-            SetSyntheticRegistryString(CommonUserShellFolders, "Common AppData", 2, "%ProgramData%", KeyCache, DefaultHive);
-            SetSyntheticRegistryString(CommonShellFolders, "Common AppData", 1, "C:\\ProgramData", KeyCache, DefaultHive);
-            SetSyntheticRegistryString(CommonUserShellFolders, "Common Desktop", 2, "%PUBLIC%\\Desktop", KeyCache, DefaultHive);
-            SetSyntheticRegistryString(CommonShellFolders, "Common Desktop", 1, "C:\\Users\\Public\\Desktop", KeyCache, DefaultHive);
-            SetSyntheticRegistryString(CommonUserShellFolders, "Common Documents", 2, "%PUBLIC%\\Documents", KeyCache, DefaultHive);
-            SetSyntheticRegistryString(CommonShellFolders, "Common Documents", 1, "C:\\Users\\Public\\Documents", KeyCache, DefaultHive);
-            SetSyntheticRegistryString(CommonUserShellFolders, "Common Programs", 2, "%ProgramData%\\Microsoft\\Windows\\Start Menu\\Programs", KeyCache, DefaultHive);
-            SetSyntheticRegistryString(CommonShellFolders, "Common Programs", 1, "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs", KeyCache, DefaultHive);
-            SetSyntheticRegistryString(CommonUserShellFolders, "Common Start Menu", 2, "%ProgramData%\\Microsoft\\Windows\\Start Menu", KeyCache, DefaultHive);
-            SetSyntheticRegistryString(CommonShellFolders, "Common Start Menu", 1, "C:\\ProgramData\\Microsoft\\Windows\\Start Menu", KeyCache, DefaultHive);
-            SetSyntheticRegistryString(CommonUserShellFolders, "Common Startup", 2, "%ProgramData%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup", KeyCache, DefaultHive);
-            SetSyntheticRegistryString(CommonShellFolders, "Common Startup", 1, "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Startup", KeyCache, DefaultHive);
-            SetSyntheticRegistryString(CommonUserShellFolders, "Common Templates", 2, "%ProgramData%\\Microsoft\\Windows\\Templates", KeyCache, DefaultHive);
-            SetSyntheticRegistryString(CommonShellFolders, "Common Templates", 1, "C:\\ProgramData\\Microsoft\\Windows\\Templates", KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(CommonUserShellFolders, "Common AppData", 2, "%ProgramData%", KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(CommonShellFolders, "Common AppData", 1, "C:\\ProgramData", KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(CommonUserShellFolders, "Common Desktop", 2, "%PUBLIC%\\Desktop", KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(CommonShellFolders, "Common Desktop", 1, "C:\\Users\\Public\\Desktop", KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(CommonUserShellFolders, "Common Documents", 2, "%PUBLIC%\\Documents", KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(CommonShellFolders, "Common Documents", 1, "C:\\Users\\Public\\Documents", KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(CommonUserShellFolders, "Common Programs", 2, "%ProgramData%\\Microsoft\\Windows\\Start Menu\\Programs", KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(CommonShellFolders, "Common Programs", 1, "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs", KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(CommonUserShellFolders, "Common Start Menu", 2, "%ProgramData%\\Microsoft\\Windows\\Start Menu", KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(CommonShellFolders, "Common Start Menu", 1, "C:\\ProgramData\\Microsoft\\Windows\\Start Menu", KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(CommonUserShellFolders, "Common Startup", 2, "%ProgramData%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup", KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(CommonShellFolders, "Common Startup", 1, "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Startup", KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(CommonUserShellFolders, "Common Templates", 2, "%ProgramData%\\Microsoft\\Windows\\Templates", KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(CommonShellFolders, "Common Templates", 1, "C:\\ProgramData\\Microsoft\\Windows\\Templates", KeyCache, DefaultHive);
         }
 
         private void InitializeSyntheticWindowsVersionRegistryDefaults(Dictionary<string, bool> KeyCache, Hive DefaultHive)
         {
             const string CurrentVersionKey = "\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion";
-            AddSyntheticRegistryKey(CurrentVersionKey, KeyCache, DefaultHive);
-            SetSyntheticRegistryString(CurrentVersionKey, "ProductName", 1, WindowsVersionInfo.ProductName, KeyCache, DefaultHive);
-            SetSyntheticRegistryString(CurrentVersionKey, "EditionID", 1, WindowsVersionInfo.EditionId, KeyCache, DefaultHive);
-            SetSyntheticRegistryString(CurrentVersionKey, "CompositionEditionID", 1, WindowsVersionInfo.EditionId, KeyCache, DefaultHive);
-            SetSyntheticRegistryString(CurrentVersionKey, "InstallationType", 1, WindowsVersionInfo.InstallationType, KeyCache, DefaultHive);
-            SetSyntheticRegistryString(CurrentVersionKey, "DisplayVersion", 1, WindowsVersionInfo.DisplayVersion, KeyCache, DefaultHive);
-            SetSyntheticRegistryString(CurrentVersionKey, "ReleaseId", 1, WindowsVersionInfo.DisplayVersion, KeyCache, DefaultHive);
-            SetSyntheticRegistryString(CurrentVersionKey, "CurrentVersion", 1, WindowsVersionInfo.CurrentVersion, KeyCache, DefaultHive);
-            SetSyntheticRegistryString(CurrentVersionKey, "CurrentBuild", 1, WindowsVersionInfo.BuildNumber.ToString(), KeyCache, DefaultHive);
-            SetSyntheticRegistryString(CurrentVersionKey, "CurrentBuildNumber", 1, WindowsVersionInfo.BuildNumber.ToString(), KeyCache, DefaultHive);
-            SetSyntheticRegistryDword(CurrentVersionKey, "CurrentMajorVersionNumber", WindowsVersionInfo.MajorVersion, KeyCache, DefaultHive);
-            SetSyntheticRegistryDword(CurrentVersionKey, "CurrentMinorVersionNumber", WindowsVersionInfo.MinorVersion, KeyCache, DefaultHive);
-            SetSyntheticRegistryDword(CurrentVersionKey, "UBR", WindowsVersionInfo.UpdateBuildRevision, KeyCache, DefaultHive);
-            SetSyntheticRegistryString(CurrentVersionKey, "BuildBranch", 1, WindowsVersionInfo.BuildBranch, KeyCache, DefaultHive);
-            SetSyntheticRegistryString(CurrentVersionKey, "BuildLab", 1, WindowsVersionInfo.BuildLab, KeyCache, DefaultHive);
-            SetSyntheticRegistryString(CurrentVersionKey, "BuildLabEx", 1, WindowsVersionInfo.BuildLabEx, KeyCache, DefaultHive);
-            SetSyntheticRegistryString(CurrentVersionKey, "CurrentType", 1, "Multiprocessor Free", KeyCache, DefaultHive);
+            AddSyntheticRegistryKeyTrusted(CurrentVersionKey, KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(CurrentVersionKey, "ProductName", 1, WindowsVersionInfo.ProductName, KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(CurrentVersionKey, "EditionID", 1, WindowsVersionInfo.EditionId, KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(CurrentVersionKey, "CompositionEditionID", 1, WindowsVersionInfo.EditionId, KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(CurrentVersionKey, "InstallationType", 1, WindowsVersionInfo.InstallationType, KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(CurrentVersionKey, "DisplayVersion", 1, WindowsVersionInfo.DisplayVersion, KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(CurrentVersionKey, "ReleaseId", 1, WindowsVersionInfo.DisplayVersion, KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(CurrentVersionKey, "CurrentVersion", 1, WindowsVersionInfo.CurrentVersion, KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(CurrentVersionKey, "CurrentBuild", 1, WindowsVersionInfo.BuildNumber.ToString(), KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(CurrentVersionKey, "CurrentBuildNumber", 1, WindowsVersionInfo.BuildNumber.ToString(), KeyCache, DefaultHive);
+            SetSyntheticRegistryDwordTrusted(CurrentVersionKey, "CurrentMajorVersionNumber", WindowsVersionInfo.MajorVersion, KeyCache, DefaultHive);
+            SetSyntheticRegistryDwordTrusted(CurrentVersionKey, "CurrentMinorVersionNumber", WindowsVersionInfo.MinorVersion, KeyCache, DefaultHive);
+            SetSyntheticRegistryDwordTrusted(CurrentVersionKey, "UBR", WindowsVersionInfo.UpdateBuildRevision, KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(CurrentVersionKey, "BuildBranch", 1, WindowsVersionInfo.BuildBranch, KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(CurrentVersionKey, "BuildLab", 1, WindowsVersionInfo.BuildLab, KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(CurrentVersionKey, "BuildLabEx", 1, WindowsVersionInfo.BuildLabEx, KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(CurrentVersionKey, "CurrentType", 1, "Multiprocessor Free", KeyCache, DefaultHive);
 
             const string ProductOptionsKey = "\\Registry\\Machine\\System\\CurrentControlSet\\Control\\ProductOptions";
-            AddSyntheticRegistryKey(ProductOptionsKey, KeyCache, DefaultHive);
-            SetSyntheticRegistryString(ProductOptionsKey, "ProductType", 1, WindowsVersionInfo.RegistryProductType, KeyCache, DefaultHive);
+            AddSyntheticRegistryKeyTrusted(ProductOptionsKey, KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(ProductOptionsKey, "ProductType", 1, WindowsVersionInfo.RegistryProductType, KeyCache, DefaultHive);
         }
 
         private void AddSyntheticRegistryKey(string NtPath, Dictionary<string, bool> KeyCache, Hive DefaultHive)
@@ -3363,6 +3465,74 @@ namespace Brovan.Core.Emulation.OS.Windows
                 KeyCache[Current] = true;
             }
         }
+        private void AddSyntheticRegistryKeyTrusted(string NtPath, Dictionary<string, bool> KeyCache, Hive DefaultHive)
+        {
+            NtPath = NormalizeNtRegistryPath(NtPath);
+            if (string.IsNullOrEmpty(NtPath))
+                return;
+
+            string[] Parts = NtPath.Trim('\\').Split('\\', StringSplitOptions.RemoveEmptyEntries);
+            string Current = string.Empty;
+
+            foreach (string Part in Parts)
+            {
+                Current += "\\" + Part;
+                if (Current.Equals("\\Registry", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                if (TempRegistryKeys.Contains(Current))
+                {
+                    KeyCache[Current] = true;
+                    continue;
+                }
+
+                if (KeyCache.TryGetValue(Current, out bool Exists) && Exists)
+                    continue;
+
+                TempRegistryKeys.Add(Current);
+                DeletedRegistryKeys.Remove(Current);
+                Hive Hive = GetHiveByNtPath(Current) ?? DefaultHive;
+                if (Hive != null)
+                    TempRegistryKeyHives[Current] = Hive;
+                KeyCache[Current] = true;
+            }
+        }
+
+        private void SetSyntheticRegistryStringTrusted(string NtPath, string ValueName, int Type, string Value, Dictionary<string, bool> KeyCache, Hive DefaultHive)
+        {
+            byte[] Data = Encoding.Unicode.GetBytes((Value ?? string.Empty) + "\0");
+            SetSyntheticRegistryValueTrusted(NtPath, ValueName, Type, Data, KeyCache, DefaultHive);
+        }
+
+        private void SetSyntheticRegistryDwordTrusted(string NtPath, string ValueName, uint Value, Dictionary<string, bool> KeyCache, Hive DefaultHive)
+        {
+            byte[] Data = BitConverter.GetBytes(Value);
+            SetSyntheticRegistryValueTrusted(NtPath, ValueName, 4, Data, KeyCache, DefaultHive);
+        }
+
+        private void SetSyntheticRegistryValueTrusted(string NtPath, string ValueName, int Type, byte[] Data, Dictionary<string, bool> KeyCache, Hive DefaultHive)
+        {
+            AddSyntheticRegistryKeyTrusted(NtPath, KeyCache, DefaultHive);
+
+            NtPath = NormalizeNtRegistryPath(NtPath);
+            if (string.IsNullOrEmpty(NtPath))
+                return;
+
+            if (ValueName == null)
+                ValueName = string.Empty;
+
+            if (!TempRegistryValues.TryGetValue(NtPath, out Dictionary<string, ValueNode> Values))
+            {
+                Values = new Dictionary<string, ValueNode>(StringComparer.OrdinalIgnoreCase);
+                TempRegistryValues[NtPath] = Values;
+            }
+
+            Values[ValueName] = new ValueNode { Name = ValueName, Type = Type, Data = Data ?? Array.Empty<byte>() };
+
+            if (DeletedRegistryValues.TryGetValue(NtPath, out HashSet<string> DeletedValues))
+                DeletedValues.Remove(ValueName);
+        }
+
 
         private void AddSyntheticDirectory(string Path)
         {
@@ -3429,7 +3599,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private void InitializeSyntheticKnownFolderDescriptions(string UserProfile, Dictionary<string, bool> KeyCache, Hive DefaultHive)
         {
             const string Root = "\\Registry\\Machine\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FolderDescriptions";
-            AddSyntheticRegistryKey(Root, KeyCache, DefaultHive);
+            AddSyntheticRegistryKeyTrusted(Root, KeyCache, DefaultHive);
 
             AddSyntheticKnownFolder(Root, "{5E6C858F-0E22-4760-9AFE-EA3317B67173}", "Profile", string.Empty, UserProfile, 4, KeyCache, DefaultHive);
             AddSyntheticKnownFolder(Root, "{F1B32785-6FBA-4FCF-9D55-7B8E7F157091}", "Local AppData", "{5E6C858F-0E22-4760-9AFE-EA3317B67173}", "AppData\\Local", 4, KeyCache, DefaultHive);
@@ -3445,25 +3615,25 @@ namespace Brovan.Core.Emulation.OS.Windows
         private void AddSyntheticKnownFolder(string Root, string Guid, string Name, string ParentFolder, string RelativePath, uint Category, Dictionary<string, bool> KeyCache, Hive DefaultHive)
         {
             string Key = Root + "\\" + Guid;
-            AddSyntheticRegistryKey(Key, KeyCache, DefaultHive);
-            SetSyntheticRegistryString(Key, "Name", 1, Name, KeyCache, DefaultHive);
-            SetSyntheticRegistryDword(Key, "Category", Category, KeyCache, DefaultHive);
-            SetSyntheticRegistryDword(Key, "Attributes", 0x10, KeyCache, DefaultHive);
-            SetSyntheticRegistryDword(Key, "DefinitionFlags", 0, KeyCache, DefaultHive);
-            SetSyntheticRegistryString(Key, "LocalizedName", 2, Name, KeyCache, DefaultHive);
-            SetSyntheticRegistryString(Key, "Tooltip", 2, Name, KeyCache, DefaultHive);
-            SetSyntheticRegistryString(Key, "Icon", 2, "%SystemRoot%\\system32\\imageres.dll,-3", KeyCache, DefaultHive);
-            SetSyntheticRegistryString(Key, "Security", 1, string.Empty, KeyCache, DefaultHive);
+            AddSyntheticRegistryKeyTrusted(Key, KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(Key, "Name", 1, Name, KeyCache, DefaultHive);
+            SetSyntheticRegistryDwordTrusted(Key, "Category", Category, KeyCache, DefaultHive);
+            SetSyntheticRegistryDwordTrusted(Key, "Attributes", 0x10, KeyCache, DefaultHive);
+            SetSyntheticRegistryDwordTrusted(Key, "DefinitionFlags", 0, KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(Key, "LocalizedName", 2, Name, KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(Key, "Tooltip", 2, Name, KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(Key, "Icon", 2, "%SystemRoot%\\system32\\imageres.dll,-3", KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(Key, "Security", 1, string.Empty, KeyCache, DefaultHive);
 
             if (!string.IsNullOrEmpty(ParentFolder))
-                SetSyntheticRegistryString(Key, "ParentFolder", 1, ParentFolder, KeyCache, DefaultHive);
+                SetSyntheticRegistryStringTrusted(Key, "ParentFolder", 1, ParentFolder, KeyCache, DefaultHive);
 
             if (!string.IsNullOrEmpty(RelativePath))
-                SetSyntheticRegistryString(Key, "RelativePath", 1, RelativePath, KeyCache, DefaultHive);
+                SetSyntheticRegistryStringTrusted(Key, "RelativePath", 1, RelativePath, KeyCache, DefaultHive);
 
             string PropertyBag = Key + "\\PropertyBag";
-            AddSyntheticRegistryKey(PropertyBag, KeyCache, DefaultHive);
-            SetSyntheticRegistryString(PropertyBag, "ThisPCPolicy", 1, "Show", KeyCache, DefaultHive);
+            AddSyntheticRegistryKeyTrusted(PropertyBag, KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(PropertyBag, "ThisPCPolicy", 1, "Show", KeyCache, DefaultHive);
         }
 
         private bool IsRegistryPathDeleted(string NtPath)
