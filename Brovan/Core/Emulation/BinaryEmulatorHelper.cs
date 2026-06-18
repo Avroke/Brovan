@@ -1,4 +1,5 @@
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
@@ -1459,26 +1460,16 @@ namespace Brovan.Core.Emulation
         private static IReadOnlyDictionary<uint, IWinSyscall> CachedSyscallDictionary = null;
         private static IReadOnlyDictionary<uint, IWinSyscall> CachedSyscallDictionaryx86 = null;
 
-
-        /// <summary>
-        /// Searches for the syscall number in the bytes.
-        /// </summary>
-        /// <param name="bytes">the bytes to search for the syscall in.</param>
-        /// <returns>returns the syscall number if successful, otherwise zero.</returns>
-        public static uint TryExtractSyscallByte(byte[] bytes)
+        public static uint TryExtractSyscallByte(ReadOnlySpan<byte> bytes)
         {
             for (int i = 0; i < bytes.Length; i++)
             {
                 if (bytes[i] == 0xB8) // mov eax,
                 {
-                    try
-                    {
-                        return BitConverter.ToUInt32(bytes, i + 1);
-                    }
-                    catch
-                    {
+                    if ((uint)(i + 5) > (uint)bytes.Length)
                         return uint.MaxValue;
-                    }
+
+                    return BinaryPrimitives.ReadUInt32LittleEndian(bytes.Slice(i + 1, 4));
                 }
             }
             return 0;
@@ -1501,31 +1492,6 @@ namespace Brovan.Core.Emulation
         }
 
         /// <summary>
-        /// Build a table of export functions.
-        /// </summary>
-        /// <param name="Exports">Binary functions which is the exports.</param>
-        /// <returns>returns a table where the key is the name of the function which points to it's own <see cref="BinaryFunction"/>.</returns>
-        private static Dictionary<string, BinaryFunction> BuildExportMap(BinaryFunction[] Exports)
-        {
-            Dictionary<string, BinaryFunction> Map = new Dictionary<string, BinaryFunction>(StringComparer.OrdinalIgnoreCase);
-
-            if (Exports == null || Exports.Length == 0)
-                return Map;
-
-            for (int i = 0; i < Exports.Length; i++)
-            {
-                BinaryFunction Export = Exports[i];
-                if (string.IsNullOrEmpty(Export.FunctionName))
-                    continue;
-
-                if (!Map.ContainsKey(Export.FunctionName))
-                    Map.Add(Export.FunctionName, Export);
-            }
-
-            return Map;
-        }
-
-        /// <summary>
         /// Build a dictionary with the syscalls.
         /// </summary>
         /// <param name="BinaryArch">Binary architecture to get for syscalls.</param>
@@ -1537,185 +1503,141 @@ namespace Brovan.Core.Emulation
             else if (BinaryArch == BinaryArchitecture.x86 && CachedSyscallDictionaryx86 != null)
                 return CachedSyscallDictionaryx86;
 
-            string[] SupportedFunctions = WinSyscallRegistry.SupportedFunctions;
-            string[] SupportedFunctionsWin32k = WinSyscallRegistry.SupportedFunctionsWin32k;
+            HashSet<string> SupportedFunctions = new HashSet<string>(WinSyscallRegistry.SupportedFunctions, StringComparer.OrdinalIgnoreCase);
+            HashSet<string> SupportedFunctionsWin32k = new HashSet<string>(WinSyscallRegistry.SupportedFunctionsWin32k, StringComparer.OrdinalIgnoreCase);
 
             Dictionary<uint, IWinSyscall> SyscallDictionary = new Dictionary<uint, IWinSyscall>();
-            try
+
+            void RegisterSyscall(uint SyscallNumber, string FunctionName, bool Win32k)
             {
-                if (GeneralHelper.IsWindows)
+                try
                 {
-                    IntPtr NtdllModule = NativeWinImports.GetModuleHandleA("ntdll.dll");
-                    if (NtdllModule == IntPtr.Zero)
+                    IWinSyscall Instance = Win32k ? WinSyscallRegistry.CreateWin32k(FunctionName) : WinSyscallRegistry.Create(FunctionName);
+                    if (Instance == null)
+                        return;
+
+                    SyscallDictionary[SyscallNumber] = Instance;
+                }
+                catch (Exception Ex)
+                {
+                    Utils.LogError($"[WinSyscallBuilder] Failed to instantiate {FunctionName}: {Ex.Message}");
+                }
+            }
+
+            void AddSyscallsFromExports(BinaryFunction[] Exports, ReadOnlySpan<byte> ModuleData, HashSet<string> Supported, bool Win32k)
+            {
+                if (Exports == null || Exports.Length == 0)
+                    return;
+
+                for (int i = 0; i < Exports.Length; i++)
+                {
+                    BinaryFunction Export = Exports[i];
+                    if (string.IsNullOrEmpty(Export.FunctionName) || !Supported.Contains(Export.FunctionName))
+                        continue;
+
+                    int Offset = unchecked((int)Export.Offset);
+                    if ((uint)Offset >= (uint)ModuleData.Length)
+                        continue;
+
+                    int StubLen = Math.Min(40, ModuleData.Length - Offset);
+                    if (StubLen < 8)
+                        continue;
+
+                    uint SyscallNumber = TryExtractSyscallByte(ModuleData.Slice(Offset, StubLen));
+                    if (SyscallNumber == uint.MaxValue)
+                        continue;
+
+                    RegisterSyscall(SyscallNumber, Export.FunctionName, Win32k);
+                }
+            }
+
+            void AddSyscallsFromModule(HashSet<string> Functions, IntPtr Module, bool Win32k)
+            {
+                if (Module == IntPtr.Zero)
+                    return;
+
+                foreach (string SupportedFunction in Functions)
+                {
+                    IntPtr hFunction = NativeWinImports.GetProcAddress(Module, SupportedFunction);
+                    if (hFunction == IntPtr.Zero)
+                        continue;
+
+                    uint SyscallNumber;
+                    unsafe
                     {
-                        Utils.LogError("[WinSyscallBuilder] ntdll.dll was not found inside the process..?");
-                        Environment.Exit(0);
+                        ReadOnlySpan<byte> Function = new ReadOnlySpan<byte>((void*)hFunction, 40);
+                        SyscallNumber = TryExtractSyscallByte(Function);
                     }
 
-                    IntPtr Win32uModule = NativeWinImports.GetModuleHandleA("win32u.dll");
+                    if (SyscallNumber == uint.MaxValue)
+                        continue;
+
+                    RegisterSyscall(SyscallNumber, SupportedFunction, Win32k);
+                }
+            }
+
+            if (GeneralHelper.IsWindows)
+            {
+                IntPtr NtdllModule = NativeWinImports.GetModuleHandleA("ntdll.dll");
+                if (NtdllModule == IntPtr.Zero)
+                {
+                    Utils.LogError("[WinSyscallBuilder] ntdll.dll was not found inside the process..?");
+                    Environment.Exit(0);
+                }
+
+                IntPtr Win32uModule = NativeWinImports.GetModuleHandleA("win32u.dll");
+                if (Win32uModule == IntPtr.Zero)
+                {
+                    Win32uModule = NativeWinImports.LoadLibraryA("win32u.dll");
                     if (Win32uModule == IntPtr.Zero)
                     {
-                        Win32uModule = NativeWinImports.LoadLibraryA("win32u.dll");
-                        if (Win32uModule == IntPtr.Zero)
-                        {
-                            Utils.LogError("[WinSyscallsBuilder] Couldn't get a handle to win32u.dll");
-                            Utils.PrintHighlight("[-] Couldn't get a handle to win32u.dll, expect UI-related syscalls to not work.", true);
-                        }
-                    }
-
-                    if (NtdllModule != IntPtr.Zero)
-                    {
-                        foreach (string SupportedFunction in SupportedFunctions)
-                        {
-                            IntPtr hFunction = NativeWinImports.GetProcAddress(NtdllModule, SupportedFunction);
-                            if (hFunction == IntPtr.Zero)
-                                continue;
-
-                            byte[] Function = new byte[40];
-                            Marshal.Copy(hFunction, Function, 0, 40);
-                            uint SyscallNumber = TryExtractSyscallByte(Function);
-                            Array.Clear(Function, 0, Function.Length);
-
-                            if (SyscallNumber == uint.MaxValue)
-                                continue;
-
-                            try
-                            {
-                                IWinSyscall Instance = WinSyscallRegistry.Create(SupportedFunction);
-                                if (Instance == null)
-                                    continue;
-
-                                SyscallDictionary[SyscallNumber] = Instance;
-                            }
-                            catch (Exception Ex)
-                            {
-                                Utils.LogError($"[WinSyscallBuilder] Failed to instantiate {SupportedFunction}: {Ex.Message}");
-                            }
-                        }
-                    }
-
-                    if (Win32uModule != IntPtr.Zero)
-                    {
-                        foreach (string SupportedWin32k in SupportedFunctionsWin32k)
-                        {
-                            IntPtr hFunction = NativeWinImports.GetProcAddress(Win32uModule, SupportedWin32k);
-                            if (hFunction == IntPtr.Zero)
-                                continue;
-
-                            byte[] Function = new byte[40];
-                            Marshal.Copy(hFunction, Function, 0, 40);
-                            uint SyscallNumber = TryExtractSyscallByte(Function);
-                            Array.Clear(Function, 0, Function.Length);
-
-                            if (SyscallNumber == uint.MaxValue)
-                                continue;
-
-                            try
-                            {
-                                IWinSyscall Instance = WinSyscallRegistry.CreateWin32k(SupportedWin32k);
-                                if (Instance == null)
-                                    continue;
-
-                                SyscallDictionary[SyscallNumber] = Instance;
-                            }
-                            catch (Exception Ex)
-                            {
-                                Utils.LogError($"[WinSyscallBuilder] Failed to instantiate {SupportedWin32k}: {Ex.Message}");
-                            }
-                        }
-                    }
-                }
-                else
-                {
-                    string NtdllPath = Path.Combine(GeneralHelper.WindowsLibsPath, "ntdll.dll");
-                    string Win32uPath = Path.Combine(GeneralHelper.WindowsLibsPath, "win32u.dll");
-
-                    if (!File.Exists(NtdllPath))
-                    {
-                        Utils.LogError($"[WinSyscallBuilder] Missing ntdll.dll: {NtdllPath}");
-                        Utils.PrintHighlight("[-] Missing ntdll.dll in WindowsLibs. Syscalls won't work.", true);
-                        return SyscallDictionary;
-                    }
-
-                    using BinaryFile Ntdll = new BinaryFile(NtdllPath, true);
-                    using BinaryFile Win32u = File.Exists(Win32uPath) ? new BinaryFile(Win32uPath, true) : null;
-
-                    if (Win32u == null)
-                        Utils.PrintHighlight("[-] win32u.dll not found in WindowsLibs, UI-related syscalls may not work.", true);
-
-                    ReadOnlySpan<byte> NtdllData = Ntdll.GetBinaryData();
-                    ReadOnlySpan<byte> Win32uData = Win32u != null ? Win32u.GetBinaryData() : ReadOnlySpan<byte>.Empty;
-
-                    Dictionary<string, BinaryFunction> NtdllExports = BuildExportMap(Ntdll.ExportFunctions);
-                    Dictionary<string, BinaryFunction> Win32uExports = Win32u != null ? BuildExportMap(Win32u.ExportFunctions) : null;
-
-                    foreach (string SupportedFunction in SupportedFunctions)
-                    {
-                        bool IsNtUser = SupportedFunction.StartsWith("NtUser", StringComparison.OrdinalIgnoreCase);
-
-                        Dictionary<string, BinaryFunction> ExportMap = IsNtUser ? Win32uExports : NtdllExports;
-                        if (ExportMap == null)
-                            continue;
-
-                        if (!ExportMap.TryGetValue(SupportedFunction, out BinaryFunction Export))
-                            continue;
-
-                        int Offset = unchecked((int)Export.Offset);
-                        ReadOnlySpan<byte> ModuleData = IsNtUser ? Win32uData : NtdllData;
-
-                        if ((uint)Offset >= (uint)ModuleData.Length)
-                            continue;
-
-                        int StubLen = Math.Min(40, ModuleData.Length - Offset);
-                        if (StubLen < 8)
-                            continue;
-
-                        byte[] Stub = new byte[StubLen];
-                        ModuleData.Slice(Offset, StubLen).CopyTo(Stub);
-
-                        uint SyscallNumber = TryExtractSyscallByte(Stub);
-                        if (SyscallNumber == uint.MaxValue)
-                            continue;
-
-                        try
-                        {
-                            IWinSyscall Instance = WinSyscallRegistry.Create(SupportedFunction);
-                            if (Instance == null)
-                                continue;
-
-                            SyscallDictionary[SyscallNumber] = Instance;
-                        }
-                        catch (Exception Ex)
-                        {
-                            Utils.LogError($"[WinSyscallBuilder] Failed to instantiate {SupportedFunction}: {Ex.Message}");
-                        }
-                    }
-
-                    if (Ntdll != null)
-                    {
-                        Ntdll.Dispose();
-                    }
-
-                    if (Win32u != null)
-                    {
-                        Win32u.Dispose();
+                        Utils.LogError("[WinSyscallsBuilder] Couldn't get a handle to win32u.dll");
+                        Utils.PrintHighlight("[-] Couldn't get a handle to win32u.dll, expect UI-related syscalls to not work.", true);
                     }
                 }
 
-                if (SyscallDictionary.Count > 0)
-                {
-                    if (BinaryArch == BinaryArchitecture.x64)
-                        CachedSyscallDictionary = new Dictionary<uint, IWinSyscall>(SyscallDictionary);
-                    else
-                        CachedSyscallDictionaryx86 = new Dictionary<uint, IWinSyscall>(SyscallDictionary);
-                }
+                if (NtdllModule != IntPtr.Zero)
+                    AddSyscallsFromModule(SupportedFunctions, NtdllModule, false);
 
-                return SyscallDictionary;
+                if (Win32uModule != IntPtr.Zero)
+                    AddSyscallsFromModule(SupportedFunctionsWin32k, Win32uModule, true);
             }
-            finally
+            else
             {
+                string NtdllPath = Path.Combine(GeneralHelper.WindowsLibsPath, "ntdll.dll");
+                string Win32uPath = Path.Combine(GeneralHelper.WindowsLibsPath, "win32u.dll");
 
+                if (!File.Exists(NtdllPath))
+                {
+                    Utils.LogError($"[WinSyscallBuilder] Missing ntdll.dll: {NtdllPath}");
+                    Utils.PrintHighlight("[-] Missing ntdll.dll in WindowsLibs. Syscalls won't work.", true);
+                    return SyscallDictionary;
+                }
+
+                using BinaryFile Ntdll = new BinaryFile(NtdllPath, true);
+                using BinaryFile Win32u = File.Exists(Win32uPath) ? new BinaryFile(Win32uPath, true) : null;
+
+                if (Win32u == null)
+                    Utils.PrintHighlight("[-] win32u.dll not found in WindowsLibs, UI-related syscalls may not work.", true);
+
+                ReadOnlySpan<byte> NtdllData = Ntdll.GetBinaryData();
+                ReadOnlySpan<byte> Win32uData = Win32u != null ? Win32u.GetBinaryData() : ReadOnlySpan<byte>.Empty;
+
+                AddSyscallsFromExports(Ntdll.ExportFunctions, NtdllData, SupportedFunctions, false);
+
+                if (Win32u != null)
+                    AddSyscallsFromExports(Win32u.ExportFunctions, Win32uData, SupportedFunctionsWin32k, true);
             }
+
+            if (SyscallDictionary.Count > 0)
+            {
+                if (BinaryArch == BinaryArchitecture.x64)
+                    CachedSyscallDictionary = new Dictionary<uint, IWinSyscall>(SyscallDictionary);
+                else
+                    CachedSyscallDictionaryx86 = new Dictionary<uint, IWinSyscall>(SyscallDictionary);
+            }
+
+            return SyscallDictionary;
         }
     }
 }
