@@ -77,6 +77,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
                 if (Instance.WinHelper.FocusWindow == 0)
                     Instance.WinHelper.FocusWindow = Window.Hwnd;
+
+                Instance.WinHelper.SetThreadWindowContext(Window);
             }
 
             Instance.WinHelper.PresentDesktop();

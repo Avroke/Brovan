@@ -985,6 +985,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const ulong UserWindowObjectSize = 0x200;
         private const ulong UserClassObjectSize = 0x100;
         private const ulong UserDesktopInfoSize = 0x48;
+        private const ulong Win32ClientInfoX64Base = 0x800;
+        private const ulong Win32ClientInfoX86Base = 0x6CC;
+        private const int Win32ClientInfoDesktopSlot = 4;
+        private const int Win32ClientInfoActiveWindowSlot = 8;
+        private const int Win32ClientInfoActiveWindowPointerSlot = 9;
         private const ulong UserSharedInfoMirrorSize = 0x1B54;
         private const byte UserHandleTypeWindow = 1;
         private ushort NextUserHandleIndex = 1;
@@ -2384,7 +2389,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// </summary>
         public void EnsureUserClientThreadInfo(EmulatedThread Thread, ulong ThreadInfo)
         {
-            if (Thread == null || ThreadInfo == 0)
+            if (Thread == null)
                 return;
 
             ulong Teb = WinEmulatedThread.GetState(Thread).Teb;
@@ -2395,16 +2400,51 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (DesktopInfo == 0)
                 return;
 
-            Emulator._emulator.WriteMemory(Teb + 0x820, DesktopInfo, 8);
-            Emulator._emulator.WriteMemory(Teb + 0x828, 0UL, 8);
-            Emulator._emulator.WriteMemory(Teb + 0x838, 0u, 4);
+            WriteWin32ClientInfoSlot(Teb, Win32ClientInfoDesktopSlot, DesktopInfo);
+        }
 
-            if (Emulator.IsRegionMapped(ThreadInfo + 0x840, 8))
+        public void SetThreadWindowContext(WinWindow Window)
+        {
+            if (Window == null)
+                return;
+
+            EmulatedThread Thread = Emulator.CurrentThread;
+            if (Thread == null)
+                return;
+
+            ulong ClientWindow = Window.ClientWindowAddress != 0 ? Window.ClientWindowAddress : GetUserWindowClientAddress(Window);
+            if (ClientWindow == 0)
+                return;
+
+            SetThreadWindowContext(Thread, Window.Hwnd, ClientWindow);
+        }
+
+        public void SetThreadWindowContext(EmulatedThread Thread, ulong ActiveHandle, ulong ActiveWindowPointer)
+        {
+            if (Thread == null)
+                return;
+
+            ulong Teb = WinEmulatedThread.GetState(Thread).Teb;
+            if (Teb == 0)
+                return;
+
+            EnsureUserClientThreadInfo(Thread, 0);
+            WriteWin32ClientInfoSlot(Teb, Win32ClientInfoActiveWindowSlot, ActiveHandle);
+            WriteWin32ClientInfoSlot(Teb, Win32ClientInfoActiveWindowPointerSlot, ActiveWindowPointer);
+        }
+
+        private void WriteWin32ClientInfoSlot(ulong Teb, int Slot, ulong Value)
+        {
+            if (Teb == 0)
+                return;
+
+            if (Emulator._binary.Architecture == BinaryArchitecture.x64)
             {
-                Emulator._emulator.WriteMemory(ThreadInfo + 0x820, DesktopInfo, 8);
-                Emulator._emulator.WriteMemory(ThreadInfo + 0x828, 0UL, 8);
-                Emulator._emulator.WriteMemory(ThreadInfo + 0x838, 0u, 4);
+                Emulator._emulator.WriteMemory(Teb + Win32ClientInfoX64Base + ((ulong)Slot * 8UL), Value, 8);
+                return;
             }
+
+            Emulator._emulator.WriteMemory(Teb + Win32ClientInfoX86Base + ((ulong)Slot * 4UL), (uint)Value, 4);
         }
 
         private ulong ComputeUserSharedDelta(ulong ServerInfo, ulong HandleTable, ulong DisplayInfo)
@@ -2952,6 +2992,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (!TopLevelWindows.Contains(Window.Hwnd))
                     TopLevelWindows.Add(Window.Hwnd);
             }
+
+            if (Window.Visible && Window.ParentHwnd == 0)
+                SetThreadWindowContext(Window);
 
             Window.Dirty = true;
             MaterializeUserWindow(Window);

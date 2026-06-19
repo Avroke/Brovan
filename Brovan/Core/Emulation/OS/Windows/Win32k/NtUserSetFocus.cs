@@ -20,7 +20,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             ulong Previous = Instance.WinHelper.FocusWindow;
             Instance.WinHelper.FocusWindow = Hwnd;
             if (Hwnd != 0)
+            {
                 Instance.WinHelper.ActiveWindow = Hwnd;
+                WinWindow Window = Instance.WinHelper.GetWindow(Hwnd);
+                if (Window != null)
+                    Instance.WinHelper.SetThreadWindowContext(Window);
+            }
 
             Instance.SetLastWinError(0);
             Instance.SetRawSyscallReturn(Previous);
