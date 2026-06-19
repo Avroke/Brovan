@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using System.Runtime.InteropServices;
 using Brovan.Core.Helpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
@@ -15,6 +16,64 @@ namespace Brovan.Core.Emulation.OS.Windows
         public uint InputLength;
         public uint OutputLength;
         public ulong Information;
+    }
+
+    [StructLayout(LayoutKind.Explicit, Pack = 1)]
+    public struct UserSharedDisplayInfo
+    {
+        [FieldOffset(0x00)]
+        public uint Type;
+
+        [FieldOffset(0x08)]
+        public ulong PrimaryMonitor;
+    }
+
+    [StructLayout(LayoutKind.Explicit, Pack = 1)]
+    public struct UserPrimaryMonitorInfo
+    {
+        public const int Size = 0x40;
+
+        [FieldOffset(0x00)]
+        public ulong Header;
+
+        [FieldOffset(0x08)]
+        public ulong Reserved1;
+
+        [FieldOffset(0x10)]
+        public ulong Reserved2;
+
+        [FieldOffset(0x18)]
+        public uint Padding18;
+
+        [FieldOffset(0x1C)]
+        public int MonitorLeft;
+
+        [FieldOffset(0x20)]
+        public int MonitorTop;
+
+        [FieldOffset(0x24)]
+        public int MonitorRight;
+
+        [FieldOffset(0x28)]
+        public int MonitorBottom;
+
+        [FieldOffset(0x2C)]
+        public int WorkLeft;
+
+        [FieldOffset(0x30)]
+        public int WorkTop;
+
+        [FieldOffset(0x34)]
+        public int WorkRight;
+
+        [FieldOffset(0x38)]
+        public int WorkBottom;
+
+        [FieldOffset(0x3C)]
+        public ushort DpiX;
+
+        [FieldOffset(0x3E)]
+        public ushort DpiY;
     }
 
     public class WinModule

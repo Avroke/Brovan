@@ -134,6 +134,9 @@ namespace Brovan
 
         [DllImport("kernel32.dll", SetLastError = true)]
         public static extern bool DeviceIoControl(SafeFileHandle Handle, uint IoControlCode, IntPtr InBuffer, int InBufferSize, byte[] OutBuffer, int OutBufferSize, out int BytesReturned, IntPtr Overlapped);
+
+        [DllImport("user32.dll")]
+        public static extern int GetSystemMetrics(int nIndex);
     }
 
     internal class NativeUnixImports

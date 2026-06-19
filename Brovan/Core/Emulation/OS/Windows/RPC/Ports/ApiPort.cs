@@ -270,7 +270,11 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
             TryReadClientConnectData(Reply, out uint ServerId, out ulong ConnectionInfo, out uint ConnectionInfoSize);
 
-            if (!Instance.WinHelper.EnsureUserSharedInfo(out ulong psi, out ulong aheList, out _))
+            if (!Instance.WinHelper.EnsureUserSharedInfo(out ulong psi, out ulong aheList, out uint entrySize))
+                return;
+
+            ulong DisplayInfo = Instance.WinHelper.EnsureUserDesktopInfo();
+            if (DisplayInfo == 0)
                 return;
 
             const int UserConnectHeaderSize = 0x08;
@@ -289,8 +293,8 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
             WriteU64(Data, UserConnectHeaderSize + 0x00, psi);
             WriteU64(Data, UserConnectHeaderSize + 0x08, aheList);
-            WriteU64(Data, UserConnectHeaderSize + 0x10, 0UL);
-            WriteU64(Data, UserConnectHeaderSize + 0x18, 0UL);
+            WriteU32(Data, UserConnectHeaderSize + 0x10, entrySize);
+            WriteU64(Data, UserConnectHeaderSize + 0x18, DisplayInfo);
 
             uint UserConnectWriteSize = Math.Max(ConnectionInfoSize, (uint)Data.Length);
             TryWriteClientConnectData(Reply, Instance, Data, ServerId, ConnectionInfo, UserConnectWriteSize);

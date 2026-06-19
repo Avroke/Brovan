@@ -985,12 +985,15 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const ulong UserWindowObjectSize = 0x200;
         private const ulong UserClassObjectSize = 0x100;
         private const ulong UserDesktopInfoSize = 0x48;
+        private const ulong UserPrimaryMonitorSize = 0x1000;
         private const ulong Win32ClientInfoX64Base = 0x800;
         private const ulong Win32ClientInfoX86Base = 0x6CC;
         private const int Win32ClientInfoDesktopSlot = 4;
         private const int Win32ClientInfoActiveWindowSlot = 8;
         private const int Win32ClientInfoActiveWindowPointerSlot = 9;
         private const ulong UserSharedInfoMirrorSize = 0x1B54;
+        private const int SmCxScreen = 0;
+        private const int SmCyScreen = 1;
         private const byte UserHandleTypeWindow = 1;
         private ushort NextUserHandleIndex = 1;
         private ushort NextUserHandleUniq = 1;
@@ -998,6 +1001,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private ulong UserHandleTableAddress;
         private ulong UserDesktopInfoAddress;
         private ulong UserDesktopOwnerAddress;
+        private ulong UserPrimaryMonitorAddress;
         private ulong UserSharedInfoMirrorAddress;
         private ulong UserSharedDelta;
         public ulong ActiveWindow;
@@ -2469,7 +2473,64 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Delta;
         }
 
-        private ulong EnsureUserDesktopInfo()
+        private ulong EnsureUserPrimaryMonitor()
+        {
+            if (UserPrimaryMonitorAddress != 0 && Emulator.IsRegionMapped(UserPrimaryMonitorAddress, UserPrimaryMonitorSize))
+                return UserPrimaryMonitorAddress;
+
+            ulong Monitor = Emulator.MapUniqueAddress(UserPrimaryMonitorSize, MemoryProtection.ReadWrite);
+            if (Monitor == 0)
+                return 0;
+
+            if (!WriteZeroMemory(Monitor, (uint)UserPrimaryMonitorSize))
+                return 0;
+
+            (int Width, int Height) = GetHostPrimaryMonitorSize();
+
+            UserPrimaryMonitorInfo MonitorInfo = new UserPrimaryMonitorInfo
+            {
+                Header = 1UL,
+                MonitorLeft = 0,
+                MonitorTop = 0,
+                MonitorRight = Width,
+                MonitorBottom = Height,
+                WorkLeft = 0,
+                WorkTop = 0,
+                WorkRight = Width,
+                WorkBottom = Height,
+                DpiX = 96,
+                DpiY = 96
+            };
+
+            Span<byte> Buffer = MemoryMarshal.AsBytes(MemoryMarshal.CreateSpan(ref MonitorInfo, 1));
+            if (!Emulator._emulator.WriteMemory(Monitor, Buffer))
+                return 0;
+
+            UserPrimaryMonitorAddress = Monitor;
+            return UserPrimaryMonitorAddress;
+        }
+
+        private static (int Width, int Height) GetHostPrimaryMonitorSize()
+        {
+            try
+            {
+                if (OperatingSystem.IsWindows())
+                {
+                    int Width = NativeWinImports.GetSystemMetrics(SmCxScreen);
+                    int Height = NativeWinImports.GetSystemMetrics(SmCyScreen);
+
+                    if (Width > 0 && Height > 0)
+                        return (Width, Height);
+                }
+            }
+            catch
+            {
+            }
+
+            return (1920, 1080);
+        }
+
+        public ulong EnsureUserDesktopInfo()
         {
             if (UserDesktopInfoAddress != 0 && Emulator.IsRegionMapped(UserDesktopInfoAddress, UserDesktopInfoSize))
                 return UserDesktopInfoAddress;
@@ -2483,6 +2544,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                 WriteZeroMemory(UserDesktopOwnerAddress, 0x1000);
             }
 
+            ulong PrimaryMonitor = EnsureUserPrimaryMonitor();
+            if (PrimaryMonitor == 0)
+                return 0;
+
             ulong DesktopInfo = Emulator.MapUniqueAddress(0x1000, MemoryProtection.ReadWrite);
             if (DesktopInfo == 0)
                 return 0;
@@ -2490,8 +2555,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!WriteZeroMemory(DesktopInfo, 0x1000))
                 return 0;
 
-            Emulator._emulator.WriteMemory(DesktopInfo + 0x00, UserDesktopOwnerAddress, 8);
-            Emulator._emulator.WriteMemory(DesktopInfo + 0x10, 0u, 4);
+            UserSharedDisplayInfo DisplayInfo = new UserSharedDisplayInfo
+            {
+                Type = 1u,
+                PrimaryMonitor = PrimaryMonitor
+            };
+
+            Span<byte> Buffer = MemoryMarshal.AsBytes(MemoryMarshal.CreateSpan(ref DisplayInfo, 1));
+            if (!Emulator._emulator.WriteMemory(DesktopInfo, Buffer))
+                return 0;
 
             UserDesktopInfoAddress = DesktopInfo;
             return UserDesktopInfoAddress;
