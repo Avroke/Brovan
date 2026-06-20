@@ -35,6 +35,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Name = Name,
                     TimerId = TimerId,
                     Attributes = (uint)Attributes,
+                    TimerType = TIMER_TYPE.SynchronizationTimer,
                     Signaled = false
                 };
 
@@ -83,6 +84,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Name = Name,
                     TimerId = TimerId,
                     Attributes = Attributes,
+                    TimerType = TIMER_TYPE.SynchronizationTimer,
                     Signaled = false
                 };
 

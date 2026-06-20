@@ -145,6 +145,23 @@ namespace Brovan.Core.Emulation
             return Guest != null && Guest.IsHandleSignaled(this, Handle);
         }
 
+        internal bool HasHandleWaiters(ulong Handle)
+        {
+            if (WinHelper == null)
+                return false;
+
+            foreach (EmulatedThread Thread in Threads.Values)
+            {
+                if (Thread == null || Thread.State != EmulatedThreadState.Waiting || !Thread.WaitActive)
+                    continue;
+
+                if (Thread.WaitHandles != null && Thread.WaitHandles.Contains(Handle))
+                    return true;
+            }
+
+            return false;
+        }
+
         internal bool TryAcquireWaitHandle(ulong Handle)
         {
             return TryAcquireWaitHandle(Handle, CurrentThread);
@@ -221,7 +238,9 @@ namespace Brovan.Core.Emulation
                 if (!Timer.Signaled)
                     return false;
 
-                Timer.Signaled = false;
+                if (Timer.TimerType == TIMER_TYPE.SynchronizationTimer)
+                    Timer.Signaled = false;
+
                 return true;
             }
 

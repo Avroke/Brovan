@@ -69,7 +69,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 else
                     Timer.DueTick = Instance.CreateEmulatedDeadlineMilliseconds(Timer.PeriodMilliseconds);
 
-                if (Instance.WakeWorkerFactoryWaitersForObject(TimerHandle))
+                if (Instance.WakeWorkerFactoryWaitersForObject(TimerHandle) || Instance.HasHandleWaiters(TimerHandle))
                     Instance._emulator.StopEmulation();
             }
 

@@ -873,6 +873,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         WriteDAC = 0x00040000,
         WriteOwner = 0x00080000,
         Synchronize = 0x00100000,
+        TimerQueryState = 0x00000001,
+        TimerModifyState = 0x00000002,
+        TimerAllAccess = StandardRightsRequired | Synchronize | TimerQueryState | TimerModifyState,
         StandardRightsRequired = Delete | ReadControl | WriteDAC | WriteOwner,
         StandardRightsAll = StandardRightsRequired | Synchronize,
         ProcessTerminate = 0x00000001,
@@ -1019,6 +1022,18 @@ namespace Brovan.Core.Emulation.OS.Windows
         Full = 5,
         SecureFull = 6,
         Unaccessible = 7,
+    }
+
+    public enum TIMER_TYPE
+    {
+        NotificationTimer = 0,
+        SynchronizationTimer = 1,
+    }
+
+    public enum TIMER_SET_INFORMATION_CLASS
+    {
+        TimerSetCoalescableTimer = 0,
+        MaxTimerInfoClass = 1,
     }
 
     public enum User
@@ -1575,6 +1590,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public string Name;
         public uint TimerId;
         public uint Attributes;
+        public TIMER_TYPE TimerType = TIMER_TYPE.SynchronizationTimer;
         public bool Signaled;
         public bool Active;
         public long DueTick;

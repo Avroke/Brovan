@@ -4293,6 +4293,47 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Handle;
         }
 
+        public WinHandle CreateTimerHandle(string Name, TIMER_TYPE TimerType, AccessMask Permissions)
+        {
+            if (string.IsNullOrEmpty(Name))
+                Name = "Timer_" + GenerateRandomPID().ToString();
+
+            WinTimer Timer = null;
+            List<ulong> ExistingHandles = HandleManager.GetHandlesByObjectId(Name);
+            for (int i = 0; i < ExistingHandles.Count; i++)
+            {
+                Timer = HandleManager.GetObjectByHandle<WinTimer>(ExistingHandles[i]);
+                if (Timer != null)
+                    break;
+            }
+
+            if (Timer == null)
+            {
+                Timer = new WinTimer
+                {
+                    Name = Name,
+                    TimerType = TimerType,
+                    Signaled = false,
+                    Active = false
+                };
+            }
+
+            WinHandle Handle = HandleManager.AddHandle(Timer, Permissions);
+            WinHandles.Add(Handle);
+            return Handle;
+        }
+
+        public WinTimer? GetTimerByHandle(ulong Handle, AccessMask Purpose)
+        {
+            if (!HandleManager.HandleExists(Handle, HandleType.TimerHandle))
+                return null;
+
+            if (!HandleManager.CheckAccess(Handle, Purpose))
+                return null;
+
+            return HandleManager.GetObjectByHandle<WinTimer>(Handle);
+        }
+
         public WinEvent? GetEventByHandle(ulong Handle, AccessMask Purpose)
         {
             if (!HandleManager.HandleExists(Handle, HandleType.EventHandle))
