@@ -80,10 +80,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             CurrentThread.SwitchingContext = true;
             Instance.SuppressSyscallStatusWrite = true;
 
-            // NtContinue resumes the current thread with the supplied context. It is also the
-            // normal return path from KiUserExceptionDispatcher after a continuable exception.
-            // Stopping the whole emulator here incorrectly terminates all threads before the
-            // restored user context can run.
             Instance._emulator.StopEmulation();
 
             return NTSTATUS.STATUS_SUCCESS;

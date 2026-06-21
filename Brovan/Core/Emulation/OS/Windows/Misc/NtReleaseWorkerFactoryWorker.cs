@@ -7,7 +7,28 @@ namespace Brovan.Core.Emulation.OS.Windows
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
             ulong WorkerFactoryHandle = Instance.WinHelper.GetArg64(0);
-            return WorkerFactoryHelper.MarkWorkerReady(Instance, WorkerFactoryHandle);
+
+            WinWorkerFactory Factory = WorkerFactoryHelper.GetFactory(Instance, WorkerFactoryHandle);
+            if (Factory == null)
+                return NTSTATUS.STATUS_INVALID_HANDLE;
+
+            if (Factory.PendingReleaseCount == uint.MaxValue)
+                return NTSTATUS.STATUS_UNSUCCESSFUL;
+
+            Factory.PendingReleaseCount++;
+            if (!Factory.ReleasePending)
+            {
+                Factory.ReleasePending = true;
+                if (!WorkerFactoryHelper.EnqueueReleaseCompletion(Instance, WorkerFactoryHandle))
+                {
+                    Factory.ReleasePending = false;
+                    Factory.PendingReleaseCount--;
+                    return NTSTATUS.STATUS_INVALID_HANDLE;
+                }
+            }
+
+            WorkerFactoryHelper.EnsureWorkerThreads(Instance, Factory);
+            return NTSTATUS.STATUS_SUCCESS;
         }
     }
 }

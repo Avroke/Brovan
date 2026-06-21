@@ -1408,6 +1408,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         public NTSTATUS IoStatus;
         public ulong IoStatusInformation;
         public ulong WaitCompletionPacketHandle;
+        public ulong WorkerFactoryHandle;
+        public bool WorkerFactoryRelease;
     }
 
     public sealed class WinIoCompletion : IHandleObject
@@ -1447,6 +1449,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         public uint LastInfoClass;
         public uint LastInfoLength;
         public ulong LastInfoValue;
+        public uint PendingReleaseCount;
+        public bool ReleasePending;
         public List<ulong> WorkerThreads = new List<ulong>();
 
         public string ObjectId => Name;
@@ -1507,6 +1511,51 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
+        internal static bool EnqueueReleaseCompletion(BinaryEmulator Instance, ulong WorkerFactoryHandle)
+        {
+            if (Instance == null || WorkerFactoryHandle == 0)
+                return false;
+
+            WinWorkerFactory Factory = GetFactory(Instance, WorkerFactoryHandle);
+            if (Factory == null)
+                return false;
+
+            WinIoCompletion Completion = GetIoCompletion(Instance, Factory.IoCompletionHandle);
+            if (Completion == null)
+                return false;
+
+            Completion.Entries.Enqueue(new WinIoCompletionEntry
+            {
+                IoStatus = NTSTATUS.STATUS_SUCCESS,
+                IoStatusInformation = 0,
+                WorkerFactoryHandle = WorkerFactoryHandle,
+                WorkerFactoryRelease = true
+            });
+
+            return true;
+        }
+
+        internal static void OnIoCompletionEntryDequeued(BinaryEmulator Instance, WinIoCompletionEntry Entry)
+        {
+            if (Instance == null || Entry == null || !Entry.WorkerFactoryRelease)
+                return;
+
+            WinWorkerFactory Factory = GetFactory(Instance, Entry.WorkerFactoryHandle);
+            if (Factory == null)
+                return;
+
+            if (Factory.PendingReleaseCount > 0)
+                Factory.PendingReleaseCount--;
+
+            if (Factory.Shutdown || Factory.PendingReleaseCount == 0)
+            {
+                Factory.ReleasePending = false;
+                return;
+            }
+
+            EnqueueReleaseCompletion(Instance, Entry.WorkerFactoryHandle);
+        }
+
         internal static void EnsureWorkerThreads(BinaryEmulator Instance, WinWorkerFactory Factory)
         {
             if (Instance == null || Factory == null)
@@ -1524,6 +1573,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint Desired = Factory.ThreadMinimum;
             if (Factory.BindingCount > Desired)
                 Desired = Factory.BindingCount;
+            if (Factory.ReleasePending || Factory.PendingReleaseCount != 0)
+                Desired = Math.Max(Desired, 1u);
             if (Desired > Limit)
                 Desired = Limit;
 

@@ -2382,7 +2382,7 @@ namespace Brovan.Core.Emulation
                 Slices++;
                 ImmaBeEmulatedOOO.LastRunTick = SchedulerWorkTick;
 
-                if (ImmaBeEmulatedOOO.Context?.RIP == 0 || !State)
+                if (ImmaBeEmulatedOOO.Context?.RIP == 0)
                 {
                     if (ImmaBeEmulatedOOO.State != EmulatedThreadState.Terminated)
                         ImmaBeEmulatedOOO.ExitCode = unchecked((int)(uint)ImmaBeEmulatedOOO.Context?.RAX);

@@ -715,25 +715,8 @@ namespace Brovan.Core.Emulation.Guests
             uint ThreadId = (uint)Instance.CurrentThreadId;
             if (!Instance.Threads.TryGetValue(ThreadId, out EmulatedThread Thread) || Thread == null)
                 return;
+
             WindowsThreadState State = WinEmulatedThread.GetState(Thread);
-            if (State.IsHandlingException)
-            {
-                State.ExceptionNesting++;
-                if (State.ExceptionNesting > 2)
-                {
-                    Instance.WinHelper.AbandonMutexesOwnedByThread(Thread.ThreadId);
-                    Thread.State = EmulatedThreadState.Terminated;
-                    Thread.ExitCode = (int)Status;
-                    Instance.Threads[ThreadId] = Thread;
-                    Instance._emulator.StopEmulation();
-                    return;
-                }
-            }
-            else
-            {
-                State.IsHandlingException = true;
-                State.ExceptionNesting = 1;
-            }
 
             ExceptionInformation ExceptionInfo = Info ?? new ExceptionInformation();
             ExceptionInfo.Status = Status;

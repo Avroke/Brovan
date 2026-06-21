@@ -70,6 +70,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             while (Removed < Count && Completion.Entries.Count > 0)
             {
                 WinIoCompletionEntry Entry = Completion.Entries.Dequeue();
+                WorkerFactoryHelper.OnIoCompletionEntryDequeued(Instance, Entry);
+
                 if (Entry.WaitCompletionPacketHandle != 0)
                 {
                     WinWaitCompletionPacket Packet = Instance.WinHelper.HandleManager.GetObjectByHandle<WinWaitCompletionPacket>(Entry.WaitCompletionPacketHandle);
