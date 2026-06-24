@@ -113,12 +113,12 @@ namespace Brovan
             return false;
         }
 
-        public static string GetAction(MemoryType Type)
+        public static string GetAction(BackendMemoryAccessType Type)
         {
             return Type switch
             {
-                MemoryType.UC_MEM_READ => "Reading from",
-                MemoryType.UC_MEM_WRITE => "Writing to",
+                BackendMemoryAccessType.Read => "Reading from",
+                BackendMemoryAccessType.Write => "Writing to",
                 _ => "Unknown action to the"
             };
         }

@@ -167,7 +167,7 @@ namespace Brovan
             return sb.ToString();
         }
 
-        public static void LdrpLogInternalHookHandler(IntPtr uc, ulong Address, uint Size, IntPtr user_data)
+        public static void LdrpLogInternalHookHandler(ulong Address, uint Size)
         {
             if (!LdrpLogEnabled || LdrpLogInternalAddress == 0 || Address != LdrpLogInternalAddress)
                 return;
@@ -224,7 +224,7 @@ namespace Brovan
             }
         }
 
-        public static bool InvalidOperationsCallback(MemoryType Type, ulong Address, uint Size, ulong value)
+        public static bool InvalidOperationsCallback(BackendMemoryAccessType Type, ulong Address, uint Size, ulong value)
         {
             return false;
         }
@@ -312,7 +312,7 @@ namespace Brovan
             return null;
         }
 
-        public static void InstructionHandler(IntPtr uc, ulong Address, uint Size, IntPtr user_data)
+        public static void InstructionHandler(ulong Address, uint Size)
         {
             WinModule Module = null;
             LinuxLoadedModule LinuxModule = null;
@@ -413,7 +413,7 @@ namespace Brovan
             }
         }
 
-        public static void GLookupHook(IntPtr uc, ulong Address, uint Size, IntPtr user_data)
+        public static void GLookupHook(ulong Address, uint Size)
         {
             foreach (GhostPatch Patch in GhostPatches)
             {
@@ -425,21 +425,21 @@ namespace Brovan
             }
         }
 
-        private static bool IsWatchedMemoryType(MemoryType type, MemoryWatchType watchType)
+        private static bool IsWatchedMemoryType(BackendMemoryAccessType type, MemoryWatchType watchType)
         {
-            if (type == MemoryType.UC_MEM_READ)
+            if (type == BackendMemoryAccessType.Read)
                 return (watchType & MemoryWatchType.Read) != 0;
 
-            if (type == MemoryType.UC_MEM_WRITE)
+            if (type == BackendMemoryAccessType.Write)
                 return (watchType & MemoryWatchType.Write) != 0;
 
-            if (type == MemoryType.UC_MEM_FETCH)
+            if (type == BackendMemoryAccessType.Fetch)
                 return (watchType & MemoryWatchType.Fetch) != 0;
 
             return false;
         }
 
-        private static bool IsWatchpointMatch(MemoryWatchpoint watchpoint, MemoryType type, ulong address, uint size)
+        private static bool IsWatchpointMatch(MemoryWatchpoint watchpoint, BackendMemoryAccessType type, ulong address, uint size)
         {
             if (!IsWatchedMemoryType(type, watchpoint.Type))
                 return false;
@@ -453,7 +453,7 @@ namespace Brovan
             return address <= watchEnd && accessEnd >= watchpoint.Address;
         }
 
-        private static bool HandleWatchpoints(MemoryType type, ulong address, uint size, ulong value)
+        private static bool HandleWatchpoints(BackendMemoryAccessType type, ulong address, uint size, ulong value)
         {
             if (Watchpoints.Count == 0)
                 return false;
@@ -466,13 +466,13 @@ namespace Brovan
                 if (!IsWatchpointMatch(watchpoint, type, address, size))
                     continue;
 
-                string message = $"[!] Watchpoint #{watchpoint.Id} {FormatWatchType(type == MemoryType.UC_MEM_READ ? MemoryWatchType.Read : type == MemoryType.UC_MEM_WRITE ? MemoryWatchType.Write : MemoryWatchType.Fetch)} hit at 0x{address:X}";
+                string message = $"[!] Watchpoint #{watchpoint.Id} {FormatWatchType(type == BackendMemoryAccessType.Read ? MemoryWatchType.Read : type == BackendMemoryAccessType.Write ? MemoryWatchType.Write : MemoryWatchType.Fetch)} hit at 0x{address:X}";
                 if (size > 1)
                     message += $" (size: 0x{size:X})";
 
                 message += $" from 0x{ip:X}";
 
-                if (type == MemoryType.UC_MEM_WRITE)
+                if (type == BackendMemoryAccessType.Write)
                 {
                     string digits = checked((int)Math.Min(size, 8) * 2).ToString();
                     message += $", value=0x{value.ToString($"X{digits}")}";
@@ -487,13 +487,13 @@ namespace Brovan
             return handled;
         }
 
-        public static bool WatchMemoryAccessHook(IntPtr uc, MemoryType Type, ulong Address, uint Size, ulong value, IntPtr user_data)
+        public static bool WatchMemoryAccessHook(BackendMemoryAccessType Type, ulong Address, uint Size, ulong value)
         {
             HandleWatchpoints(Type, Address, Size, value);
             return true;
         }
 
-        public static bool GeneralMemoryHook(IntPtr uc, MemoryType Type, ulong Address, uint Size, ulong value, IntPtr user_data)
+        public static bool GeneralMemoryHook(BackendMemoryAccessType Type, ulong Address, uint Size, ulong value)
         {
             ulong IP = Emulator.ReadRegister(Emulator.IPRegister);
             if (Binary.FileFormat == BinaryFormat.PE)
@@ -515,7 +515,7 @@ namespace Brovan
                 }
             }
 
-            if (GPatch && (Type == MemoryType.UC_MEM_READ || Type == MemoryType.UC_MEM_WRITE))
+            if (GPatch && (Type == BackendMemoryAccessType.Read || Type == BackendMemoryAccessType.Write))
             {
                 List<GhostPatch>? WrittenPatches = null;
                 foreach (GhostPatch Patch in GhostPatches)
@@ -531,7 +531,7 @@ namespace Brovan
                         continue;
 
                     Emulator.WriteMemory(Patch.Address, Patch.Original);
-                    if (Type == MemoryType.UC_MEM_READ)
+                    if (Type == BackendMemoryAccessType.Read)
                     {
                         PrintHighlight($"[$] Ghost patch was hidden from a memory read at 0x{IP:X}.", false, true);
                     }
@@ -600,7 +600,7 @@ namespace Brovan
             }
         }
 
-        public static void BreakpointHandler(IntPtr uc, ulong Address, uint Size, IntPtr user_data)
+        public static void BreakpointHandler(ulong Address, uint Size)
         {
             if (BreakpointsSuppressed || ShouldSkipBreakpoint(Address))
                 return;
@@ -621,7 +621,7 @@ namespace Brovan
             ShowDebuggerStopContext("Breakpoint hit", Address);
         }
 
-        public static void StepHandler(IntPtr uc, ulong Address, uint Size, IntPtr user_data)
+        public static void StepHandler(ulong Address, uint Size)
         {
             if (TempStepTarget != 0 && Address != TempStepTarget)
                 return;

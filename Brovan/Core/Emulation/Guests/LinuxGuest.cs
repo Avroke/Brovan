@@ -139,7 +139,7 @@ namespace Brovan.Core.Emulation.Guests
         public int Signal;
         public int Code;
         public ulong FaultAddress;
-        public MemoryType MemoryAccess;
+        public BackendMemoryAccessType MemoryAccess;
     }
 
     internal sealed class LinuxThreadState
@@ -540,7 +540,7 @@ namespace Brovan.Core.Emulation.Guests
             QueueSynchronousSignal(Instance, LinuxSignalHelpers.SIGILL, LinuxSignalHelpers.ILL_ILLOPN, Instance.ReadRegister(Instance.IPRegister), default);
         }
 
-        public bool HandleInvalidMemory(BinaryEmulator Instance, MemoryType Type, ulong Address, uint Size, ulong Value)
+        public bool HandleInvalidMemory(BinaryEmulator Instance, BackendMemoryAccessType Type, ulong Address, uint Size, ulong Value)
         {
             int Code = LinuxSignalHelpers.IsProtectionFault(Type) ? LinuxSignalHelpers.SEGV_ACCERR : LinuxSignalHelpers.SEGV_MAPERR;
             QueueSynchronousSignal(Instance, LinuxSignalHelpers.SIGSEGV, Code, Address, Type);
@@ -587,7 +587,7 @@ namespace Brovan.Core.Emulation.Guests
             return _signalRestorer32;
         }
 
-        private void QueueSynchronousSignal(BinaryEmulator Instance, int Signal, int Code, ulong FaultAddress, MemoryType Access)
+        private void QueueSynchronousSignal(BinaryEmulator Instance, int Signal, int Code, ulong FaultAddress, BackendMemoryAccessType Access)
         {
             EmulatedThread Thread = Instance.CurrentThread;
             if (Thread == null)

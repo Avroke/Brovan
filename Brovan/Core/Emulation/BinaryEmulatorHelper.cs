@@ -99,7 +99,7 @@ namespace Brovan.Core.Emulation
         bool TryHandleInterrupt(BinaryEmulator Instance, uint InterruptNumber);
         void HandlePrivilegedInstruction(BinaryEmulator Instance);
         void HandleInvalidInstruction(BinaryEmulator Instance);
-        bool HandleInvalidMemory(BinaryEmulator Instance, MemoryType Type, ulong Address, uint Size, ulong Value);
+        bool HandleInvalidMemory(BinaryEmulator Instance, BackendMemoryAccessType Type, ulong Address, uint Size, ulong Value);
 
         ulong CreateInitialThread(BinaryEmulator Instance);
         EmulatedThread CreateEmulatedThread(BinaryEmulator Instance, ulong StartAddress, string Name = null!, ulong Parameter = 0, ulong? StackSizeOverride = null, int BasePriority = 8);
@@ -109,14 +109,6 @@ namespace Brovan.Core.Emulation
         bool ExecuteThreadSlice(BinaryEmulator Instance, EmulatedThread Thread, uint QuantumInstructions, out bool State);
         void OnThreadWaitSatisfied(BinaryEmulator Instance, EmulatedThread Thread);
     }
-
-    internal delegate void InstDelegate(IntPtr uc, IntPtr user_data);
-
-    internal delegate bool InstBoolDelegate(IntPtr uc, IntPtr user_data);
-
-    internal delegate void InterruptDelegate(IntPtr uc, uint interrupt_number);
-
-    internal delegate bool MemoryDelegate(IntPtr uc, MemoryType Type, ulong Address, uint Size, ulong value, IntPtr user_data);
 
     [Flags]
     public enum SpecialProtections

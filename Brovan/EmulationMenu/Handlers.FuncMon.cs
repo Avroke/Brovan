@@ -292,7 +292,7 @@ namespace Brovan
             return $"0x{Address:X}";
         }
 
-        public static void FuncMonEntryHookHandler(IntPtr Uc, ulong Address, uint Size, IntPtr UserData)
+        public static void FuncMonEntryHookHandler(ulong Address, uint Size)
         {
             if (!FuncMons.TryGetValue(Address, out var Monitor))
                 return;
@@ -323,13 +323,12 @@ namespace Brovan
 
                 if (!FuncMonReturnHooks.ContainsKey(ReturnAddress))
                 {
-                    if (FuncMonReturnHookPtr == IntPtr.Zero)
+                    if (FuncMonReturnHook == null)
                     {
                         FuncMonReturnHook = FuncMonReturnHookHandler;
-                        FuncMonReturnHookPtr = Marshal.GetFunctionPointerForDelegate(FuncMonReturnHook);
                     }
 
-                    IntPtr HookHandle = Emulator._emulator.AddHookWithHandle(ReturnAddress, ReturnAddress, Hooks.UC_HOOK_BLOCK, FuncMonReturnHookPtr);
+                    IntPtr HookHandle = Emulator._emulator.AddCodeHook(ReturnAddress, ReturnAddress, FuncMonReturnHook);
                     if (HookHandle != IntPtr.Zero)
                         FuncMonReturnHooks[ReturnAddress] = HookHandle;
                 }
@@ -340,7 +339,7 @@ namespace Brovan
             }
         }
 
-        public static void FuncMonReturnHookHandler(IntPtr Uc, ulong Address, uint Size, IntPtr UserData)
+        public static void FuncMonReturnHookHandler(ulong Address, uint Size)
         {
             if (!FuncMonPendingReturns.TryGetValue(Address, out Stack<ulong> PendingFunctions) || PendingFunctions.Count == 0)
                 return;

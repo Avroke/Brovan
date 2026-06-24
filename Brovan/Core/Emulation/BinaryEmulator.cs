@@ -280,6 +280,9 @@ namespace Brovan.Core.Emulation
         /// </summary>
         public bool NoHooks;
 
+        /// <summary>Backend implementation to use. Defaults to Unicorn.</summary>
+        public EmulationBackendKind BackendKind;
+
 #pragma warning disable
         public BinaryEmulatorSettings()
         {
@@ -295,6 +298,7 @@ namespace Brovan.Core.Emulation
             EmulateNetworking = false;
             NetworkPolicy = null;
             Debug = false;
+            BackendKind = EmulationBackendKind.Unicorn;
 #pragma warning restore
         }
 
@@ -317,10 +321,7 @@ namespace Brovan.Core.Emulation
     {
         internal BinaryFile _binary;
 
-        /// <summary>
-        /// Internal unicorn instance.
-        /// </summary>
-        internal Unicorn _emulator;
+        internal IEmulationBackend _emulator;
 
         internal List<MemoryRegion> _memory = new();
         internal List<MemoryRegion> _freedmemory = new();
@@ -330,17 +331,17 @@ namespace Brovan.Core.Emulation
         private readonly uint[] MlfqQuanta = new uint[32];
         private bool MemoryRegionIndexDirty = true;
         internal BinaryEmulatorSettings Settings;
-        private InstDelegate Syscall;
-        private InstDelegate Privileged;
-        private InterruptDelegate Interrupt;
-        private InstBoolDelegate CPUID;
-        private InstDelegate RDTSC;
-        private InstDelegate RDTSCP;
-        private MemoryDelegate InvalidMemory;
-        private InstDelegate InvalidInstruction;
-        private MemoryDelegate SnapMonitor;
+        private InstructionHookCallback Syscall;
+        private InstructionHookCallback Privileged;
+        private InterruptHookCallback Interrupt;
+        private InstructionBoolHookCallback CPUID;
+        private InstructionHookCallback RDTSC;
+        private InstructionHookCallback RDTSCP;
+        private MemoryHookCallback InvalidMemory;
+        private InstructionHookCallback InvalidInstruction;
+        private MemoryHookCallback SnapMonitor;
         public delegate void MessageHandler(string Message, LogFlags Flags);
-        public delegate bool InvalidOperationHandler(MemoryType Type, ulong Address, uint Size, ulong value);
+        public delegate bool InvalidOperationHandler(BackendMemoryAccessType Type, ulong Address, uint Size, ulong value);
         public delegate void SyscallNotificationDelegate(ulong Address, ulong Syscall, string Name, ulong ReturnValue);
         public SyscallManager Syscalls;
         internal IGuestEnvironment Guest { get; }
@@ -356,12 +357,12 @@ namespace Brovan.Core.Emulation
         public string[] ProgramArguments { get; }
 
         public int IPRegister { get; private set; }
-        public Arch UnicornArch { get; private set; }
-        public Mode UnicornMode { get; private set; }
-        public bool IsX86Guest => UnicornArch == Arch.X86 && UnicornMode == Mode.MODE_32;
-        public bool IsArmGuest => UnicornArch == Arch.ARM;
-        public bool IsX64Guest => UnicornArch == Arch.X86 && UnicornMode == Mode.MODE_64;
-        public bool IsArchX86Guest => UnicornArch == Arch.X86;
+        public Arch BackendArch { get; private set; }
+        public Mode BackendMode { get; private set; }
+        public bool IsX86Guest => BackendArch == Arch.X86 && BackendMode == Mode.MODE_32;
+        public bool IsArmGuest => BackendArch == Arch.ARM;
+        public bool IsX64Guest => BackendArch == Arch.X86 && BackendMode == Mode.MODE_64;
+        public bool IsArchX86Guest => BackendArch == Arch.X86;
         public readonly ulong BaseAddress = 0x10000000UL; // Base Start
         public readonly ulong MaxAddress = 0x7FFFFFFFFUL;  // Max address limit
         private ulong _timestampCounter = 0x100000000UL;
@@ -478,9 +479,9 @@ namespace Brovan.Core.Emulation
                 throw new BadImageFormatException("Unsupported binary architecture.");
 
             _binary = Binary;
-            UnicornArch = Arch.X86;
-            UnicornMode = Binary.Architecture == BinaryArchitecture.x64 ? Mode.MODE_64 : Mode.MODE_32;
-            _emulator = new Unicorn(UnicornArch, UnicornMode);
+            BackendArch = Arch.X86;
+            BackendMode = Binary.Architecture == BinaryArchitecture.x64 ? Mode.MODE_64 : Mode.MODE_32;
+            _emulator = BackendFactory.Create(Settings.BackendKind, BackendArch, BackendMode, Settings.NoHooks);
             _emulator.NoHooks = Settings.NoHooks;
             this.Settings = Settings;
             Debug = Settings.Debug;
@@ -517,9 +518,9 @@ namespace Brovan.Core.Emulation
                 throw new NullReferenceException(nameof(Data));
 
             _binary = Binary ?? new BinaryFile(Data, true);
-            UnicornArch = arch;
-            UnicornMode = mode;
-            _emulator = new Unicorn(arch, mode);
+            BackendArch = arch;
+            BackendMode = mode;
+            _emulator = BackendFactory.Create(Settings.BackendKind, arch, mode, Settings.NoHooks);
             this.Settings = Settings;
             Debug = Settings.Debug;
             RawProgramArguments = Settings.RawProgramArguments ?? string.Empty;
@@ -1350,7 +1351,7 @@ namespace Brovan.Core.Emulation
         /// <summary>
         /// Privileged instruction handler.
         /// </summary>
-        private void PrivilegedInstructionHandler(IntPtr uc, IntPtr user_data)
+        private void PrivilegedInstructionHandler()
         {
             SchedulerRefreshRequested = true;
             TriggerDebugMessage(() => $"cpu: privileged instruction at 0x{ReadRegister(IPRegister):X}");
@@ -1361,7 +1362,7 @@ namespace Brovan.Core.Emulation
         /// <summary>
         /// Invalid instruction handler.
         /// </summary>
-        private void InvalidInstructionHandler(IntPtr uc, IntPtr user_data)
+        private void InvalidInstructionHandler()
         {
             SchedulerRefreshRequested = true;
             TriggerDebugMessage(() => $"cpu: invalid instruction at 0x{ReadRegister(IPRegister):X}");
@@ -1372,7 +1373,7 @@ namespace Brovan.Core.Emulation
         /// <summary>
         /// Windows interrupt handling method.
         /// </summary>
-        private void InterruptHandler(IntPtr uc, uint interrupt_number)
+        private void InterruptHandler(uint interrupt_number)
         {
             SchedulerRefreshRequested = true;
             TriggerDebugMessage(() => $"cpu: interrupt 0x{interrupt_number:X} at 0x{ReadRegister(IPRegister):X}");
@@ -1397,7 +1398,7 @@ namespace Brovan.Core.Emulation
         /// <summary>
         /// CPUD Handler.
         /// </summary>
-        private bool CPUID_Handler(IntPtr uc, IntPtr user_data)
+        private bool CPUID_Handler()
         {
             bool Is64BitGuest = _binary.Architecture == BinaryArchitecture.x64;
             uint Leaf = Is64BitGuest ? (uint)ReadRegister(Registers.UC_X86_REG_RAX) : ReadRegister32(Registers.UC_X86_REG_EAX);
@@ -1564,7 +1565,7 @@ namespace Brovan.Core.Emulation
             _timestampCounter += ((ulong)Instructions * TscCyclesPerInstruction);
         }
 
-        private void RDTSC_Handler(IntPtr uc, IntPtr user_data)
+        private void RDTSC_Handler()
         {
             ulong IP = ReadRegister(IPRegister);
             _timestampCounter += RdtscReadCycles;
@@ -1585,7 +1586,7 @@ namespace Brovan.Core.Emulation
             StopAfterSyntheticInstruction(IP + 2);
         }
 
-        private void RDTSCP_Handler(IntPtr uc, IntPtr user_data)
+        private void RDTSCP_Handler()
         {
             ulong IP = ReadRegister(IPRegister);
             _timestampCounter += RdtscpReadCycles;
@@ -2441,16 +2442,16 @@ namespace Brovan.Core.Emulation
         /// </summary>
         /// <param name="Type">Memory type.</param>
         /// <returns>returns the string that represents the memory action.</returns>
-        private string GetAction(MemoryType Type)
+        private string GetAction(BackendMemoryAccessType Type)
         {
             return Type switch
             {
-                MemoryType.UC_MEM_READ_UNMAPPED => "read",
-                MemoryType.UC_MEM_WRITE_UNMAPPED => "write",
-                MemoryType.UC_MEM_FETCH_UNMAPPED => "fetch",
-                MemoryType.UC_MEM_READ_PROT => "read (protected)",
-                MemoryType.UC_MEM_WRITE_PROT => "write (protected)",
-                MemoryType.UC_MEM_FETCH_PROT => "fetch (protected)",
+                BackendMemoryAccessType.ReadUnmapped => "read",
+                BackendMemoryAccessType.WriteUnmapped => "write",
+                BackendMemoryAccessType.FetchUnmapped => "fetch",
+                BackendMemoryAccessType.ReadProtected => "read (protected)",
+                BackendMemoryAccessType.WriteProtected => "write (protected)",
+                BackendMemoryAccessType.FetchProtected => "fetch (protected)",
                 _ => "action (unknown)"
             };
         }
@@ -2458,9 +2459,9 @@ namespace Brovan.Core.Emulation
         /// <summary>
         /// Handles invalid memory operations and pass the exception to user-mode.
         /// </summary>
-        private bool InvalidMemoryHandler(IntPtr uc, MemoryType Type, ulong Address, uint Size, ulong value, IntPtr user_data)
+        private bool InvalidMemoryHandler(BackendMemoryAccessType Type, ulong Address, uint Size, ulong value)
         {
-            if (Type == MemoryType.UC_MEM_FETCH_UNMAPPED && Address == 0)
+            if (Type == BackendMemoryAccessType.FetchUnmapped && Address == 0)
             {
                 return false;
             }
@@ -2494,65 +2495,42 @@ namespace Brovan.Core.Emulation
             if (Settings.HandleInvalidOperations)
             {
                 InvalidMemory = InvalidMemoryHandler;
-                _emulator.AddHook(1, 0, Hooks.UC_HOOK_MEM_FETCH_UNMAPPED | Hooks.UC_HOOK_MEM_READ_UNMAPPED | Hooks.UC_HOOK_MEM_WRITE_UNMAPPED | Hooks.UC_HOOK_MEM_FETCH_PROT | Hooks.UC_HOOK_MEM_READ_PROT | Hooks.UC_HOOK_MEM_WRITE_PROT, Marshal.GetFunctionPointerForDelegate(InvalidMemory));
+                if (_emulator.AddMemoryHook(1, 0, BackendHookType.MemoryUnmapped | BackendHookType.MemoryProtected, InvalidMemory) == IntPtr.Zero)
+                    Utils.LogError($"Couldn't add the invalid-memory hook: {_emulator.GetLastError()}.");
             }
 
             Interrupt = InterruptHandler;
-            IntPtr InterruptHandlerPtr = Marshal.GetFunctionPointerForDelegate(Interrupt);
-            if (!_emulator.AddHook(1, 0, Hooks.UC_HOOK_INTR, InterruptHandlerPtr))
-            {
-                Utils.LogError($"Couldn't add the interrupt hook for the emulation environment: {_emulator.GetLastError()}\n   - Interrupt Handler Pointer: 0x{InterruptHandlerPtr.ToString("X")}.");
-            }
+            if (_emulator.AddInterruptHook(Interrupt) == IntPtr.Zero)
+                Utils.LogError($"Couldn't add the interrupt hook: {_emulator.GetLastError()}.");
 
-            if (UnicornArch == Arch.X86)
+            if (BackendArch == Arch.X86)
             {
                 Syscall = SyscallInstructionHandler;
-                IntPtr SyscallHandlerPtr = Marshal.GetFunctionPointerForDelegate(Syscall);
-                if (!_emulator.AddHook(INSTHooks.UC_X86_INS_SYSCALL, SyscallHandlerPtr))
-                {
-                    Utils.LogError($"Couldn't add the syscall hook for the emulation environment: {_emulator.GetLastError()}\n   - Syscall Handler Pointer: 0x{SyscallHandlerPtr.ToString("X")}.");
-                }
+                if (_emulator.AddInstructionHook(BackendInstructionHook.Syscall, Syscall) == IntPtr.Zero)
+                    Utils.LogError($"Couldn't add the syscall hook: {_emulator.GetLastError()}.");
 
                 CPUID = CPUID_Handler;
-                IntPtr CPUIDHandlerPtr = Marshal.GetFunctionPointerForDelegate(CPUID);
-                if (!_emulator.AddHook(INSTHooks.UC_X86_INS_CPUID, CPUIDHandlerPtr))
-                {
-                    Utils.LogError($"Couldn't add the CPUID hook for the emulation environment: {_emulator.GetLastError()}\n   - CPUID Handler Pointer: 0x{CPUIDHandlerPtr.ToString("X")}.");
-                }
+                if (_emulator.AddInstructionBoolHook(BackendInstructionHook.CpuId, CPUID) == IntPtr.Zero)
+                    Utils.LogError($"Couldn't add the CPUID hook: {_emulator.GetLastError()}.");
 
                 RDTSC = RDTSC_Handler;
-                IntPtr RDTSCHandlerPtr = Marshal.GetFunctionPointerForDelegate(RDTSC);
-                if (!_emulator.AddHook(INSTHooks.UC_X86_INS_RDTSC, RDTSCHandlerPtr))
-                {
-                    Utils.LogError($"Couldn't add the RDTSC hook for the emulation environment: {_emulator.GetLastError()}\n   - RDTSC Handler Pointer: 0x{RDTSCHandlerPtr.ToString("X")}.");
-                }
+                if (_emulator.AddInstructionHook(BackendInstructionHook.Rdtsc, RDTSC) == IntPtr.Zero)
+                    Utils.LogError($"Couldn't add the RDTSC hook: {_emulator.GetLastError()}.");
 
                 RDTSCP = RDTSCP_Handler;
-                IntPtr RDTSCPHandlerPtr = Marshal.GetFunctionPointerForDelegate(RDTSCP);
-                if (!_emulator.AddHook(INSTHooks.UC_X86_INS_RDTSCP, RDTSCPHandlerPtr))
-                {
-                    Utils.LogError($"Couldn't add the RDTSCP hook for the emulation environment: {_emulator.GetLastError()}\n   - RDTSCP Handler Pointer: 0x{RDTSCPHandlerPtr.ToString("X")}.");
-                }
+                if (_emulator.AddInstructionHook(BackendInstructionHook.Rdtscp, RDTSCP) == IntPtr.Zero)
+                    Utils.LogError($"Couldn't add the RDTSCP hook: {_emulator.GetLastError()}.");
 
                 Privileged = PrivilegedInstructionHandler;
-                IntPtr PrivilegedInstructionsHandlerPtr = Marshal.GetFunctionPointerForDelegate(Privileged);
-                if (!_emulator.AddHook(INSTHooks.UC_X86_INS_IN, PrivilegedInstructionsHandlerPtr))
-                {
-                    Utils.LogError($"Couldn't add the privileged instruction hook for the instruction IN: {_emulator.GetLastError()}\n   - Priviled Instruction Handler Pointer: 0x{PrivilegedInstructionsHandlerPtr.ToString("X")}.");
-                }
-
-                if (!_emulator.AddHook(INSTHooks.UC_X86_INS_OUT, PrivilegedInstructionsHandlerPtr))
-                {
-                    Utils.LogError($"Couldn't add the privileged instruction hook for the instruction OUT: {_emulator.GetLastError()}\n   - Priviled Instruction Handler Pointer: 0x{PrivilegedInstructionsHandlerPtr.ToString("X")}.");
-                }
+                if (_emulator.AddInstructionHook(BackendInstructionHook.In, Privileged) == IntPtr.Zero)
+                    Utils.LogError($"Couldn't add the IN instruction hook: {_emulator.GetLastError()}.");
+                if (_emulator.AddInstructionHook(BackendInstructionHook.Out, Privileged) == IntPtr.Zero)
+                    Utils.LogError($"Couldn't add the OUT instruction hook: {_emulator.GetLastError()}.");
             }
 
             InvalidInstruction = InvalidInstructionHandler;
-            IntPtr InvalidInstructionHandlerPtr = Marshal.GetFunctionPointerForDelegate(InvalidInstruction);
-            if (!_emulator.AddHook(0, 1, Hooks.UC_HOOK_INSN_INVALID, InvalidInstructionHandlerPtr))
-            {
-                Utils.LogError($"Couldn't add an invalid instruction handler: {_emulator.GetLastError()}\n   - Invalid Instruction Handler Pointer: 0x{InvalidInstructionHandlerPtr.ToString("X")}.");
-            }
+            if (_emulator.AddInstructionHook(BackendInstructionHook.Invalid, InvalidInstruction) == IntPtr.Zero)
+                Utils.LogError($"Couldn't add the invalid-instruction hook: {_emulator.GetLastError()}.");
 
             Guest.Initialize(this, _binary);
             if (IsArchX86Guest)
@@ -2568,7 +2546,7 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        private void SyscallInstructionHandler(IntPtr uc, IntPtr user_data)
+        private void SyscallInstructionHandler()
         {
             SchedulerRefreshRequested = true;
             TriggerDebugMessage(() => $"cpu: syscall instruction at 0x{ReadRegister(IPRegister):X}");
@@ -2647,7 +2625,7 @@ namespace Brovan.Core.Emulation
         /// <summary>
         /// Get the last unicorn error.
         /// </summary>
-        public UCErrors GetLastError() => _emulator.GetLastError();
+        public BackendError GetLastError() => _emulator.GetLastError();
 
         /// <summary>
         /// Write a value to a register.
@@ -2897,7 +2875,7 @@ namespace Brovan.Core.Emulation
 
         private Dictionary<ulong, byte[]> RegionSnapshots = new Dictionary<ulong, byte[]>();
 
-        private bool SnapMemoryMonitor(IntPtr uc, MemoryType Type, ulong Address, uint Size, ulong value, IntPtr user_data)
+        private bool SnapMemoryMonitor(BackendMemoryAccessType Type, ulong Address, uint Size, ulong value)
         {
             try
             {
@@ -2949,7 +2927,7 @@ namespace Brovan.Core.Emulation
             if (SnapMonitor == null)
                 SnapMonitor = SnapMemoryMonitor;
             RegionSnapshots.Clear();
-            _emulator.AddHook(0, 0, Hooks.UC_HOOK_MEM_WRITE, Marshal.GetFunctionPointerForDelegate(SnapMonitor));
+            _emulator.AddMemoryHook(0, 0, BackendHookType.MemoryWrite, SnapMonitor);
             return Snapshot;
         }
 

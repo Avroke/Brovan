@@ -465,7 +465,7 @@ namespace Brovan.Core.Emulation.Guests
             }
 
             State = Instance._emulator.Emulate(Thread.Context.RIP, 0, 0, QuantumInstructions);
-            if (!State && Instance._emulator.GetLastError() == UCErrors.UC_ERR_EXCEPTION)
+            if (!State && Instance._emulator.GetLastError() == BackendError.Exception)
             {
                 ulong EFlags = Instance.ReadRegister(Registers.UC_X86_REG_EFLAGS);
                 if ((EFlags & (ulong)CPUFlags.TF) != 0 && !ThreadState.DispatchException)
@@ -638,20 +638,20 @@ namespace Brovan.Core.Emulation.Guests
             QueueUserModeException(Instance, NTSTATUS.STATUS_ILLEGAL_INSTRUCTION);
         }
 
-        private static ExceptionType MapMemoryTypeToExceptionType(MemoryType Type)
+        private static ExceptionType MapMemoryTypeToExceptionType(BackendMemoryAccessType Type)
         {
             switch (Type)
             {
-                case MemoryType.UC_MEM_READ_UNMAPPED:
-                case MemoryType.UC_MEM_READ_PROT:
+                case BackendMemoryAccessType.ReadUnmapped:
+                case BackendMemoryAccessType.ReadProtected:
                     return ExceptionType.Read;
 
-                case MemoryType.UC_MEM_WRITE_UNMAPPED:
-                case MemoryType.UC_MEM_WRITE_PROT:
+                case BackendMemoryAccessType.WriteUnmapped:
+                case BackendMemoryAccessType.WriteProtected:
                     return ExceptionType.Write;
 
-                case MemoryType.UC_MEM_FETCH_UNMAPPED:
-                case MemoryType.UC_MEM_FETCH_PROT:
+                case BackendMemoryAccessType.FetchUnmapped:
+                case BackendMemoryAccessType.FetchProtected:
                     return ExceptionType.Execute;
 
                 default:
@@ -659,7 +659,7 @@ namespace Brovan.Core.Emulation.Guests
             }
         }
 
-        public bool HandleInvalidMemory(BinaryEmulator Instance, MemoryType Type, ulong Address, uint Size, ulong Value)
+        public bool HandleInvalidMemory(BinaryEmulator Instance, BackendMemoryAccessType Type, ulong Address, uint Size, ulong Value)
         {
             if (Instance._binary == null || (!IsBlob && Instance._binary.FileFormat != BinaryFormat.PE))
                 return false;

@@ -41,9 +41,7 @@ namespace Brovan.Core.Emulation
         public ulong StackSize = 0;
 
         private static IcedX86Disassembler Disassembler = new IcedX86Disassembler(X86DisassembleMode.Bit64, X86DisassemblerFormat.FastFormat);
-        private static IntPtr InstrHook = IntPtr.Zero;
-        private static MonitorHook InstructionHook;
-        private delegate void MonitorHook(IntPtr uc, ulong Address, uint Size, IntPtr user_data);
+        private static CodeHookCallback InstructionHook;
 
         private WinModule _lastAddressModule = null;
         private ulong _lastAddressModuleStart = 0;
@@ -777,16 +775,16 @@ namespace Brovan.Core.Emulation
             return HasGuardProtection(Special) ? MemoryProtection.None : Protection;
         }
 
-        private static ExceptionType MapGuardAccessType(MemoryType Type)
+        private static ExceptionType MapGuardAccessType(BackendMemoryAccessType Type)
         {
             switch (Type)
             {
-                case MemoryType.UC_MEM_WRITE_UNMAPPED:
-                case MemoryType.UC_MEM_WRITE_PROT:
+                case BackendMemoryAccessType.WriteUnmapped:
+                case BackendMemoryAccessType.WriteProtected:
                     return ExceptionType.Write;
 
-                case MemoryType.UC_MEM_FETCH_UNMAPPED:
-                case MemoryType.UC_MEM_FETCH_PROT:
+                case BackendMemoryAccessType.FetchUnmapped:
+                case BackendMemoryAccessType.FetchProtected:
                     return ExceptionType.Execute;
 
                 default:
@@ -794,13 +792,13 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        private static bool IsGuardFaultType(MemoryType Type)
+        private static bool IsGuardFaultType(BackendMemoryAccessType Type)
         {
             switch (Type)
             {
-                case MemoryType.UC_MEM_READ_PROT:
-                case MemoryType.UC_MEM_WRITE_PROT:
-                case MemoryType.UC_MEM_FETCH_PROT:
+                case BackendMemoryAccessType.ReadProtected:
+                case BackendMemoryAccessType.WriteProtected:
+                case BackendMemoryAccessType.FetchProtected:
                     return true;
 
                 default:
@@ -808,7 +806,7 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        internal bool TryHandleGuardPageViolation(MemoryType Type, ulong Address)
+        internal bool TryHandleGuardPageViolation(BackendMemoryAccessType Type, ulong Address)
         {
             WindowsGuest GuestEnvironment = WindowsGuest;
             if (GuestEnvironment == null || Guest == null || Guest.Os != GuestOsKind.Windows || !IsGuardFaultType(Type))
@@ -1845,7 +1843,7 @@ namespace Brovan.Core.Emulation
             return false;
         }
 
-        private void InstructionHandler(IntPtr uc, ulong Address, uint Size, IntPtr user_data)
+        private void InstructionHandler(ulong Address, uint Size)
         {
             Instruction++;
             if (Size == 2)
@@ -1948,9 +1946,7 @@ namespace Brovan.Core.Emulation
         {
             if (InstructionHook == null)
                 InstructionHook = InstructionHandler;
-            if (InstrHook == IntPtr.Zero)
-                InstrHook = Marshal.GetFunctionPointerForDelegate(InstructionHook);
-            _emulator.AddHook(1, 0, Hooks.UC_HOOK_CODE, InstrHook);
+            _emulator.AddCodeHook(1, 0, InstructionHook);
         }
 
         internal static byte[] GetApiSetMapBlob()

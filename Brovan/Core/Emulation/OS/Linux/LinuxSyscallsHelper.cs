@@ -2628,11 +2628,11 @@ namespace Brovan.Core.Emulation.OS.Linux
             ClearSignal(Mask, SIGSTOP);
         }
 
-        public static bool IsProtectionFault(MemoryType Type)
+        public static bool IsProtectionFault(BackendMemoryAccessType Type)
         {
-            return Type == MemoryType.UC_MEM_READ_PROT ||
-                   Type == MemoryType.UC_MEM_WRITE_PROT ||
-                   Type == MemoryType.UC_MEM_FETCH_PROT;
+            return Type == BackendMemoryAccessType.ReadProtected ||
+                   Type == BackendMemoryAccessType.WriteProtected ||
+                   Type == BackendMemoryAccessType.FetchProtected;
         }
 
 

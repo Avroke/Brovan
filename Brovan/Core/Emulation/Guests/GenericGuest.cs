@@ -28,8 +28,8 @@ namespace Brovan.Core.Emulation.Guests
         private readonly Dictionary<string, int> RegisterNames;
 
         public GuestOsKind Os => GuestOsKind.Generic;
-        public Arch UnicornArch { get; }
-        public Mode UnicornMode { get; }
+        public Arch BackendArch { get; }
+        public Mode BackendMode { get; }
         public ulong LoadAddress { get; }
         public ulong EntryAddress { get; }
         public ulong StackSize { get; }
@@ -38,23 +38,23 @@ namespace Brovan.Core.Emulation.Guests
         public ulong InitialStackPointer { get; private set; }
         public int ProgramCounterRegister { get; }
         public int StackPointerRegister { get; }
-        public bool IsX86 => UnicornArch == Arch.X86;
-        public bool IsArm => UnicornArch == Arch.ARM;
-        public bool Is64Bit => UnicornArch == Arch.X86 && UnicornMode == Mode.MODE_64;
-        public bool IsThumb => UnicornArch == Arch.ARM && UnicornMode == Mode.THUMB;
+        public bool IsX86 => BackendArch == Arch.X86;
+        public bool IsArm => BackendArch == Arch.ARM;
+        public bool Is64Bit => BackendArch == Arch.X86 && BackendMode == Mode.MODE_64;
+        public bool IsThumb => BackendArch == Arch.ARM && BackendMode == Mode.THUMB;
 
-        public GenericGuest(Arch UnicornArch, Mode UnicornMode, ulong LoadAddress, ulong EntryAddress, ulong StackSize)
+        public GenericGuest(Arch BackendArch, Mode BackendMode, ulong LoadAddress, ulong EntryAddress, ulong StackSize)
         {
-            this.UnicornArch = UnicornArch;
-            this.UnicornMode = UnicornMode;
+            this.BackendArch = BackendArch;
+            this.BackendMode = BackendMode;
             this.LoadAddress = LoadAddress;
             this.EntryAddress = EntryAddress;
             this.StackSize = StackSize;
             RegisterNames = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
-            if (UnicornArch == Arch.X86)
+            if (BackendArch == Arch.X86)
             {
-                if (UnicornMode == Mode.MODE_64)
+                if (BackendMode == Mode.MODE_64)
                 {
                     ProgramCounterRegister = (int)Registers.UC_X86_REG_RIP;
                     StackPointerRegister = (int)Registers.UC_X86_REG_RSP;
@@ -67,7 +67,7 @@ namespace Brovan.Core.Emulation.Guests
                     AddX86RegisterNames();
                 }
             }
-            else if (UnicornArch == Arch.ARM)
+            else if (BackendArch == Arch.ARM)
             {
                 ProgramCounterRegister = UC_ARM_REG_PC;
                 StackPointerRegister = UC_ARM_REG_SP;
@@ -75,7 +75,7 @@ namespace Brovan.Core.Emulation.Guests
             }
             else
             {
-                throw new NotSupportedException($"Unsupported generic architecture: {UnicornArch}.");
+                throw new NotSupportedException($"Unsupported generic architecture: {BackendArch}.");
             }
         }
 
@@ -119,7 +119,7 @@ namespace Brovan.Core.Emulation.Guests
                 GuestEntry = EntryAddress;
             }
 
-            if (UnicornArch == Arch.X86)
+            if (BackendArch == Arch.X86)
             {
                 if (Is64Bit)
                 {
@@ -174,7 +174,7 @@ namespace Brovan.Core.Emulation.Guests
             Instance.StopEmulation();
         }
 
-        public bool HandleInvalidMemory(BinaryEmulator Instance, MemoryType Type, ulong Address, uint Size, ulong Value)
+        public bool HandleInvalidMemory(BinaryEmulator Instance, BackendMemoryAccessType Type, ulong Address, uint Size, ulong Value)
         {
             Instance.TriggerEventMessage($"[!] Generic guest {Type} at 0x{Address:X} (size {Size}) from 0x{Instance._emulator.ReadRegister(ProgramCounterRegister):X}.", LogFlags.Issues);
             return false;
@@ -245,7 +245,7 @@ namespace Brovan.Core.Emulation.Guests
         {
             StringBuilder Builder = new StringBuilder();
 
-            if (UnicornArch == Arch.ARM)
+            if (BackendArch == Arch.ARM)
             {
                 Builder.AppendLine("Registers:");
                 Builder.AppendLine($"R0 : 0x{Instance._emulator.ReadRegister(UC_ARM_REG_R0):X8}    R1 : 0x{Instance._emulator.ReadRegister(UC_ARM_REG_R1):X8}    R2 : 0x{Instance._emulator.ReadRegister(UC_ARM_REG_R2):X8}    R3 : 0x{Instance._emulator.ReadRegister(UC_ARM_REG_R3):X8}");

@@ -441,8 +441,7 @@ namespace Brovan.EmulationMenu
             if (MemoryHook == null)
                 MemoryHook = GeneralMemoryHook;
 
-            IntPtr HookPtr = Marshal.GetFunctionPointerForDelegate(MemoryHook);
-            GeneralMemoryHookHandle = Emulator._emulator.AddHookWithHandle(1, 0, Hooks.UC_HOOK_MEM_READ | Hooks.UC_HOOK_MEM_WRITE, HookPtr);
+            GeneralMemoryHookHandle = Emulator._emulator.AddMemoryHook(1, 0, BackendHookType.MemoryRead | BackendHookType.MemoryWrite, MemoryHook);
             return GeneralMemoryHookHandle != IntPtr.Zero;
         }
 
@@ -451,14 +450,11 @@ namespace Brovan.EmulationMenu
             if (WatchMemoryHook == null)
                 WatchMemoryHook = WatchMemoryAccessHook;
 
-            if (WatchMemoryHookPtr == IntPtr.Zero)
-                WatchMemoryHookPtr = Marshal.GetFunctionPointerForDelegate(WatchMemoryHook);
-
             ulong EndAddress = Watchpoint.Address + (ulong)Watchpoint.Size - 1;
 
             if ((Watchpoint.Type & MemoryWatchType.Read) != 0)
             {
-                Watchpoint.ReadHookHandle = Emulator._emulator.AddHookWithHandle(Watchpoint.Address, EndAddress, Hooks.UC_HOOK_MEM_READ, WatchMemoryHookPtr);
+                Watchpoint.ReadHookHandle = Emulator._emulator.AddMemoryHook(Watchpoint.Address, EndAddress, BackendHookType.MemoryRead, WatchMemoryHook);
                 if (Watchpoint.ReadHookHandle == IntPtr.Zero)
                 {
                     RemoveWatchpointHooks(Watchpoint);
@@ -468,7 +464,7 @@ namespace Brovan.EmulationMenu
 
             if ((Watchpoint.Type & MemoryWatchType.Write) != 0)
             {
-                Watchpoint.WriteHookHandle = Emulator._emulator.AddHookWithHandle(Watchpoint.Address, EndAddress, Hooks.UC_HOOK_MEM_WRITE, WatchMemoryHookPtr);
+                Watchpoint.WriteHookHandle = Emulator._emulator.AddMemoryHook(Watchpoint.Address, EndAddress, BackendHookType.MemoryWrite, WatchMemoryHook);
                 if (Watchpoint.WriteHookHandle == IntPtr.Zero)
                 {
                     RemoveWatchpointHooks(Watchpoint);
@@ -478,7 +474,7 @@ namespace Brovan.EmulationMenu
 
             if ((Watchpoint.Type & MemoryWatchType.Fetch) != 0)
             {
-                Watchpoint.FetchHookHandle = Emulator._emulator.AddHookWithHandle(Watchpoint.Address, EndAddress, Hooks.UC_HOOK_MEM_FETCH, WatchMemoryHookPtr);
+                Watchpoint.FetchHookHandle = Emulator._emulator.AddMemoryHook(Watchpoint.Address, EndAddress, BackendHookType.MemoryFetch, WatchMemoryHook);
                 if (Watchpoint.FetchHookHandle == IntPtr.Zero)
                 {
                     RemoveWatchpointHooks(Watchpoint);
@@ -615,12 +611,9 @@ namespace Brovan.EmulationMenu
                 }
             }
 
-            if (InstrHook == IntPtr.Zero)
-                InstrHook = Marshal.GetFunctionPointerForDelegate(InstructionHook);
-
             if (InstrHookHandle == IntPtr.Zero)
             {
-                InstrHookHandle = Emulator._emulator.AddHookWithHandle(1, 0, Hooks.UC_HOOK_CODE, InstrHook);
+                InstrHookHandle = Emulator._emulator.AddCodeHook(1, 0, InstructionHook);
                 if (InstrHookHandle == IntPtr.Zero)
                     PrintHighlight($"[-] Failed to install instruction tracing hook. Last unicorn error: {Emulator.GetLastError()}", true);
             }
@@ -640,13 +633,12 @@ namespace Brovan.EmulationMenu
             if (BpHookHandle != IntPtr.Zero)
                 return true;
 
-            if (BpPtrHook == IntPtr.Zero)
+            if (BpHook == null)
             {
                 BpHook = BreakpointHandler;
-                BpPtrHook = Marshal.GetFunctionPointerForDelegate(BpHook);
             }
 
-            BpHookHandle = Emulator._emulator.AddHookWithHandle(1, 0, Hooks.UC_HOOK_CODE, BpPtrHook);
+            BpHookHandle = Emulator._emulator.AddCodeHook(1, 0, BpHook);
             return BpHookHandle != IntPtr.Zero;
         }
 
@@ -814,10 +806,7 @@ namespace Brovan.EmulationMenu
                 Patched = GBytes
             };
 
-            if (GHook == IntPtr.Zero)
-                GHook = Marshal.GetFunctionPointerForDelegate(GCodeHook);
-
-            Patch.BlockHookHandle = Emulator._emulator.AddHookWithHandle(GAddress, GEnd, Hooks.UC_HOOK_BLOCK, GHook);
+            Patch.BlockHookHandle = Emulator._emulator.AddCodeHook(GAddress, GEnd, GCodeHook);
             if (Patch.BlockHookHandle == IntPtr.Zero)
             {
                 PrintHighlight($"[-] Failed to install the Ghost patch block hook, Last unicorn error: {Emulator.GetLastError()}", true);
@@ -1122,10 +1111,9 @@ namespace Brovan.EmulationMenu
             for (int i = ArgStart; i < args.Length; i++)
                 ArgTypes.Add(args[i]);
 
-            if (FuncMonEntryHookPtr == IntPtr.Zero)
+            if (FuncMonEntryHook == null)
             {
                 FuncMonEntryHook = FuncMonEntryHookHandler;
-                FuncMonEntryHookPtr = Marshal.GetFunctionPointerForDelegate(FuncMonEntryHook);
             }
 
             if (FuncMons.TryGetValue(FuncAddress, out var OldMonitor) && OldMonitor.HookHandle != IntPtr.Zero)
@@ -1134,7 +1122,7 @@ namespace Brovan.EmulationMenu
                 RemoveFuncMonPendingReturns(FuncAddress);
             }
 
-            IntPtr EntryHook = Emulator._emulator.AddHookWithHandle(FuncAddress, FuncAddress, Hooks.UC_HOOK_BLOCK, FuncMonEntryHookPtr);
+            IntPtr EntryHook = Emulator._emulator.AddCodeHook(FuncAddress, FuncAddress, FuncMonEntryHook);
             if (EntryHook == IntPtr.Zero)
             {
                 PrintHighlight($"[-] Failed to install funcmon hook at 0x{FuncAddress:X}.", true);
@@ -1402,13 +1390,12 @@ namespace Brovan.EmulationMenu
                             TempStepHookHandle = IntPtr.Zero;
                         }
 
-                        if (TempStepHook == IntPtr.Zero)
+                        if (StepHookDelegate == null)
                         {
                             StepHookDelegate = StepHandler;
-                            TempStepHook = Marshal.GetFunctionPointerForDelegate(StepHookDelegate);
                         }
 
-                        TempStepHookHandle = Emulator._emulator.AddHookWithHandle(1, 0, Hooks.UC_HOOK_CODE, TempStepHook);
+                        TempStepHookHandle = Emulator._emulator.AddCodeHook(1, 0, StepHookDelegate);
                         if (TempStepHookHandle == IntPtr.Zero)
                         {
                             TempStepTarget = 0;
@@ -2010,15 +1997,14 @@ namespace Brovan.EmulationMenu
                                 break;
                             }
 
-                            if (CallTraceHookPtr == IntPtr.Zero)
+                            if (CallTraceHook == null)
                             {
                                 CallTraceHook = CallTraceHookHandler;
-                                CallTraceHookPtr = Marshal.GetFunctionPointerForDelegate(CallTraceHook);
                             }
 
                             if (CallTraceHookHandle == IntPtr.Zero)
                             {
-                                CallTraceHookHandle = Emulator._emulator.AddHookWithHandle(1, 0, Hooks.UC_HOOK_CODE, CallTraceHookPtr);
+                                CallTraceHookHandle = Emulator._emulator.AddCodeHook(1, 0, CallTraceHook);
                                 if (CallTraceHookHandle == IntPtr.Zero)
                                 {
                                     PrintHighlight("[-] Failed to install calltrace hook.", true);
@@ -2134,7 +2120,7 @@ namespace Brovan.EmulationMenu
 
                         if (sub.Equals("once", StringComparison.OrdinalIgnoreCase))
                         {
-                            LdrpLogInternalHookHandler(IntPtr.Zero, Emulator.ReadRegister(Emulator.IPRegister), 0, IntPtr.Zero);
+                            LdrpLogInternalHookHandler(Emulator.ReadRegister(Emulator.IPRegister), 0);
                             break;
                         }
 
@@ -2147,10 +2133,9 @@ namespace Brovan.EmulationMenu
                         LdrpLogInternalAddress = addr;
                         LdrpLogEnabled = true;
 
-                        if (LdrpLogHookPtr == IntPtr.Zero)
+                        if (LdrpLogHook == null)
                         {
                             LdrpLogHook = LdrpLogInternalHookHandler;
-                            LdrpLogHookPtr = Marshal.GetFunctionPointerForDelegate(LdrpLogHook);
                         }
 
                         if (LdrpLogHookHandle != IntPtr.Zero)
@@ -2159,7 +2144,7 @@ namespace Brovan.EmulationMenu
                             LdrpLogHookHandle = IntPtr.Zero;
                         }
 
-                        LdrpLogHookHandle = Emulator._emulator.AddHookWithHandle(addr, addr, Hooks.UC_HOOK_CODE, LdrpLogHookPtr);
+                        LdrpLogHookHandle = Emulator._emulator.AddCodeHook(addr, addr, LdrpLogHook);
                         if (LdrpLogHookHandle == IntPtr.Zero)
                         {
                             PrintHighlight($"[-] Failed to install ldrplog hook at 0x{addr:X}.", true);
@@ -2366,8 +2351,7 @@ namespace Brovan.EmulationMenu
                 Watchpoints.Clear();
                 NextWatchpointId = 1;
                 WatchMemoryHook = null;
-                WatchMemoryHookPtr = IntPtr.Zero;
-                GeneralMemoryHookHandle = IntPtr.Zero;
+                                GeneralMemoryHookHandle = IntPtr.Zero;
                 PrintHighlight("[*] Loading binary...", true);
                 IsQuickMode = Quick;
                 Binary = new BinaryFile(FilePath, Quick);

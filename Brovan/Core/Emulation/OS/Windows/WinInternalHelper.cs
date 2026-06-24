@@ -274,7 +274,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const ulong HundredNsPerDefaultTick = 156_250UL;
 
         private readonly BinaryEmulator Emulator;
-        private MemoryDelegate ReadHook;
+        private MemoryHookCallback ReadHook;
         private bool HookInstalled;
 
         private long LastUpdateTimestamp;
@@ -311,9 +311,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             LastUpdateTimestamp = 0;
 
             ReadHook = OnRead;
-            if (!Emulator._emulator.AddHook(Emulator.KUSER_SHARED_DATA, Emulator.KUSER_SHARED_DATA + (PageSize - 1), Hooks.UC_HOOK_MEM_READ, Marshal.GetFunctionPointerForDelegate(ReadHook)))
+            if (Emulator._emulator.AddMemoryHook(Emulator.KUSER_SHARED_DATA, Emulator.KUSER_SHARED_DATA + (PageSize - 1), BackendHookType.MemoryRead, ReadHook) == IntPtr.Zero)
             {
-                Utils.LogError($"[KUSER_MANAGER] Failed to add a hook for KUSER_SHARED_DATA to update dynamic fields. Last Unicorn Error: {Emulator.GetLastError()}\n- ReadHook Ptr 0x{ReadHook:X}");
+                Utils.LogError($"[KUSER_MANAGER] Failed to add a hook for KUSER_SHARED_DATA. Error: {Emulator.GetLastError()}");
             }
 
             HookInstalled = true;
@@ -322,7 +322,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             UpdateDynamicFields(true);
         }
 
-        private bool OnRead(IntPtr Uc, MemoryType Type, ulong Address, uint Size, ulong Value, IntPtr UserData)
+        private bool OnRead(BackendMemoryAccessType Type, ulong Address, uint Size, ulong Value)
         {
             UpdateDynamicFields(false);
             return true;
@@ -537,13 +537,10 @@ namespace Brovan.Core.Emulation.OS.Windows
         private readonly BinaryEmulator Emulator;
         private readonly WinSysHelper WinHelper;
 
-        private MemoryDelegate PebLdrWriteHook;
-        private MemoryDelegate LdrDataWriteHook;
-        private BlockHookDelegate BlockHook;
+        private MemoryHookCallback PebLdrWriteHook;
+        private MemoryHookCallback LdrDataWriteHook;
+        private CodeHookCallback BlockHook;
 
-        private IntPtr PebLdrWriteHookPtr;
-        private IntPtr LdrDataWriteHookPtr;
-        private IntPtr BlockHookPtr;
 
         private bool PebHookInstalled;
         private bool BlockHookInstalled;
@@ -558,7 +555,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private readonly Dictionary<ulong, ModuleInfo> LastSnapshot = new Dictionary<ulong, ModuleInfo>();
 
-        private delegate void BlockHookDelegate(IntPtr uc, ulong address, uint size, IntPtr user_data);
 
         private struct ModuleInfo
         {
@@ -592,11 +588,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong PebLdrPtr = Emulator.PEB + (ulong)PebOffsetLdr;
 
             PebLdrWriteHook = OnPebLdrPointerWrite;
-            PebLdrWriteHookPtr = Marshal.GetFunctionPointerForDelegate(PebLdrWriteHook);
 
-            if (!Emulator._emulator.AddHook(PebLdrPtr, PebLdrPtr + 7, Hooks.UC_HOOK_MEM_WRITE, PebLdrWriteHookPtr))
+            if (Emulator._emulator.AddMemoryHook(PebLdrPtr, PebLdrPtr + 7, BackendHookType.MemoryWrite, PebLdrWriteHook) == IntPtr.Zero)
             {
-                Utils.LogError($"[-] Failed to install PEB->Ldr MEM_WRITE hook. Last unicorn error: {Emulator.GetLastError()}");
+                Utils.LogError($"[-] Failed to install PEB->Ldr MEM_WRITE hook. Error: {Emulator.GetLastError()}");
                 return;
             }
 
@@ -609,18 +604,17 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return;
 
             BlockHook = OnBlock;
-            BlockHookPtr = Marshal.GetFunctionPointerForDelegate(BlockHook);
 
-            if (!Emulator._emulator.AddHook(1, 0, Hooks.UC_HOOK_BLOCK, BlockHookPtr))
+            if (Emulator._emulator.AddCodeHook(1, 0, BlockHook) == IntPtr.Zero)
             {
-                Utils.LogError($"[-] Failed to install BLOCK hook for LDR tracker. Last unicorn error: {Emulator.GetLastError()}");
+                Utils.LogError($"[-] Failed to install BLOCK hook for LDR tracker. Error: {Emulator.GetLastError()}");
                 return;
             }
 
             BlockHookInstalled = true;
         }
 
-        private bool OnPebLdrPointerWrite(IntPtr uc, MemoryType type, ulong address, uint size, ulong value, IntPtr user_data)
+        private bool OnPebLdrPointerWrite(BackendMemoryAccessType type, ulong address, uint size, ulong value)
         {
             PendingRefreshHooks = true;
             PendingSync = true;
@@ -628,14 +622,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             return true;
         }
 
-        private bool OnLdrDataWrite(IntPtr uc, MemoryType type, ulong address, uint size, ulong value, IntPtr user_data)
+        private bool OnLdrDataWrite(BackendMemoryAccessType type, ulong address, uint size, ulong value)
         {
             PendingSync = true;
             DelayBlocks = 2;
             return true;
         }
 
-        private void OnBlock(IntPtr uc, ulong address, uint size, IntPtr user_data)
+        private void OnBlock(ulong address, uint size)
         {
             if (!PendingSync && !PendingRefreshHooks)
                 return;
@@ -693,11 +687,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong End = LdrData + (ulong)PebLdrSize - 1;
 
             LdrDataWriteHook = OnLdrDataWrite;
-            LdrDataWriteHookPtr = Marshal.GetFunctionPointerForDelegate(LdrDataWriteHook);
 
-            if (!Emulator._emulator.AddHook(Begin, End, Hooks.UC_HOOK_MEM_WRITE, LdrDataWriteHookPtr))
+            if (Emulator._emulator.AddMemoryHook(Begin, End, BackendHookType.MemoryWrite, LdrDataWriteHook) == IntPtr.Zero)
             {
-                Utils.LogError($"[-] Failed to install PEB_LDR_DATA MEM_WRITE hook. Last unicorn error: {Emulator.GetLastError()}");
+                Utils.LogError($"[-] Failed to install PEB_LDR_DATA MEM_WRITE hook. Error: {Emulator.GetLastError()}");
                 return;
             }
 

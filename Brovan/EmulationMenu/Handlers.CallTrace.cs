@@ -286,7 +286,7 @@ namespace Brovan
             return $"0x{Address:X}";
         }
 
-        public static void CallTraceHookHandler(IntPtr Uc, ulong Address, uint Size, IntPtr UserData)
+        public static void CallTraceHookHandler(ulong Address, uint Size)
         {
             if (!CallTraceEnabled || Emulator == null)
                 return;
