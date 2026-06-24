@@ -20,6 +20,9 @@ namespace Brovan.Core.Emulation
         public static extern UCErrors uc_mem_map(IntPtr uc, ulong address, UIntPtr size, MemoryProtection Protection);
 
         [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
+        public static extern UCErrors uc_mem_map_ptr(IntPtr uc, ulong address, UIntPtr size, MemoryProtection Protection, IntPtr ptr);
+
+        [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
         public static extern UCErrors uc_mem_unmap(IntPtr uc, ulong address, UIntPtr size);
 
         [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]

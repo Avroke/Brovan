@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection.Metadata.Ecma335;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
@@ -32,12 +33,34 @@ namespace Brovan.Core.Emulation
     /// </summary>
     public class Unicorn : IDisposable
     {
-        // local variables used by the class
         private IntPtr _uc;
         private Mode mode;
         private UCErrors _error;
-        private List<(ulong, ulong)> Maps = new List<(ulong, ulong)>();
+        private readonly List<MappedRegion> _mappedRegions = new List<MappedRegion>();
+        private readonly List<int> _regionIndex = new List<int>();
+        private bool _regionIndexDirty = true;
+        private readonly List<IntPtr> _pendingFrees = new List<IntPtr>();
         private List<IntPtr> HooksList = new List<IntPtr>();
+
+        private sealed class MappedRegion
+        {
+            public ulong Address;
+            public ulong Size;
+            public IntPtr Ptr;
+        }
+
+        private readonly struct RegionAddressComparer : IComparer<int>
+        {
+            private readonly List<MappedRegion> _regions;
+            public RegionAddressComparer(List<MappedRegion> regions) => _regions = regions;
+
+            public int Compare(int a, int b)
+            {
+                ulong aBase = _regions[a].Address;
+                ulong bBase = _regions[b].Address;
+                return aBase.CompareTo(bBase);
+            }
+        }
         private readonly object _memoryLock = new object();
         private readonly object _registerLock = new object();
         private readonly object _hooksLock = new object();
@@ -138,17 +161,33 @@ namespace Brovan.Core.Emulation
         /// <param name="size">Size of the mapped memory.</param>
         /// <param name="protection">Protection(s) for the mapped memory.</param>
         /// <returns>returns true if successfully mapped, otherwise false.</returns>
-        public bool MapMemory(ulong address, ulong size, MemoryProtection protection)
+        public unsafe bool MapMemory(ulong address, ulong size, MemoryProtection protection)
         {
             lock (_mapsLock)
             {
                 if (DisposedCheck())
                     return false;
 
+                nuint nativeSize = (nuint)size;
+                byte* ptr = (byte*)NativeMemory.AlignedAlloc(nativeSize, 0x1000);
+                if (ptr != null)
+                {
+                    NativeMemory.Clear(ptr, nativeSize);
+                    _error = uc_mem_map_ptr(_uc, address, new UIntPtr(size), protection, (IntPtr)ptr);
+                    if (_error == UCErrors.UC_ERR_OK)
+                    {
+                        _mappedRegions.Add(new MappedRegion { Address = address, Size = size, Ptr = (IntPtr)ptr });
+                        _regionIndexDirty = true;
+                        return true;
+                    }
+                    NativeMemory.AlignedFree(ptr);
+                }
+
                 _error = uc_mem_map(_uc, address, new UIntPtr(size), protection);
                 if (_error == UCErrors.UC_ERR_OK)
                 {
-                    Maps.Add((address, size));
+                    _mappedRegions.Add(new MappedRegion { Address = address, Size = size, Ptr = IntPtr.Zero });
+                    _regionIndexDirty = true;
                     return true;
                 }
             }
@@ -161,7 +200,7 @@ namespace Brovan.Core.Emulation
         /// <param name="address">Address of the mapped memory.</param>
         /// <param name="size">Size of the mapped memory.</param>
         /// <returns>returns true if successfully unmapped, otherwise false.</returns>
-        public bool UnmapMemory(ulong address, ulong size)
+        public unsafe bool UnmapMemory(ulong address, ulong size)
         {
             lock (_mapsLock)
             {
@@ -171,7 +210,19 @@ namespace Brovan.Core.Emulation
                 _error = uc_mem_unmap(_uc, address, new UIntPtr(size));
                 if (_error == UCErrors.UC_ERR_OK)
                 {
-                    Maps.Remove((address, size));
+                    FlushTlb();
+
+                    for (int i = 0; i < _mappedRegions.Count; i++)
+                    {
+                        if (_mappedRegions[i].Address == address && _mappedRegions[i].Size == size)
+                        {
+                            if (_mappedRegions[i].Ptr != IntPtr.Zero)
+                                _pendingFrees.Add(_mappedRegions[i].Ptr);
+                            _mappedRegions.RemoveAt(i);
+                            _regionIndexDirty = true;
+                            break;
+                        }
+                    }
                     return true;
                 }
             }
@@ -185,8 +236,26 @@ namespace Brovan.Core.Emulation
         /// <param name="value">Value to write to the emulated memory address.</param>
         /// <param name="length">Number of bytes to write. A value of 0 writes the full byte array.</param>
         /// <returns>True if the write succeeded; otherwise, false.</returns>
-        public bool WriteMemory(ulong address, byte[] value, uint length = 0)
+        public unsafe bool WriteMemory(ulong address, byte[] value, uint length = 0)
         {
+            if (value == null)
+                return false;
+
+            uint writeLen = length == 0 ? (uint)value.Length : length;
+            if (writeLen == 0 || writeLen > (uint)value.Length)
+                writeLen = (uint)value.Length;
+
+            if (writeLen == 0)
+                return false;
+
+            if (TryGetHostPointer(address, (int)writeLen, out byte* dst, out long offset))
+            {
+                _error = UCErrors.UC_ERR_OK;
+                fixed (byte* src = value)
+                    Unsafe.CopyBlockUnaligned(dst + offset, src, writeLen);
+                return true;
+            }
+
             if (DisposedCheck())
                 return false;
 
@@ -195,20 +264,11 @@ namespace Brovan.Core.Emulation
             {
                 lock (_memoryLock)
                 {
-                    if (value == null)
-                        return false;
-
                     if (DisposedCheck())
                         return false;
 
                     if (_uc == IntPtr.Zero)
                         return false;
-
-                    uint writeLen = length == 0 ? (uint)value.Length : length;
-                    if (writeLen == 0 || writeLen > (uint)value.Length)
-                    {
-                        writeLen = (uint)value.Length;
-                    }
 
                     GCHandle handle = default;
                     try
@@ -231,11 +291,8 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        public bool WriteMemory(ulong Address, byte[] Value, int Offset, int Length)
+        public unsafe bool WriteMemory(ulong Address, byte[] Value, int Offset, int Length)
         {
-            if (DisposedCheck())
-                return false;
-
             if (Value == null)
                 return false;
 
@@ -251,6 +308,17 @@ namespace Brovan.Core.Emulation
 
             if (Length == 0)
                 return true;
+
+            if (TryGetHostPointer(Address, Length, out byte* dst, out long dstOffset))
+            {
+                _error = UCErrors.UC_ERR_OK;
+                fixed (byte* src = Value)
+                    Unsafe.CopyBlockUnaligned(dst + dstOffset, src + Offset, (uint)Length);
+                return true;
+            }
+
+            if (DisposedCheck())
+                return false;
 
             _lock.EnterReadLock();
             try
@@ -286,6 +354,21 @@ namespace Brovan.Core.Emulation
 
         public unsafe bool WriteMemory(ulong address, ReadOnlySpan<byte> value, uint length = 0)
         {
+            uint writeLen = length == 0 ? (uint)value.Length : length;
+            if (writeLen == 0 || writeLen > (uint)value.Length)
+                writeLen = (uint)value.Length;
+
+            if (writeLen == 0)
+                return false;
+
+            if (TryGetHostPointer(address, (int)writeLen, out byte* dst, out long offset))
+            {
+                _error = UCErrors.UC_ERR_OK;
+                fixed (byte* src = value)
+                    Unsafe.CopyBlockUnaligned(dst + offset, src, writeLen);
+                return true;
+            }
+
             if (DisposedCheck())
                 return false;
 
@@ -298,13 +381,6 @@ namespace Brovan.Core.Emulation
                         return false;
 
                     if (_uc == IntPtr.Zero)
-                        return false;
-
-                    uint writeLen = length == 0 ? (uint)value.Length : length;
-                    if (writeLen == 0 || writeLen > (uint)value.Length)
-                        writeLen = (uint)value.Length;
-
-                    if (writeLen == 0)
                         return false;
 
                     fixed (byte* ptr = value)
@@ -430,11 +506,20 @@ namespace Brovan.Core.Emulation
         /// <param name="address">Address to read from.</param>
         /// <param name="length">Length of the data to read.</param>
         /// <returns>returns a byte array containing the data.</returns>
-        public byte[] ReadMemory(ulong address, ulong length)
+        public unsafe byte[] ReadMemory(ulong address, ulong length)
         {
             if (DisposedCheck())
                 return Array.Empty<byte>();
+            if (length > int.MaxValue)
+                return null;
             byte[] value = new byte[length];
+            if (TryGetHostPointer(address, (int)length, out byte* src, out long offset))
+            {
+                _error = UCErrors.UC_ERR_OK;
+                if (length > 0)
+                    Unsafe.CopyBlockUnaligned(ref value[0], ref Unsafe.AsRef<byte>(src + offset), (uint)length);
+                return value;
+            }
             _error = uc_mem_read(_uc, address, value, new UIntPtr(length));
             return value;
         }
@@ -445,19 +530,41 @@ namespace Brovan.Core.Emulation
         /// <param name="address">Address to read from.</param>
         /// <param name="length">Length of the data to read.</param>
         /// <returns>returns a byte array containing the data.</returns>
-        public byte[] ReadMemory(ulong address, uint length)
+        public unsafe byte[] ReadMemory(ulong address, uint length)
         {
             if (DisposedCheck())
                 return Array.Empty<byte>();
             if (length > int.MaxValue)
                 return null;
             byte[] value = new byte[length];
+            if (TryGetHostPointer(address, (int)length, out byte* src, out long offset))
+            {
+                _error = UCErrors.UC_ERR_OK;
+                if (length > 0)
+                    Unsafe.CopyBlockUnaligned(ref value[0], ref Unsafe.AsRef<byte>(src + offset), length);
+                return value;
+            }
             _error = uc_mem_read(_uc, address, value, length);
             return value;
         }
 
         public unsafe bool ReadMemory(ulong address, Span<byte> value, uint length = 0)
         {
+            uint ReadLen = length == 0 ? (uint)value.Length : length;
+            if (ReadLen == 0 || ReadLen > (uint)value.Length)
+                ReadLen = (uint)value.Length;
+
+            if (ReadLen == 0)
+                return false;
+
+            if (TryGetHostPointer(address, (int)ReadLen, out byte* src, out long offset))
+            {
+                _error = UCErrors.UC_ERR_OK;
+                fixed (byte* dst = value)
+                    Unsafe.CopyBlockUnaligned(dst, src + offset, ReadLen);
+                return true;
+            }
+
             if (DisposedCheck())
                 return false;
 
@@ -470,13 +577,6 @@ namespace Brovan.Core.Emulation
                         return false;
 
                     if (_uc == IntPtr.Zero)
-                        return false;
-
-                    uint ReadLen = length == 0 ? (uint)value.Length : length;
-                    if (ReadLen == 0 || ReadLen > (uint)value.Length)
-                        ReadLen = (uint)value.Length;
-
-                    if (ReadLen == 0)
                         return false;
 
                     fixed (byte* Ptr = value)
@@ -497,8 +597,13 @@ namespace Brovan.Core.Emulation
         /// </summary>
         /// <param name="address">Address to read from.</param>
         /// <returns>returns a ulong of the data.</returns>
-        public ulong ReadMemoryULong(ulong address)
+        public unsafe ulong ReadMemoryULong(ulong address)
         {
+            if (TryGetHostPointer(address, sizeof(ulong), out byte* ptr, out long offset))
+            {
+                _error = UCErrors.UC_ERR_OK;
+                return *(ulong*)(ptr + offset);
+            }
             if (DisposedCheck())
                 return 0;
             ulong value = 0;
@@ -511,8 +616,13 @@ namespace Brovan.Core.Emulation
         /// </summary>
         /// <param name="address">Address to read from.</param>
         /// <returns>returns a ulong of the data.</returns>
-        public uint ReadMemoryUInt(ulong address)
+        public unsafe uint ReadMemoryUInt(ulong address)
         {
+            if (TryGetHostPointer(address, sizeof(uint), out byte* ptr, out long offset))
+            {
+                _error = UCErrors.UC_ERR_OK;
+                return *(uint*)(ptr + offset);
+            }
             if (DisposedCheck())
                 return 0;
             uint value = 0;
@@ -525,8 +635,13 @@ namespace Brovan.Core.Emulation
         /// </summary>
         /// <param name="address">Address to read from.</param>
         /// <returns>returns a ushort of the data.</returns>
-        public ushort ReadMemoryUShort(ulong address)
+        public unsafe ushort ReadMemoryUShort(ulong address)
         {
+            if (TryGetHostPointer(address, sizeof(ushort), out byte* ptr, out long offset))
+            {
+                _error = UCErrors.UC_ERR_OK;
+                return *(ushort*)(ptr + offset);
+            }
             if (DisposedCheck())
                 return 0;
             ushort value = 0;
@@ -541,7 +656,7 @@ namespace Brovan.Core.Emulation
         /// <param name="length">Maximum length of the string to read.</param>
         /// <param name="encoding">Encoding type.</param>
         /// <returns>Returns a string of the data, or <see cref="string.Empty"/> if reading failed.</returns>
-        public string ReadMemoryString(ulong address, int length, Encoding encoding)
+        public unsafe string ReadMemoryString(ulong address, int length, Encoding encoding)
         {
             if (DisposedCheck())
                 return null;
@@ -552,9 +667,17 @@ namespace Brovan.Core.Emulation
             byte[] Buffer = ArrayPool<byte>.Shared.Rent(length);
             try
             {
-                _error = uc_mem_read(_uc, address, Buffer, (uint)length);
-                if (_error != UCErrors.UC_ERR_OK)
-                    return string.Empty;
+                if (TryGetHostPointer(address, length, out byte* src, out long offset))
+                {
+                    _error = UCErrors.UC_ERR_OK;
+                    Unsafe.CopyBlockUnaligned(ref Buffer[0], ref Unsafe.AsRef<byte>(src + offset), (uint)length);
+                }
+                else
+                {
+                    _error = uc_mem_read(_uc, address, Buffer, (uint)length);
+                    if (_error != UCErrors.UC_ERR_OK)
+                        return string.Empty;
+                }
 
                 int BytesRead;
                 if (encoding == Encoding.Unicode || encoding == Encoding.BigEndianUnicode)
@@ -844,7 +967,22 @@ namespace Brovan.Core.Emulation
             finally
             {
                 _emuLock.ExitWriteLock();
+                FlushPendingFrees();
             }
+        }
+
+        private unsafe void FlushPendingFrees()
+        {
+            IntPtr[] toFree;
+            lock (_mapsLock)
+            {
+                if (_pendingFrees.Count == 0)
+                    return;
+                toFree = _pendingFrees.ToArray();
+                _pendingFrees.Clear();
+            }
+            foreach (IntPtr ptr in toFree)
+                NativeMemory.AlignedFree((void*)ptr);
         }
 
         /// <summary>
@@ -887,7 +1025,7 @@ namespace Brovan.Core.Emulation
         /// <returns>returns true if the hook is whitelisted, otherwise false.</returns>
         private static bool IsWhitelistedHookType(Hooks hook)
         {
-            switch(hook)
+            switch (hook)
             {
                 case Hooks.UC_HOOK_MEM_FETCH_PROT:
                 case Hooks.UC_HOOK_MEM_FETCH_UNMAPPED:
@@ -980,11 +1118,17 @@ namespace Brovan.Core.Emulation
                 return false;
 
             bool SuccessAll = true;
-            foreach (IntPtr Hook in HooksList)
+            IntPtr[] snapshot;
+            lock (_hooksLock)
+            {
+                snapshot = HooksList.ToArray();
+            }
+
+            foreach (IntPtr Hook in snapshot)
             {
                 if (uc_hook_del(_uc, Hook) == UCErrors.UC_ERR_OK)
                 {
-                    HooksList.Remove(Hook);
+                    lock (_hooksLock) { HooksList.Remove(Hook); }
                 }
                 else
                 {
@@ -1072,6 +1216,141 @@ namespace Brovan.Core.Emulation
             return false;
         }
 
+        public bool IsRangeMapped(ulong address, ulong size)
+        {
+            if (size == 0)
+                return true;
+
+            if (Volatile.Read(ref _disposing) != 0 || Volatile.Read(ref _disposed) != 0)
+                return false;
+
+            EnsureRegionIndex();
+
+            ulong remaining = size;
+            ulong current = address;
+
+            while (remaining > 0)
+            {
+                if (!TryFindMappedRegion(current, out MappedRegion found))
+                    return false;
+
+                ulong regionEnd = found.Address + found.Size;
+                if (regionEnd <= current)
+                    return false;
+
+                ulong chunk = regionEnd - current;
+                if (chunk > remaining)
+                    chunk = remaining;
+
+                current += chunk;
+                remaining -= chunk;
+            }
+
+            return true;
+        }
+
+        private unsafe bool TryGetHostPointer(ulong address, int accessSize, out byte* ptr, out long offset)
+        {
+            if (!TryFindMappedRegion(address, out MappedRegion found))
+            {
+                ptr = null;
+                offset = 0;
+                return false;
+            }
+
+            if (found.Ptr == IntPtr.Zero)
+            {
+                ptr = null;
+                offset = 0;
+                return false;
+            }
+
+            if (!IsRangeInRegion(address, (ulong)accessSize, found.Address, found.Size))
+            {
+                ptr = null;
+                offset = 0;
+                return false;
+            }
+
+            ptr = (byte*)found.Ptr;
+            offset = (long)(address - found.Address);
+            return true;
+        }
+
+        private bool TryFindMappedRegion(ulong address, out MappedRegion found)
+        {
+            found = null;
+
+            if (Volatile.Read(ref _disposing) != 0 || Volatile.Read(ref _disposed) != 0)
+                return false;
+
+            EnsureRegionIndex();
+
+            if (_regionIndex.Count == 0)
+                return false;
+
+            int left = 0;
+            int right = _regionIndex.Count - 1;
+            int candidate = -1;
+
+            while (left <= right)
+            {
+                int mid = left + ((right - left) >> 1);
+                MappedRegion r = _mappedRegions[_regionIndex[mid]];
+                if (r.Address <= address)
+                {
+                    candidate = mid;
+                    left = mid + 1;
+                }
+                else
+                {
+                    right = mid - 1;
+                }
+            }
+
+            if (candidate < 0)
+                return false;
+
+            found = _mappedRegions[_regionIndex[candidate]];
+
+            if (address < found.Address || address >= found.Address + found.Size)
+            {
+                found = null;
+                return false;
+            }
+
+            return true;
+        }
+
+        private static bool IsRangeInRegion(ulong address, ulong size, ulong regionBase, ulong regionSize)
+        {
+            if (size == 0)
+                return true;
+
+            ulong regionEnd = regionBase + regionSize;
+            if (regionEnd < regionBase)
+                return false;
+
+            if (address < regionBase || address >= regionEnd)
+                return false;
+
+            ulong remaining = regionEnd - address;
+            return size <= remaining;
+        }
+
+        private void EnsureRegionIndex()
+        {
+            if (!_regionIndexDirty && _regionIndex.Count == _mappedRegions.Count)
+                return;
+
+            _regionIndex.Clear();
+            for (int i = 0; i < _mappedRegions.Count; i++)
+                _regionIndex.Add(i);
+
+            CollectionsMarshal.AsSpan(_regionIndex).Sort(new RegionAddressComparer(_mappedRegions));
+            _regionIndexDirty = false;
+        }
+
         public void Dispose()
         {
             if (Interlocked.Exchange(ref _disposing, 1) == 1)
@@ -1091,16 +1370,15 @@ namespace Brovan.Core.Emulation
                 {
                     if (_uc != IntPtr.Zero)
                     {
-                        List<(ulong Start, ulong Size)> mapsSnapshot;
+                        List<MappedRegion> mapsSnapshot;
                         lock (_mapsLock)
                         {
-                            mapsSnapshot = Maps.ToList();
+                            mapsSnapshot = _mappedRegions.ToList();
                         }
 
-                        foreach (var (Start, Size) in mapsSnapshot)
+                        foreach (var region in mapsSnapshot)
                         {
-                            try { uc_mem_unmap(_uc, Start, new UIntPtr(Size)); } catch { }
-                            lock (_mapsLock) { Maps.Remove((Start, Size)); }
+                            try { uc_mem_unmap(_uc, region.Address, new UIntPtr(region.Size)); } catch { }
                         }
 
                         List<IntPtr> hooksSnapshot;
@@ -1118,7 +1396,24 @@ namespace Brovan.Core.Emulation
                         try { uc_close(_uc); } catch { }
                         _uc = IntPtr.Zero;
 
-                        lock (_mapsLock) { Maps.Clear(); }
+                        lock (_mapsLock)
+                        {
+                            unsafe
+                            {
+                                foreach (var region in _mappedRegions)
+                                {
+                                    if (region.Ptr != IntPtr.Zero)
+                                        NativeMemory.AlignedFree((void*)region.Ptr);
+                                }
+                                _mappedRegions.Clear();
+                                _regionIndex.Clear();
+                                _regionIndexDirty = true;
+
+                                foreach (IntPtr ptr in _pendingFrees)
+                                    NativeMemory.AlignedFree((void*)ptr);
+                            }
+                            _pendingFrees.Clear();
+                        }
                         lock (_hooksLock) { HooksList.Clear(); }
                     }
                 }

@@ -54,6 +54,13 @@ namespace Brovan.Core.Emulation
         public ulong Arg5;
     }
 
+    public struct WinSyscallEntry
+    {
+        public uint Number;
+        public string Name;
+        public IWinSyscall Handler;
+    }
+
     /// <summary>
     /// Linux syscall handling interface.
     /// </summary>
@@ -1457,8 +1464,8 @@ namespace Brovan.Core.Emulation
             [new ApiSetOverrideKey("ext-ms-win-kernel32-errorhandling-l1-1-0.dll", "kernel32.dll")] = "faultrep.dll",
         };
 
-        private static IReadOnlyDictionary<uint, IWinSyscall> CachedSyscallDictionary = null;
-        private static IReadOnlyDictionary<uint, IWinSyscall> CachedSyscallDictionaryx86 = null;
+        private static IReadOnlyDictionary<uint, WinSyscallEntry> CachedSyscallDictionary = null;
+        private static IReadOnlyDictionary<uint, WinSyscallEntry> CachedSyscallDictionaryx86 = null;
 
         public static uint TryExtractSyscallByte(ReadOnlySpan<byte> bytes)
         {
@@ -1496,7 +1503,7 @@ namespace Brovan.Core.Emulation
         /// </summary>
         /// <param name="BinaryArch">Binary architecture to get for syscalls.</param>
         /// <returns>returns the dictionary containing the syscalls.</returns>
-        public static IReadOnlyDictionary<uint, IWinSyscall> BuildWinSyscallDictionary(BinaryArchitecture BinaryArch)
+        public static IReadOnlyDictionary<uint, WinSyscallEntry> BuildWinSyscallDictionary(BinaryArchitecture BinaryArch)
         {
             if (BinaryArch == BinaryArchitecture.x64 && CachedSyscallDictionary != null)
                 return CachedSyscallDictionary;
@@ -1506,7 +1513,7 @@ namespace Brovan.Core.Emulation
             HashSet<string> SupportedFunctions = new HashSet<string>(WinSyscallRegistry.SupportedFunctions, StringComparer.OrdinalIgnoreCase);
             HashSet<string> SupportedFunctionsWin32k = new HashSet<string>(WinSyscallRegistry.SupportedFunctionsWin32k, StringComparer.OrdinalIgnoreCase);
 
-            Dictionary<uint, IWinSyscall> SyscallDictionary = new Dictionary<uint, IWinSyscall>();
+            Dictionary<uint, WinSyscallEntry> SyscallDictionary = new Dictionary<uint, WinSyscallEntry>();
 
             void RegisterSyscall(uint SyscallNumber, string FunctionName, bool Win32k)
             {
@@ -1516,7 +1523,12 @@ namespace Brovan.Core.Emulation
                     if (Instance == null)
                         return;
 
-                    SyscallDictionary[SyscallNumber] = Instance;
+                    SyscallDictionary[SyscallNumber] = new WinSyscallEntry
+                    {
+                        Number = SyscallNumber,
+                        Name = FunctionName,
+                        Handler = Instance
+                    };
                 }
                 catch (Exception Ex)
                 {
@@ -1632,9 +1644,9 @@ namespace Brovan.Core.Emulation
             if (SyscallDictionary.Count > 0)
             {
                 if (BinaryArch == BinaryArchitecture.x64)
-                    CachedSyscallDictionary = new Dictionary<uint, IWinSyscall>(SyscallDictionary);
+                    CachedSyscallDictionary = new Dictionary<uint, WinSyscallEntry>(SyscallDictionary);
                 else
-                    CachedSyscallDictionaryx86 = new Dictionary<uint, IWinSyscall>(SyscallDictionary);
+                    CachedSyscallDictionaryx86 = new Dictionary<uint, WinSyscallEntry>(SyscallDictionary);
             }
 
             return SyscallDictionary;

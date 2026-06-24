@@ -65,6 +65,9 @@ namespace Brovan.Core.Emulation
         private readonly object _lock = new object();
         private long _nextHistorySequence = 1;
         private bool _traceEnabled;
+        private int _ruleCount;
+
+        public bool HasRules => Volatile.Read(ref _ruleCount) > 0;
 
         public bool TraceEnabled
         {
@@ -162,7 +165,11 @@ namespace Brovan.Core.Emulation
 
         public void AddRule(SyscallRule r)
         {
-            lock (_lock) { _rules.Add(r); }
+            lock (_lock)
+            {
+                _rules.Add(r);
+                Volatile.Write(ref _ruleCount, _rules.Count);
+            }
         }
 
         public bool RemoveRule(string idOrName)
@@ -170,6 +177,7 @@ namespace Brovan.Core.Emulation
             lock (_lock)
             {
                 int removed = _rules.RemoveAll(x => x.Id == idOrName || x.Name?.Equals(idOrName, StringComparison.OrdinalIgnoreCase) == true);
+                Volatile.Write(ref _ruleCount, _rules.Count);
                 return removed > 0;
             }
         }
@@ -180,6 +188,9 @@ namespace Brovan.Core.Emulation
 
             if (TraceEnabled)
                 _emu.TriggerEventMessage($"[SYSCALL TRACE] {name ?? "sys_" + number.ToString("X")} (0x{number:X}) args: {string.Join(", ", args.Select(a => $"0x{a:X}"))}", LogFlags.General);
+
+            if (!HasRules)
+                return ctx;
 
             SyscallRule matched = null;
             lock (_lock)

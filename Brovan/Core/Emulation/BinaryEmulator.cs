@@ -371,7 +371,6 @@ namespace Brovan.Core.Emulation
         private const ulong RdtscReadCycles = 60;
         private const ulong RdtscpReadCycles = 90;
         private readonly long EmulatedSystemTimeBaseFileTimeUtc = DateTime.UtcNow.ToFileTimeUtc();
-        private readonly Comparison<int> _memoryRegionIndexComparer;
 
         /// <summary>
         /// Current deterministic guest tick count in milliseconds.
@@ -478,7 +477,6 @@ namespace Brovan.Core.Emulation
             if (Binary.Architecture == BinaryArchitecture.Unknown)
                 throw new BadImageFormatException("Unsupported binary architecture.");
 
-            _memoryRegionIndexComparer = CompareMemoryRegionIndex;
             _binary = Binary;
             UnicornArch = Arch.X86;
             UnicornMode = Binary.Architecture == BinaryArchitecture.x64 ? Mode.MODE_64 : Mode.MODE_32;
@@ -518,7 +516,6 @@ namespace Brovan.Core.Emulation
             if (Data == null || Data.Length == 0)
                 throw new NullReferenceException(nameof(Data));
 
-            _memoryRegionIndexComparer = CompareMemoryRegionIndex;
             _binary = Binary ?? new BinaryFile(Data, true);
             UnicornArch = arch;
             UnicornMode = mode;
@@ -1036,22 +1033,29 @@ namespace Brovan.Core.Emulation
             for (int i = 0; i < _memory.Count; i++)
                 MemoryRegionIndex.Add(i);
 
-            MemoryRegionIndex.Sort(_memoryRegionIndexComparer);
+            CollectionsMarshal.AsSpan(MemoryRegionIndex).Sort(
+                new MemoryRegionIndexComparer(_memory));
             MemoryRegionIndexDirty = false;
         }
 
-        private int CompareMemoryRegionIndex(int LeftIndex, int RightIndex)
+        private readonly struct MemoryRegionIndexComparer : IComparer<int>
         {
-            ulong LeftBase = _memory[LeftIndex].BaseAddress;
-            ulong RightBase = _memory[RightIndex].BaseAddress;
+            private readonly List<MemoryRegion> _memory;
+            public MemoryRegionIndexComparer(List<MemoryRegion> memory) => _memory = memory;
 
-            if (LeftBase < RightBase)
-                return -1;
+            public int Compare(int LeftIndex, int RightIndex)
+            {
+                ulong LeftBase = _memory[LeftIndex].BaseAddress;
+                ulong RightBase = _memory[RightIndex].BaseAddress;
 
-            if (LeftBase > RightBase)
-                return 1;
+                if (LeftBase < RightBase)
+                    return -1;
 
-            return LeftIndex.CompareTo(RightIndex);
+                if (LeftBase > RightBase)
+                    return 1;
+
+                return LeftIndex.CompareTo(RightIndex);
+            }
         }
 
         private int FindFirstRegionStartingBefore(ulong Address)

@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection.PortableExecutable;
@@ -34,7 +33,7 @@ namespace Brovan.Core.Emulation.Guests
 
         private readonly BlobData _blob;
         private readonly WindowsBlobLaunchMode _blobLaunchMode;
-        private IReadOnlyDictionary<uint, IWinSyscall> WinSyscallTable = new Dictionary<uint, IWinSyscall>();
+        private IReadOnlyDictionary<uint, WinSyscallEntry> WinSyscallTable = new Dictionary<uint, WinSyscallEntry>();
         private WinModule _ntdllModule;
 
         private bool UsesDirectBlobStartup => IsBlob && _blobLaunchMode == WindowsBlobLaunchMode.Direct;
@@ -517,7 +516,6 @@ namespace Brovan.Core.Emulation.Guests
 
         public bool TryHandleSyscall(BinaryEmulator Instance)
         {
-            long StartTicks = 0;
             try
             {
                 uint Syscall = Instance._binary.Architecture == BinaryArchitecture.x64
@@ -528,17 +526,20 @@ namespace Brovan.Core.Emulation.Guests
                 bool CaptureSyscallHistory = Instance.Syscalls?.TraceEnabled == true;
                 ulong[] HistoryArgs = CaptureSyscallHistory ? ReadWindowsSyscallArguments(Instance, 6) : Array.Empty<ulong>();
 
-                string HandlerName = null;
-                if (WinSyscallTable.TryGetValue(Syscall, out IWinSyscall SyscallHandler))
-                    HandlerName = SyscallHandler.GetType().Name;
+                WinSyscallTable.TryGetValue(Syscall, out WinSyscallEntry Entry);
+                string HandlerName = Entry.Name;
+                bool IsImplemented = Entry.Handler != null;
 
                 SyscallRule Rule = null;
-                foreach (var R in Instance.Syscalls.ListRules())
+                if (Instance.Syscalls.HasRules)
                 {
-                    if ((R.Number.HasValue && R.Number.Value == Syscall) || (!string.IsNullOrEmpty(R.Name) && R.Name.Equals(HandlerName, StringComparison.OrdinalIgnoreCase)))
+                    foreach (var R in Instance.Syscalls.ListRules())
                     {
-                        Rule = R;
-                        break;
+                        if ((R.Number.HasValue && R.Number.Value == Syscall) || (!string.IsNullOrEmpty(R.Name) && R.Name.Equals(HandlerName, StringComparison.OrdinalIgnoreCase)))
+                        {
+                            Rule = R;
+                            break;
+                        }
                     }
                 }
 
@@ -569,27 +570,26 @@ namespace Brovan.Core.Emulation.Guests
                         }
 
                         if (CaptureSyscallHistory)
-                            Instance.Syscalls.RecordSyscall(GuestOsKind.Windows, Abi, Syscall, HandlerName, Ctx.Args, Ctx.ReturnValue, Rip, WinSyscallTable.ContainsKey(Syscall), true);
+                            Instance.Syscalls.RecordSyscall(GuestOsKind.Windows, Abi, Syscall, HandlerName, Ctx.Args, Ctx.ReturnValue, Rip, IsImplemented, true);
                         Instance.TriggerEventMessage($"[SYSCALL MANAGER] Syscall 0x{Syscall:X} handled, returned 0x{Ctx.ReturnValue:X}.", LogFlags.General);
                         return true;
                     }
                 }
 
-                if (WinSyscallTable.TryGetValue(Syscall, out IWinSyscall handler))
+                if (IsImplemented)
                 {
-                    StartTicks = Stopwatch.GetTimestamp();
-                    NTSTATUS Status = handler.Handle(Instance);
+                    NTSTATUS Status = Entry.Handler.Handle(Instance);
                     if (Instance.Settings.SyscallNotificationCallback != null)
                     {
-                        Instance.Settings.SyscallNotificationCallback.Invoke(Instance.ReadRegister(Instance.IPRegister), Syscall, handler.GetType().Name, (ulong)(uint)Status);
+                        Instance.Settings.SyscallNotificationCallback.Invoke(Instance.ReadRegister(Instance.IPRegister), Syscall, HandlerName, (ulong)(uint)Status);
                     }
                     else
                     {
-                        Instance.TriggerEventMessage($"[+] Syscall {handler.GetType().Name} (0x{Syscall:X}) executed, returned {Status}.", LogFlags.General);
+                        Instance.TriggerEventMessage($"[+] Syscall {HandlerName} (0x{Syscall:X}) executed, returned {Status}.", LogFlags.General);
                     }
 
                     if (CaptureSyscallHistory)
-                        Instance.Syscalls.RecordSyscall(GuestOsKind.Windows, Abi, Syscall, handler.GetType().Name, HistoryArgs, (ulong)(uint)Status, Rip, true);
+                        Instance.Syscalls.RecordSyscall(GuestOsKind.Windows, Abi, Syscall, HandlerName, HistoryArgs, (ulong)(uint)Status, Rip, true);
 
                     bool SuppressStatusWrite = Instance.SuppressSyscallStatusWrite;
                     Instance.SuppressSyscallStatusWrite = false;
@@ -625,14 +625,6 @@ namespace Brovan.Core.Emulation.Guests
                 Utils.LogError($"[-] [TryHandleWinSyscall] ERROR: {ex.Message}\nStackTrace:\n\n{ex.StackTrace}");
                 Instance.TriggerEventMessage($"[-] Error while handling a Windows Syscall: {ex.Message}", LogFlags.Issues);
                 return true;
-            }
-            finally
-            {
-                if (StartTicks != 0)
-                {
-                    long Elapsed = Stopwatch.GetTimestamp() - StartTicks;
-                    _ = Elapsed;
-                }
             }
         }
 
