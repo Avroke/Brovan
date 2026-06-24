@@ -58,3 +58,4 @@ nunit-*.xml
 *.vsidx
 /Brovan/.vs
 /.vs
+/Brovan/.cache
