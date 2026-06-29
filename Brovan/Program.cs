@@ -70,6 +70,26 @@ namespace Brovan
             return VerifyRegDump(RegDir, false);
         }
 
+        private static bool ArgsSpecifyKvmBackend(string[] args)
+        {
+            for (int i = 0; i < args.Length; i++)
+            {
+                string arg = args[i];
+                if (arg.StartsWith("--backend=", StringComparison.OrdinalIgnoreCase))
+                {
+                    string value = arg.Substring("--backend=".Length).Trim().ToLowerInvariant();
+                    return value == "kvm";
+                }
+
+                if (arg == "--backend" && i + 1 < args.Length)
+                {
+                    string value = (args[i + 1] ?? string.Empty).Trim().ToLowerInvariant();
+                    return value == "kvm";
+                }
+            }
+            return false;
+        }
+
         private static bool HasSilentFlag(string[] args)
         {
             for (int i = 0; i < args.Length; i++)
@@ -107,6 +127,7 @@ namespace Brovan
             Console.WriteLine("  --net=<mode>      Set host networking policy: none, loopback (default), full");
             Console.WriteLine("  --net-allow=<ip>  Allow a specific IPv4 or IPv6 address in addition to the selected policy.");
             Console.WriteLine("  --no-hooks        Run the emulator with no hooks. useful when you want maximum performance and want to see some program output.");
+            Console.WriteLine("  --backend=<name>  Choose the emulation backend: unicorn (default) or kvm.");
             Console.WriteLine();
             Console.WriteLine("Notes:");
             Console.WriteLine("  All Brovan flags must be passed before the program path.");
@@ -164,6 +185,23 @@ namespace Brovan
             return true;
         }
 
+        private static bool TryParseBackendKind(string Value, out EmulationBackendKind Kind)
+        {
+            switch ((Value ?? string.Empty).Trim().ToLowerInvariant())
+            {
+                case "unicorn":
+                case "":
+                    Kind = EmulationBackendKind.Unicorn;
+                    return true;
+                case "kvm":
+                    Kind = EmulationBackendKind.Kvm;
+                    return true;
+                default:
+                    Kind = EmulationBackendKind.Unicorn;
+                    return false;
+            }
+        }
+
         static void Main(string[] args)
         {
             Console.OutputEncoding = Encoding.UTF8;
@@ -181,25 +219,7 @@ namespace Brovan
 
             SilentMode = HasSilentFlag(args);
 
-            if (IsWindows && Unicorn.IsCFGEnabled())
-            {
-                if (Environment.GetEnvironmentVariable("BROVAN_CFG_DISABLED") != "1")
-                {
-                    PrintHighlight("[!] Control Flow Guard is enabled, Brovan will try to restart the process with CFG disabled.", true);
-                    if (!RestartProcessWithCfgDisabled(true))
-                    {
-                        PrintHighlight("[-] Unicorn doesn't support CFG Mitigation which is currently enabled in the process. Failed to restart with CFG disabled. Please use a build without CFG or clear the GuardCF flag in the PE header.", true);
-                        Environment.Exit(-1);
-                    }
-                }
-                else
-                {
-                    PrintHighlight("[-] Unicorn doesn't support CFG Mitigation which is currently enabled in the process, and Brovan failed to restart with CFG disabled. Please use a build without CFG or clear the GuardCF flag in the PE header.", true);
-                    Environment.Exit(-1);
-                }
-
-                Environment.Exit(0); // it should exit by itself inside RestartProcessWithCfgDisabled but keep this here too just in case
-            }
+            bool KvmBackendRequested = ArgsSpecifyKvmBackend(args);
 
             if (!IsWindows && !Directory.Exists(WindowsLibsPath))
             {
@@ -307,6 +327,7 @@ namespace Brovan
             bool Silent = false;
             string Command = null;
             string FilePath = null;
+            EmulationBackendKind BackendKind = EmulationBackendKind.Unicorn;
             NetworkAccessPolicy NetworkPolicy = new NetworkAccessPolicy(NetworkAccessMode.Loopback);
             List<string> ProgramArgumentsList = new List<string>();
 
@@ -366,6 +387,36 @@ namespace Brovan
                     case "--no-hooks":
                         NoHooks = true;
                         continue;
+                    case "--backend":
+                        if (i + 1 >= args.Length || !TryParseBackendKind(args[i + 1], out EmulationBackendKind ArgumentBackendKind))
+                        {
+                            PrintHighlight("[-] Invalid backend. expected: unicorn, kvm.", true);
+                            return;
+                        }
+
+                        BackendKind = ArgumentBackendKind;
+                        i++;
+                        continue;
+                }
+
+                if (IsWindows && BackendKind == EmulationBackendKind.Unicorn && Unicorn.IsCFGEnabled())
+                {
+                    if (Environment.GetEnvironmentVariable("BROVAN_CFG_DISABLED") != "1")
+                    {
+                        PrintHighlight("[!] Control Flow Guard is enabled, Brovan will try to restart the process with CFG disabled.", true);
+                        if (!RestartProcessWithCfgDisabled(true))
+                        {
+                            PrintHighlight("[-] Unicorn doesn't support CFG Mitigation which is currently enabled in the process. Failed to restart with CFG disabled. Please use a build without CFG or clear the GuardCF flag in the PE header.", true);
+                            Environment.Exit(-1);
+                        }
+                    }
+                    else
+                    {
+                        PrintHighlight("[-] Unicorn doesn't support CFG Mitigation which is currently enabled in the process, and Brovan failed to restart with CFG disabled. Please use a build without CFG or clear the GuardCF flag in the PE header.", true);
+                        Environment.Exit(-1);
+                    }
+
+                    Environment.Exit(0); // it should exit by itself inside RestartProcessWithCfgDisabled but keep this here too just in case
                 }
 
                 if (Arg.StartsWith("--net=", StringComparison.OrdinalIgnoreCase))
@@ -393,6 +444,19 @@ namespace Brovan
                     continue;
                 }
 
+                if (Arg.StartsWith("--backend=", StringComparison.OrdinalIgnoreCase))
+                {
+                    string Value = Arg.Substring("--backend=".Length);
+                    if (!TryParseBackendKind(Value, out EmulationBackendKind InlineBackendKind))
+                    {
+                        PrintHighlight("[-] Invalid backend. expected: unicorn, kvm.", true);
+                        return;
+                    }
+
+                    BackendKind = InlineBackendKind;
+                    continue;
+                }
+
                 if (Arg.StartsWith("-", StringComparison.Ordinal))
                     continue;
 
@@ -416,7 +480,7 @@ namespace Brovan
 
             // Set the dll import resolver based on the platform
             NativeLibraryResolver.Register();
-            EmulationMenu.EmulationMenu.RunEmulator(FilePath, Quick, Silent, Command, RawProgramArguments, ProgramArguments, NetworkPolicy, NoHooks);
+            EmulationMenu.EmulationMenu.RunEmulator(FilePath, Quick, Silent, Command, RawProgramArguments, ProgramArguments, NetworkPolicy, NoHooks, BackendKind);
         }
     }
 }

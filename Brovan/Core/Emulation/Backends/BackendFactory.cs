@@ -7,6 +7,7 @@ namespace Brovan.Core.Emulation
             IEmulationBackend backend = kind switch
             {
                 EmulationBackendKind.Unicorn => new UnicornBackend(arch, mode),
+                EmulationBackendKind.Kvm => new KvmBackend(arch, mode),
                 _ => throw new System.ArgumentOutOfRangeException(nameof(kind), kind, "Unknown emulation backend."),
             };
 

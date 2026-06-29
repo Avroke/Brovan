@@ -2337,7 +2337,7 @@ namespace Brovan.EmulationMenu
             }
         }
 
-        public static void RunEmulator(string FilePath, bool Quick, bool Silent, [AllowNull] string Command, [AllowNull] string RawProgramArguments, string[] ProgramArguments, NetworkAccessPolicy NetworkPolicyValue, bool NoHooks)
+        public static void RunEmulator(string FilePath, bool Quick, bool Silent, [AllowNull] string Command, [AllowNull] string RawProgramArguments, string[] ProgramArguments, NetworkAccessPolicy NetworkPolicyValue, bool NoHooks, EmulationBackendKind BackendKind)
         {
             SilentMode = Silent;
 
@@ -2403,7 +2403,8 @@ namespace Brovan.EmulationMenu
                     NetworkPolicy = NetworkPolicyValue,
                     RawProgramArguments = RawProgramArguments,
                     ProgramArguments = ProgramArguments ?? Array.Empty<string>(),
-                    NoHooks = NoHooks
+                    NoHooks = NoHooks,
+                    BackendKind = BackendKind
                 };
 
                 if (UseWindowsBlobGuest)

@@ -5,6 +5,7 @@ namespace Brovan.Core.Emulation
     public enum EmulationBackendKind
     {
         Unicorn = 0,
+        Kvm = 1,
     }
 
     public enum BackendError
