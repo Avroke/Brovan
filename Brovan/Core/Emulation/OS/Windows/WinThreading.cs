@@ -45,6 +45,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         public bool AlertByThreadIdPending { get; set; }
         public bool AlertByThreadIdWaitActive { get; set; }
         public ulong AlertByThreadIdAddress { get; set; }
+        public Stack<WinUserCallbackFrame> UserCallbackFrames { get; set; } = new();
+    }
+
+    public sealed class WinUserCallbackFrame
+    {
+        public ulong SavedRip;
+        public ulong SavedRsp;
+        public ulong SavedReturnAddress;
     }
 
     public static class WinEmulatedThread

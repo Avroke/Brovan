@@ -1025,6 +1025,10 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int Win32ClientInfoActiveWindowSlot = 8;
         private const int Win32ClientInfoActiveWindowPointerSlot = 9;
         private const ulong UserSharedInfoMirrorSize = 0x1B54;
+        private const ulong UserMessageBitmaskSize = 0x80;
+        private const uint UserMessageBitmaskMax = 0x3FF;
+        private ulong UserMessageBitmask1Address;
+        private ulong UserMessageBitmask2Address;
         private const int SmCxScreen = 0;
         private const int SmCyScreen = 1;
         private const byte UserHandleTypeWindow = 1;
@@ -2147,6 +2151,98 @@ namespace Brovan.Core.Emulation.OS.Windows
             return 0;
         }
 
+        private ulong _cachedKiUserCallbackDispatcher;
+        private ulong _cachedFnDWORDOPTINLPMSG;
+
+        public ulong GetKiUserCallbackDispatcher()
+        {
+            if (_cachedKiUserCallbackDispatcher != 0)
+                return _cachedKiUserCallbackDispatcher;
+
+            WinModule Ntdll = WinModules.FirstOrDefault(m => m != null && m.Name != null && m.Name.Equals("ntdll.dll", StringComparison.OrdinalIgnoreCase));
+            if (Ntdll == null)
+                return 0;
+
+            _cachedKiUserCallbackDispatcher = GetExportAddress(Ntdll, "KiUserCallbackDispatcher");
+            return _cachedKiUserCallbackDispatcher;
+        }
+
+        public ulong GetFnDWORDOPTINLPMSG()
+        {
+            if (_cachedFnDWORDOPTINLPMSG != 0)
+                return _cachedFnDWORDOPTINLPMSG;
+
+            ulong Peb = Emulator.PEB;
+            if (Peb == 0)
+                return 0;
+
+            ulong KernelCallbackTable = Emulator.ReadMemoryULong(Peb + 0x58);
+            if (KernelCallbackTable == 0)
+                return 0;
+
+            const uint FN_DWORDOPTINLPMSG_INDEX = 4;
+            _cachedFnDWORDOPTINLPMSG = Emulator.ReadMemoryULong(KernelCallbackTable + FN_DWORDOPTINLPMSG_INDEX * 8);
+            return _cachedFnDWORDOPTINLPMSG;
+        }
+
+        public bool InvokeUserCallback(ulong CallbackIndex, ulong ArgumentBuffer, ulong ArgumentBufferSize)
+        {
+            ulong Dispatcher = GetKiUserCallbackDispatcher();
+            if (Dispatcher == 0)
+                return false;
+
+            EmulatedThread Thread = Emulator.CurrentThread;
+            if (Thread == null)
+                return false;
+
+            ulong CurrentRsp = Emulator.ReadRegister(Registers.UC_X86_REG_RSP);
+            ulong CurrentReturnAddress = Emulator.ReadMemoryULong(CurrentRsp);
+
+            WinUserCallbackFrame Frame = new WinUserCallbackFrame
+            {
+                SavedRsp = CurrentRsp,
+                SavedReturnAddress = CurrentReturnAddress,
+            };
+            WinEmulatedThread.GetState(Thread).UserCallbackFrames.Push(Frame);
+
+            ulong FrameSize = 0x40;
+            ulong NewRsp = (CurrentRsp - FrameSize) & ~0xFUL;
+
+            for (ulong i = NewRsp; i < CurrentRsp; i += 8)
+                Emulator._emulator.WriteMemory(i, 0UL, 8);
+
+            Emulator._emulator.WriteMemory(NewRsp + 0x20, ArgumentBuffer, 8);
+            Emulator._emulator.WriteMemory(NewRsp + 0x28, 0u, 4);
+            Emulator._emulator.WriteMemory(NewRsp + 0x2C, (uint)CallbackIndex, 4);
+
+            Emulator.WriteRegister(Registers.UC_X86_REG_RSP, NewRsp - 8);
+            Emulator.WriteRegister(Emulator.IPRegister, Dispatcher);
+return true;
+        }
+
+        public bool CompleteUserCallback(ulong ResultAddress, uint ResultLength)
+        {
+            EmulatedThread Thread = Emulator.CurrentThread;
+            if (Thread == null)
+                return false;
+
+            Stack<WinUserCallbackFrame> Frames = WinEmulatedThread.GetState(Thread).UserCallbackFrames;
+            if (Frames.Count == 0)
+                return false;
+
+            WinUserCallbackFrame Frame = Frames.Pop();
+
+            ulong ResultValue = 0;
+            if (ResultAddress != 0 && ResultLength >= 8 && Emulator.IsRegionMapped(ResultAddress, 8))
+                ResultValue = Emulator.ReadMemoryULong(ResultAddress);
+
+            Emulator.WriteRegister(Registers.UC_X86_REG_RSP, Frame.SavedRsp + 8);
+            Emulator.WriteRegister(Emulator.IPRegister, Frame.SavedReturnAddress - 2);
+            Emulator.WriteRegister(Registers.UC_X86_REG_RAX, ResultValue);
+            Emulator.SuppressSyscallStatusWrite = true;
+            return true;
+        }
+
         /// <summary>
         /// Convert windows memory protection to the internal enum.
         /// </summary>
@@ -2319,14 +2415,37 @@ namespace Brovan.Core.Emulation.OS.Windows
             return ((ulong)Uniq << 16) | Index;
         }
 
-        /// <summary>
-        /// Ensures the shared USER handle metadata consumed by user32's ValidateHwnd fast path exists.
-        /// </summary>
+        public bool EnsureUserMessageBitmasks(out ulong Bitmask1, out ulong Bitmask2)
+        {
+            Bitmask1 = EnsureUserMessageBitmask(ref UserMessageBitmask1Address);
+            Bitmask2 = EnsureUserMessageBitmask(ref UserMessageBitmask2Address);
+            return Bitmask1 != 0 && Bitmask2 != 0;
+        }
+
+        private ulong EnsureUserMessageBitmask(ref ulong Cached)
+        {
+            if (Cached != 0 && Emulator.IsRegionMapped(Cached, UserMessageBitmaskSize))
+                return Cached;
+
+            ulong Address = Emulator.MapUniqueAddress(UserMessageBitmaskSize, MemoryProtection.ReadWrite);
+            if (Address == 0)
+                return 0;
+
+            Span<byte> Buffer = Shared.GetSpan((int)UserMessageBitmaskSize);
+            Buffer.Fill(0xFF);
+            if (!Emulator._emulator.WriteMemory(Address, Buffer))
+                return 0;
+
+            Cached = Address;
+            return Cached;
+        }
+
         public bool EnsureUserSharedInfo(out ulong ServerInfo, out ulong HandleTable, out uint EntrySize)
         {
             ServerInfo = EnsureUserServerInfo();
             HandleTable = EnsureUserHandleTable();
             EntrySize = UserHandleEntrySize;
+            EnsureUserMessageBitmasks(out _, out _);
             return ServerInfo != 0 && HandleTable != 0;
         }
 

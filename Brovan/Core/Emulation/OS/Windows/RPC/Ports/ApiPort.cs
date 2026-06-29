@@ -277,8 +277,11 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             if (DisplayInfo == 0)
                 return;
 
+            if (!Instance.WinHelper.EnsureUserMessageBitmasks(out ulong Bitmask1, out ulong Bitmask2))
+                return;
+
             const int UserConnectHeaderSize = 0x08;
-            const int UserConnectSharedInfoSize = 0x80;
+            const int UserConnectSharedInfoSize = 0x238;
             const int UserConnectTotalSize = UserConnectHeaderSize + UserConnectSharedInfoSize;
 
             Span<byte> Data = stackalloc byte[UserConnectTotalSize];
@@ -295,6 +298,11 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             WriteU64(Data, UserConnectHeaderSize + 0x08, aheList);
             WriteU32(Data, UserConnectHeaderSize + 0x10, entrySize);
             WriteU64(Data, UserConnectHeaderSize + 0x18, DisplayInfo);
+
+            WriteU32(Data, UserConnectHeaderSize + 0x218, 0x3FFu);
+            WriteU64(Data, UserConnectHeaderSize + 0x220, Bitmask1);
+            WriteU32(Data, UserConnectHeaderSize + 0x228, 0x3FFu);
+            WriteU64(Data, UserConnectHeaderSize + 0x230, Bitmask2);
 
             uint UserConnectWriteSize = Math.Max(ConnectionInfoSize, (uint)Data.Length);
             TryWriteClientConnectData(Reply, Instance, Data, ServerId, ConnectionInfo, UserConnectWriteSize);
