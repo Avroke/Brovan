@@ -67,6 +67,42 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         }
     }
 
+    public interface ITextRenderSupport
+    {
+        void RenderText(IntPtr windowHandle, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options);
+    }
+
+    public struct TextMetricsData
+    {
+        public int Height;
+        public int Ascent;
+        public int Descent;
+        public int InternalLeading;
+        public int ExternalLeading;
+        public int AveCharWidth;
+        public int MaxCharWidth;
+        public int Weight;
+        public int Overhang;
+        public int DigitizedAspectX;
+        public int DigitizedAspectY;
+        public ushort FirstChar;
+        public ushort LastChar;
+        public ushort DefaultChar;
+        public ushort BreakChar;
+        public byte Italic;
+        public byte Underlined;
+        public byte StruckOut;
+        public byte PitchAndFamily;
+        public byte CharSet;
+    }
+
+    public interface ITextMetricsSupport
+    {
+        bool MeasureText(string text, out int width, out int height);
+
+        bool GetTextMetrics(out TextMetricsData metrics);
+    }
+
     public interface IDisplayConnection : IDisposable
     {
         IWindow CreateWindow(WindowOptions options);
@@ -109,13 +145,16 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
     {
         public static IDisplayConnection Create()
         {
+            Func<IDisplayConnection> factory;
+
             if (OperatingSystem.IsWindows())
-                return new WindowsWinManager();
+                factory = () => new WindowsWinManager();
+            else if (OperatingSystem.IsLinux())
+                factory = () => new LinuxWinManager();
+            else
+                throw new PlatformNotSupportedException("No supported window backend is available for this platform.");
 
-            if (OperatingSystem.IsLinux())
-                return new LinuxWinManager();
-
-            throw new PlatformNotSupportedException("No supported window backend is available for this platform.");
+            return new GuiThreadManager(factory);
         }
     }
 }

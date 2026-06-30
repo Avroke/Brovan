@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
 using System.Text;
+using Brovan.Core.Emulation.OS.SharedHelpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows.Win32k
@@ -101,17 +102,17 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Hwnd != 0 && Instance.WinHelper.GetWindow(Hwnd) == null)
                 return 0;
 
+            ulong GdiHandle = Instance.WinHelper.AllocateGdiHandle(0x01);
+
             Win32kState State = GetState(Instance);
-            ulong Handle = State.NextDeviceContext;
-            State.NextDeviceContext += 4;
-            State.DeviceContexts[Handle] = new Win32kDeviceContext
+            State.DeviceContexts[GdiHandle] = new Win32kDeviceContext
             {
-                Handle = Handle,
+                Handle = GdiHandle,
                 Hwnd = Hwnd,
                 WindowDc = WindowDc,
                 PaintDc = PaintDc,
             };
-            return Handle;
+            return GdiHandle;
         }
 
         internal static bool ReleaseDeviceContext(BinaryEmulator Instance, ulong Hdc)
@@ -121,6 +122,26 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             Win32kState State = GetState(Instance);
             return State.DeviceContexts.Remove(Hdc);
+        }
+
+        internal static ulong GetHwndFromDc(BinaryEmulator Instance, ulong Hdc)
+        {
+            if (Hdc == 0)
+                return 0;
+
+            Win32kState State = GetState(Instance);
+            if (State.DeviceContexts.TryGetValue(Hdc, out Win32kDeviceContext Dc))
+                return Dc.Hwnd;
+
+            return 0;
+        }
+
+        internal static bool IsKnownDc(BinaryEmulator Instance, ulong Hdc)
+        {
+            if (Hdc == 0)
+                return false;
+
+            return GetState(Instance).DeviceContexts.ContainsKey(Hdc);
         }
 
         internal static bool PostMessage(BinaryEmulator Instance, ulong Hwnd, uint Message, ulong WParam, ulong LParam)
@@ -148,6 +169,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         internal static bool TryGetMessage(BinaryEmulator Instance, ulong HwndFilter, uint MinMessage, uint MaxMessage, bool Remove, out Win32kMessage Message)
         {
+            DrainHostRepaintRequest(Instance);
+
             Win32kState State = GetState(Instance);
             int Index = 0;
             foreach (Win32kMessage Candidate in State.MessageQueue)
@@ -267,6 +290,21 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
 
             return 0;
+        }
+
+        private static void DrainHostRepaintRequest(BinaryEmulator Instance)
+        {
+            if (!GeneralHelper.IsWindows)
+                return;
+
+            if (!WindowsWinManager.ConsumePendingHostRepaint())
+                return;
+
+            ulong Foreground = Instance.WinHelper.GetForegroundWindow();
+            if (Foreground == 0)
+                return;
+
+            InvalidateWindow(Instance, Foreground);
         }
 
         internal static bool InvalidateWindow(BinaryEmulator Instance, ulong Hwnd)

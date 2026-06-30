@@ -2,10 +2,11 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 
 namespace Brovan.Core.Emulation.OS.SharedHelpers
 {
-    internal sealed class WindowsWinManager : IDisplayConnection
+    internal sealed class WindowsWinManager : IDisplayConnection, ITextRenderSupport, ITextMetricsSupport
     {
         private static readonly object WindowSync = new();
         private static readonly Dictionary<IntPtr, WindowsWindow> Windows = new();
@@ -13,14 +14,30 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private static readonly WindowProcDelegate WindowProcHandler = WindowProc;
         private static readonly IntPtr WindowProcPointer = Marshal.GetFunctionPointerForDelegate(WindowProcHandler);
 
+        private static readonly object MetricsLock = new();
+        private static IntPtr _metricsDc = IntPtr.Zero;
+        private static IntPtr _metricsFont = IntPtr.Zero;
+        private static IntPtr _metricsPreviousFont = IntPtr.Zero;
+
+        private static int _pendingHostRepaint;
+
+        public static bool ConsumePendingHostRepaint()
+        {
+            return Interlocked.Exchange(ref _pendingHostRepaint, 0) != 0;
+        }
+
         private readonly IntPtr _instanceHandle;
         private readonly string _className;
         private bool _disposed;
 
         private const int GWL_STYLE = -16;
+        private const int GWL_EXSTYLE = -20;
 
         private const uint WM_DESTROY = 0x0002;
         private const uint WM_CLOSE = 0x0010;
+        private const uint WM_ERASEBKGND = 0x0014;
+        private const uint WM_SIZE = 0x0005;
+        private const uint WM_PAINT = 0x000F;
         private const uint WM_SHOWWINDOW = 0x0018;
         private const uint WM_SETTEXT = 0x000C;
         private const uint WM_GETTEXT = 0x000D;
@@ -78,6 +95,10 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             if (!options.Resizable)
                 style &= ~(WS_THICKFRAME | WS_MAXIMIZEBOX | WS_MINIMIZEBOX);
 
+            int requestedClientWidth = Math.Max(options.Width, 1);
+            int requestedClientHeight = Math.Max(options.Height, 1);
+            ResolveOuterFromClient(style, 0, requestedClientWidth, requestedClientHeight, out int outerWidth, out int outerHeight);
+
             IntPtr hwnd = CreateWindowExW(
                 0,
                 _className,
@@ -85,8 +106,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 style,
                 options.X,
                 options.Y,
-                Math.Max(options.Width, 1),
-                Math.Max(options.Height, 1),
+                outerWidth,
+                outerHeight,
                 IntPtr.Zero,
                 IntPtr.Zero,
                 _instanceHandle,
@@ -152,7 +173,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 hInstance = _instanceHandle,
                 hIcon = IntPtr.Zero,
                 hCursor = IntPtr.Zero,
-                hbrBackground = IntPtr.Zero,
+                hbrBackground = (IntPtr)6,
                 lpszMenuName = null,
                 lpszClassName = _className,
                 hIconSm = IntPtr.Zero,
@@ -249,7 +270,25 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             if (!GetWindowRect(hwnd, out rect))
                 return;
 
-            SetWindowPos(hwnd, IntPtr.Zero, rect.Left, rect.Top, Math.Max(width, 1), Math.Max(height, 1), SWP_NOZORDER | SWP_NOACTIVATE);
+            uint style = (uint)GetWindowLongPtrW(hwnd, GWL_STYLE).ToInt64();
+            uint exStyle = (uint)GetWindowLongPtrW(hwnd, GWL_EXSTYLE).ToInt64();
+            ResolveOuterFromClient(style, exStyle, Math.Max(width, 1), Math.Max(height, 1), out int outerWidth, out int outerHeight);
+
+            SetWindowPos(hwnd, IntPtr.Zero, rect.Left, rect.Top, outerWidth, outerHeight, SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+
+        private static void ResolveOuterFromClient(uint style, uint exStyle, int clientWidth, int clientHeight, out int outerWidth, out int outerHeight)
+        {
+            RECT rect = new RECT { Left = 0, Top = 0, Right = clientWidth, Bottom = clientHeight };
+            if (AdjustWindowRectEx(ref rect, style, false, exStyle))
+            {
+                outerWidth = Math.Max(rect.Right - rect.Left, 1);
+                outerHeight = Math.Max(rect.Bottom - rect.Top, 1);
+                return;
+            }
+
+            outerWidth = Math.Max(clientWidth, 1);
+            outerHeight = Math.Max(clientHeight, 1);
         }
 
         internal void UpdateWindowVisibility(IntPtr hwnd, bool visible)
@@ -292,6 +331,121 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
             SetWindowLongPtrW(hwnd, GWL_STYLE, new IntPtr(style));
             SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        }
+
+        public void RenderText(IntPtr windowHandle, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options)
+        {
+            if (windowHandle == IntPtr.Zero || string.IsNullOrEmpty(text))
+                return;
+
+            IntPtr hdc = GetDC(windowHandle);
+            if (hdc == IntPtr.Zero)
+                return;
+
+            IntPtr stockFont = GetStockObject(STOCK_OBJECT_DEFAULT_GUI_FONT);
+            IntPtr previousFont = stockFont != IntPtr.Zero ? SelectObject(hdc, stockFont) : IntPtr.Zero;
+
+            SetTextColor(hdc, 0x00000000);
+            SetBkMode(hdc, 1);
+
+            RECT rect = new RECT { Left = rectLeft, Top = rectTop, Right = rectRight, Bottom = rectBottom };
+            ExtTextOutW(hdc, x, y, options, ref rect, text, (uint)text.Length, IntPtr.Zero);
+
+            if (previousFont != IntPtr.Zero)
+                SelectObject(hdc, previousFont);
+
+            ReleaseDC(windowHandle, hdc);
+        }
+
+        public bool MeasureText(string text, out int width, out int height)
+        {
+            width = 0;
+            height = 0;
+
+            if (text == null)
+                text = string.Empty;
+
+            lock (MetricsLock)
+            {
+                IntPtr hdc = EnsureMetricsDc();
+                if (hdc == IntPtr.Zero)
+                    return false;
+
+                if (!GetTextExtentPoint32W(hdc, text, text.Length, out SIZE size))
+                    return false;
+
+                width = size.cx;
+                height = size.cy;
+            }
+
+            if (text.Length == 0)
+            {
+                if (GetTextMetrics(out TextMetricsData metrics))
+                    height = metrics.Height;
+            }
+
+            return true;
+        }
+
+        public bool GetTextMetrics(out TextMetricsData metrics)
+        {
+            metrics = default;
+
+            lock (MetricsLock)
+            {
+                IntPtr hdc = EnsureMetricsDc();
+                if (hdc == IntPtr.Zero)
+                    return false;
+
+                if (!GetTextMetricsW(hdc, out TEXTMETRICW native))
+                    return false;
+
+                metrics.Height = native.tmHeight;
+                metrics.Ascent = native.tmAscent;
+                metrics.Descent = native.tmDescent;
+                metrics.InternalLeading = native.tmInternalLeading;
+                metrics.ExternalLeading = native.tmExternalLeading;
+                metrics.AveCharWidth = native.tmAveCharWidth;
+                metrics.MaxCharWidth = native.tmMaxCharWidth;
+                metrics.Weight = native.tmWeight;
+                metrics.Overhang = native.tmOverhang;
+                metrics.DigitizedAspectX = native.tmDigitizedAspectX;
+                metrics.DigitizedAspectY = native.tmDigitizedAspectY;
+                metrics.FirstChar = native.tmFirstChar;
+                metrics.LastChar = native.tmLastChar;
+                metrics.DefaultChar = native.tmDefaultChar;
+                metrics.BreakChar = native.tmBreakChar;
+                metrics.Italic = native.tmItalic;
+                metrics.Underlined = native.tmUnderlined;
+                metrics.StruckOut = native.tmStruckOut;
+                metrics.PitchAndFamily = native.tmPitchAndFamily;
+                metrics.CharSet = native.tmCharSet;
+            }
+
+            return true;
+        }
+
+        private static IntPtr EnsureMetricsDc()
+        {
+            if (_metricsDc != IntPtr.Zero)
+                return _metricsDc;
+
+            IntPtr screenDc = GetDC(IntPtr.Zero);
+            if (screenDc == IntPtr.Zero)
+                return IntPtr.Zero;
+
+            IntPtr memoryDc = CreateCompatibleDC(screenDc);
+            ReleaseDC(IntPtr.Zero, screenDc);
+            if (memoryDc == IntPtr.Zero)
+                return IntPtr.Zero;
+
+            IntPtr font = GetStockObject(STOCK_OBJECT_DEFAULT_GUI_FONT);
+            if (font != IntPtr.Zero)
+                _metricsPreviousFont = SelectObject(memoryDc, font);
+
+            _metricsFont = font;
+            _metricsDc = memoryDc;
+            return _metricsDc;
         }
 
         private sealed class WindowsWindow : IWindow
@@ -448,6 +602,9 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     return IntPtr.Zero;
                 }
 
+                if (msg == WM_PAINT || msg == WM_SIZE || msg == WM_SHOWWINDOW)
+                    Interlocked.Exchange(ref _pendingHostRepaint, 1);
+
                 return DefWindowProcW(_hwnd, msg, wParam, lParam);
             }
 
@@ -541,6 +698,10 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
 
         [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool AdjustWindowRectEx(ref RECT lpRect, uint dwStyle, [MarshalAs(UnmanagedType.Bool)] bool bMenu, uint dwExStyle);
+
+        [DllImport("user32.dll", SetLastError = true)]
         private static extern IntPtr DefWindowProcW(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
 
         [DllImport("user32.dll", SetLastError = true)]
@@ -571,5 +732,78 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
         [DllImport("kernel32.dll")]
         private static extern IntPtr GetModuleHandleW(string lpModuleName);
+
+        [DllImport("gdi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern int GetDeviceCaps(IntPtr hdc, int nIndex);
+
+        [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern IntPtr GetDC(IntPtr hWnd);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+        [DllImport("gdi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool ExtTextOutW(IntPtr hdc, int x, int y, uint fuOptions, ref RECT lprc, string lpString, uint cbCount, IntPtr lpDx);
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        private static extern int SetTextColor(IntPtr hdc, int crColor);
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        private static extern int SetBkColor(IntPtr hdc, int crColor);
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        private static extern int SetBkMode(IntPtr hdc, int iBkMode);
+
+        [DllImport("gdi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetTextExtentPoint32W(IntPtr hdc, string lpString, int cchString, out SIZE psizl);
+
+        [DllImport("gdi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetTextMetricsW(IntPtr hdc, out TEXTMETRICW lptm);
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        private static extern IntPtr CreateCompatibleDC(IntPtr hdc);
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        private static extern IntPtr SelectObject(IntPtr hdc, IntPtr hObject);
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        private static extern IntPtr GetStockObject(int fnObject);
+
+        private const int STOCK_OBJECT_DEFAULT_GUI_FONT = 17;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SIZE
+        {
+            public int cx;
+            public int cy;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct TEXTMETRICW
+        {
+            public int tmHeight;
+            public int tmAscent;
+            public int tmDescent;
+            public int tmInternalLeading;
+            public int tmExternalLeading;
+            public int tmAveCharWidth;
+            public int tmMaxCharWidth;
+            public int tmWeight;
+            public int tmOverhang;
+            public int tmDigitizedAspectX;
+            public int tmDigitizedAspectY;
+            public ushort tmFirstChar;
+            public ushort tmLastChar;
+            public ushort tmDefaultChar;
+            public ushort tmBreakChar;
+            public byte tmItalic;
+            public byte tmUnderlined;
+            public byte tmStruckOut;
+            public byte tmPitchAndFamily;
+            public byte tmCharSet;
+        }
     }
 }

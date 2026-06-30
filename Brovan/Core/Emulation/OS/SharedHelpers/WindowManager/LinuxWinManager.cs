@@ -67,6 +67,33 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         [LibraryImport("libX11.so.6")]
         public static partial int XCloseDisplay(IntPtr display);
 
+        [LibraryImport("libX11.so.6")]
+        public static partial IntPtr XCreateGC(IntPtr display, IntPtr drawable, ulong valuemask, IntPtr values);
+
+        [LibraryImport("libX11.so.6")]
+        public static partial int XFreeGC(IntPtr display, IntPtr gc);
+
+        [LibraryImport("libX11.so.6")]
+        public static partial int XSetForeground(IntPtr display, IntPtr gc, ulong foreground);
+
+        [LibraryImport("libX11.so.6")]
+        public static partial int XSetBackground(IntPtr display, IntPtr gc, ulong background);
+
+        [LibraryImport("libX11.so.6")]
+        public static partial IntPtr XDefaultFont(IntPtr display);
+
+        [LibraryImport("libX11.so.6", StringMarshalling = StringMarshalling.Utf8)]
+        public static partial int XDrawString(IntPtr display, IntPtr drawable, IntPtr gc, int x, int y, string str, int length);
+
+        [LibraryImport("libX11.so.6", StringMarshalling = StringMarshalling.Utf8)]
+        public static partial int XTextWidth(IntPtr font_struct, string str, int length);
+
+        [LibraryImport("libX11.so.6")]
+        public static partial IntPtr XQueryFont(IntPtr display, IntPtr font_id);
+
+        [LibraryImport("libX11.so.6")]
+        public static partial int XFree(IntPtr data);
+
         [StructLayout(LayoutKind.Sequential)]
         public unsafe struct XEvent
         {
@@ -89,7 +116,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         public static partial int wl_display_flush(IntPtr display);
     }
 
-    internal sealed class LinuxWinManager : IDisplayConnection
+    internal sealed class LinuxWinManager : IDisplayConnection, ITextRenderSupport, ITextMetricsSupport
     {
         private readonly object _sync = new();
         public readonly Dictionary<IntPtr, LinuxWindow> _windows = new();
@@ -261,10 +288,95 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             return true;
         }
 
-        public bool TryGetWindow(IntPtr handle, out LinuxWindow window)
+public bool TryGetWindow(IntPtr handle, out LinuxWindow window)
         {
             lock (_sync)
                 return _windows.TryGetValue(handle, out window);
+        }
+
+        public void RenderText(IntPtr windowHandle, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options)
+        {
+            if (_xDisplay == IntPtr.Zero || windowHandle == IntPtr.Zero || string.IsNullOrEmpty(text))
+                return;
+
+            IntPtr gc = X11.XCreateGC(_xDisplay, windowHandle, 0, IntPtr.Zero);
+            if (gc == IntPtr.Zero)
+                return;
+
+            IntPtr font = X11.XDefaultFont(_xDisplay);
+            if (font != IntPtr.Zero)
+            {
+                IntPtr fontStruct = X11.XQueryFont(_xDisplay, font);
+                if (fontStruct != IntPtr.Zero)
+                {
+                    X11.XSetForeground(_xDisplay, gc, 0xFFFFFFFF);
+                    X11.XSetBackground(_xDisplay, gc, 0x00000000);
+
+                    int textX = x;
+                    int textY = y;
+
+                    if (rectRight > rectLeft && rectBottom > rectTop)
+                    {
+                        int textWidth = X11.XTextWidth(fontStruct, text, text.Length);
+                        textX = rectLeft + ((rectRight - rectLeft - textWidth) / 2);
+                        textY = rectTop + ((rectBottom - rectTop) / 2) + 8;
+                    }
+
+                    X11.XDrawString(_xDisplay, windowHandle, gc, textX, textY, text, text.Length);
+                    X11.XFree(fontStruct);
+                }
+            }
+
+            X11.XFreeGC(_xDisplay, gc);
+            X11.XFlush(_xDisplay);
+        }
+
+        public bool MeasureText(string text, out int width, out int height)
+        {
+            width = 0;
+            height = 0;
+
+            if (_xDisplay == IntPtr.Zero || text == null)
+                return false;
+
+            IntPtr font = X11.XDefaultFont(_xDisplay);
+            if (font == IntPtr.Zero)
+                return false;
+
+            IntPtr fontStruct = X11.XQueryFont(_xDisplay, font);
+            if (fontStruct == IntPtr.Zero)
+                return false;
+
+            try
+            {
+                width = X11.XTextWidth(fontStruct, text, text.Length);
+                height = 16;
+            }
+            finally
+            {
+                X11.XFree(fontStruct);
+            }
+
+            return true;
+        }
+
+        public bool GetTextMetrics(out TextMetricsData metrics)
+        {
+            metrics = default;
+            metrics.Height = 16;
+            metrics.Ascent = 12;
+            metrics.Descent = 4;
+            metrics.AveCharWidth = 8;
+            metrics.MaxCharWidth = 16;
+            metrics.Weight = 400;
+            metrics.DigitizedAspectX = 96;
+            metrics.DigitizedAspectY = 96;
+            metrics.FirstChar = 0x20;
+            metrics.LastChar = 0xFF;
+            metrics.DefaultChar = 0x20;
+            metrics.BreakChar = 0x20;
+            metrics.PitchAndFamily = 0x01;
+            return true;
         }
 
         public sealed class LinuxWindow : IWindow

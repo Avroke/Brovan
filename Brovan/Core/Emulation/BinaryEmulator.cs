@@ -1611,7 +1611,25 @@ namespace Brovan.Core.Emulation
 
         internal ulong AllocateThreadStack(ulong StackSize)
         {
-            return MapUniqueAddress(StackSize, MemoryProtection.ReadWrite);
+            ulong StackBase = MapUniqueAddress(StackSize, MemoryProtection.ReadWrite);
+            if (StackBase != 0)
+            {
+                ulong Remaining = StackSize;
+                ulong Address = StackBase;
+                while (Remaining >= 8)
+                {
+                    _emulator.WriteMemory(Address, 0UL, 8);
+                    Address += 8;
+                    Remaining -= 8;
+                }
+                while (Remaining > 0)
+                {
+                    _emulator.WriteMemory(Address, (byte)0, 1);
+                    Address++;
+                    Remaining--;
+                }
+            }
+            return StackBase;
         }
 
         internal ulong BuildInitialContext(ulong RIP, ulong RSP, ulong RCX = 0, ulong RDX = 0, uint Flags = 0x00100000 | 0x00000001 | 0x00000002)

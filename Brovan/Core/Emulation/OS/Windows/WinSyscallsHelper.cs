@@ -5,6 +5,7 @@ using Brovan.Core.Helpers;
 using System.Text;
 using System.Buffers.Binary;
 using Brovan.Core.Emulation.OS.SharedHelpers;
+using Brovan.Core.Emulation.OS.Windows.Win32k;
 using System.IO;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -1021,6 +1022,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const ulong UserPrimaryMonitorSize = 0x1000;
         private const ulong Win32ClientInfoX64Base = 0x800;
         private const ulong Win32ClientInfoX86Base = 0x6CC;
+        private const int Win32ClientInfoPDeskInfoSlot = 2;
         private const int Win32ClientInfoDesktopSlot = 4;
         private const int Win32ClientInfoActiveWindowSlot = 8;
         private const int Win32ClientInfoActiveWindowPointerSlot = 9;
@@ -1029,6 +1031,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint UserMessageBitmaskMax = 0x3FF;
         private ulong UserMessageBitmask1Address;
         private ulong UserMessageBitmask2Address;
+        private const uint GdiHandleEntryCount = 0x1000;
+        private const uint GdiHandleEntrySize = 0x18;
+        private ulong GdiHandleTableAddress;
+        private ushort NextGdiHandleIndex = 1;
+        private ushort NextGdiHandleUniq = 0x77;
         private const int SmCxScreen = 0;
         private const int SmCyScreen = 1;
         private const byte UserHandleTypeWindow = 1;
@@ -2217,7 +2224,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Emulator.WriteRegister(Registers.UC_X86_REG_RSP, NewRsp - 8);
             Emulator.WriteRegister(Emulator.IPRegister, Dispatcher);
-return true;
+            return true;
         }
 
         public bool CompleteUserCallback(ulong ResultAddress, uint ResultLength)
@@ -2440,13 +2447,274 @@ return true;
             return Cached;
         }
 
+        private void EnsureGdiHandleTable()
+        {
+            if (GdiHandleTableAddress != 0 && Emulator.IsRegionMapped(GdiHandleTableAddress, GdiHandleEntryCount * GdiHandleEntrySize))
+                return;
+
+            ulong Peb = Emulator.PEB;
+            if (Peb == 0)
+                return;
+
+            GdiHandleTableAddress = Emulator.ReadMemoryULong(Peb + 0xF8);
+        }
+
         public bool EnsureUserSharedInfo(out ulong ServerInfo, out ulong HandleTable, out uint EntrySize)
         {
             ServerInfo = EnsureUserServerInfo();
             HandleTable = EnsureUserHandleTable();
             EntrySize = UserHandleEntrySize;
             EnsureUserMessageBitmasks(out _, out _);
+            EnsureGdiHandleTable();
+
             return ServerInfo != 0 && HandleTable != 0;
+        }
+
+        public ulong AllocateGdiHandle(byte type)
+        {
+            EnsureGdiHandleTable();
+            if (GdiHandleTableAddress == 0)
+                return 0;
+
+            if (NextGdiHandleIndex == 0 || NextGdiHandleIndex >= GdiHandleEntryCount)
+                return 0;
+
+            ushort Index = NextGdiHandleIndex++;
+
+            ulong Entry = GdiHandleTableAddress + (ulong)Index * GdiHandleEntrySize;
+
+            for (uint i = 0; i < GdiHandleEntrySize; i += 8)
+                Emulator._emulator.WriteMemory(Entry + i, 0UL, 8);
+
+            uint W32Pid = PID & 0xFFFFFFFCu;
+            Emulator._emulator.WriteMemory(Entry + 0x08, W32Pid, 4);
+            Emulator._emulator.WriteMemory(Entry + 0x0C, type, 1);
+            Emulator._emulator.WriteMemory(Entry + 0x0E, type, 1);
+
+            if (type == 1)
+            {
+                ulong DcAttr = Emulator.MapUniqueAddress(0x600, MemoryProtection.ReadWrite);
+                if (DcAttr != 0)
+                {
+                    for (uint i = 0; i < 0x600; i += 8)
+                        Emulator._emulator.WriteMemory(DcAttr + i, 0UL, 8);
+
+                    Emulator._emulator.WriteMemory(DcAttr, 1, 1);
+                    Emulator._emulator.WriteMemory(DcAttr + 0x68, 1, 4);
+                    Emulator._emulator.WriteMemory(DcAttr + 0x128, 0x00010001UL, 8);
+                    Emulator._emulator.WriteMemory(DcAttr + 0x140, 1, 4);
+                    Emulator._emulator.WriteMemory(DcAttr + 0x14C, 1, 4);
+                    Emulator._emulator.WriteMemory(DcAttr + 0x150, 1, 4);
+
+                    ulong Encrypted = EncryptGdiPointer(DcAttr);
+                    Emulator._emulator.WriteMemory(Entry + 0x10, Encrypted, 8);
+                }
+            }
+
+            return ((ulong)type << 16) | Index;
+        }
+
+        private static ulong EncryptGdiPointer(ulong Pointer)
+        {
+            ulong Cookie = 1;
+            ulong Xored = Pointer ^ Cookie;
+            return ((Xored << 63) | (Xored >> 1));
+        }
+
+        public bool ValidateGdiHandle(ulong Handle)
+        {
+            if (Handle == 0 || GdiHandleTableAddress == 0)
+                return false;
+
+            ushort Index = (ushort)(Handle & 0xFFFF);
+            byte Uniq = (byte)((Handle >> 16) & 0xFF);
+
+            if (Index == 0 || Index >= GdiHandleEntryCount)
+                return false;
+
+            ulong Entry = GdiHandleTableAddress + (ulong)Index * GdiHandleEntrySize;
+            byte StoredUniq = (byte)Emulator.ReadMemoryUInt(Entry + 0x0D);
+            return StoredUniq == Uniq;
+        }
+
+        public ulong GetGdiHandleTableAddress()
+        {
+            EnsureGdiHandleTable();
+            return GdiHandleTableAddress;
+        }
+
+        private const ulong TebGdiBatchOffsetOffset = 0x0FE8;
+        private const ulong TebGdiBatchHdcOffset = 0x0FF0;
+        private const ulong TebGdiBatchBufferOffset = 0x0FF8;
+        private const uint GdiBatchBufferSize = 310;
+        private const ushort GdiBatchCmdTextOut = 2;
+        private const uint GdiBatchNoRectFlag = 0x80000000u;
+        private const int GdiBatchTextOutStringOffset = 0x54;
+
+        public void FlushGdiBatch()
+        {
+            ulong Teb = Emulator.TEB;
+            if (Teb == 0)
+                return;
+
+            uint BatchOffset = Emulator.ReadMemoryUInt(Teb + TebGdiBatchOffsetOffset);
+            uint RealBatchOffset = BatchOffset & ~GdiBatchNoRectFlag;
+            if (RealBatchOffset == 0 || RealBatchOffset > GdiBatchBufferSize * 4)
+            {
+                Emulator._emulator.WriteMemory(Teb + TebGdiBatchOffsetOffset, 0u, 4);
+                return;
+            }
+
+            ulong BatchHdc = Emulator.ReadMemoryULong(Teb + TebGdiBatchHdcOffset);
+            ulong BufferAddr = Teb + TebGdiBatchBufferOffset;
+
+            Span<byte> BatchBuffer = Shared.GetSpan((ulong)(GdiBatchBufferSize * 4));
+            if (!Emulator.ReadMemory(BufferAddr, BatchBuffer.Slice(0, (int)(GdiBatchBufferSize * 4)), GdiBatchBufferSize * 4))
+            {
+                Emulator._emulator.WriteMemory(Teb + TebGdiBatchOffsetOffset, 0u, 4);
+                return;
+            }
+
+            int Offset = 0;
+            while (Offset + 4 <= (int)RealBatchOffset)
+            {
+                short Size = (short)(BatchBuffer[Offset] | (BatchBuffer[Offset + 1] << 8));
+                short Cmd = (short)(BatchBuffer[Offset + 2] | (BatchBuffer[Offset + 3] << 8));
+
+                if (Size <= 0 || Offset + Size > (int)RealBatchOffset)
+                    break;
+
+                if (Cmd == GdiBatchCmdTextOut && Size >= GdiBatchTextOutStringOffset)
+                {
+                    int X = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(BatchBuffer.Slice(Offset + 0x18, 4));
+                    int Y = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(BatchBuffer.Slice(Offset + 0x1C, 4));
+                    uint Options = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(BatchBuffer.Slice(Offset + 0x20, 4));
+                    int RectLeft = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(BatchBuffer.Slice(Offset + 0x24, 4));
+                    int RectTop = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(BatchBuffer.Slice(Offset + 0x28, 4));
+                    int RectRight = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(BatchBuffer.Slice(Offset + 0x2C, 4));
+                    int RectBottom = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(BatchBuffer.Slice(Offset + 0x30, 4));
+                    uint Count = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(BatchBuffer.Slice(Offset + 0x38, 4));
+                    uint DxSize = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(BatchBuffer.Slice(Offset + 0x3C, 4));
+                    int VpOrgX = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(BatchBuffer.Slice(Offset + 0x4C, 4));
+                    int VpOrgY = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(BatchBuffer.Slice(Offset + 0x50, 4));
+
+                    bool HasRect = (Options & GdiBatchNoRectFlag) == 0;
+                    if (!HasRect)
+                    {
+                        RectLeft = 0;
+                        RectTop = 0;
+                        RectRight = 0;
+                        RectBottom = 0;
+                    }
+
+                    if (Count > 0 && BatchHdc != 0)
+                    {
+                        int PayloadSize = Size - GdiBatchTextOutStringOffset;
+                        int DxBytes = (int)DxSize;
+                        int TextBytes = (int)(Count * 2);
+
+                        if (DxBytes <= PayloadSize && TextBytes <= PayloadSize - DxBytes)
+                        {
+                            int StringStart = Offset + GdiBatchTextOutStringOffset + DxBytes;
+                            string Text = string.Empty;
+                            if (TextBytes > 0)
+                            {
+                                Span<byte> Raw = BatchBuffer.Slice(StringStart, TextBytes);
+                                char[] Chars = new char[Count];
+                                for (int i = 0; i < Count; i++)
+                                    Chars[i] = (char)(Raw[i * 2] | (Raw[i * 2 + 1] << 8));
+                                Text = new string(Chars);
+                            }
+
+                            ulong Hwnd = Win32kHelper.GetHwndFromDc(Emulator, BatchHdc);
+                            if (Hwnd != 0)
+                            {
+                                int FinalX = X + VpOrgX;
+                                int FinalY = Y + VpOrgY;
+                                EnqueueTextRender(Hwnd, Text, FinalX, FinalY, RectLeft, RectTop, RectRight, RectBottom, Options);
+                            }
+                        }
+                    }
+                }
+
+                Offset += Size;
+            }
+
+            Emulator._emulator.WriteMemory(Teb + TebGdiBatchOffsetOffset, 0u, 4);
+            Emulator._emulator.WriteMemory(Teb + TebGdiBatchHdcOffset, 0UL, 8);
+        }
+
+        public bool FreeGdiHandle(ulong Handle)
+        {
+            if (Handle == 0)
+                return false;
+
+            EnsureGdiHandleTable();
+            if (GdiHandleTableAddress == 0)
+                return false;
+
+            ushort Index = (ushort)(Handle & 0xFFFF);
+            if (Index == 0 || Index >= GdiHandleEntryCount)
+                return false;
+
+            ulong Entry = GdiHandleTableAddress + (ulong)Index * GdiHandleEntrySize;
+            for (uint i = 0; i < GdiHandleEntrySize; i += 8)
+                Emulator._emulator.WriteMemory(Entry + i, 0UL, 8);
+
+            return true;
+        }
+
+        public bool AttachGdiKernelObject(ulong Handle, ulong KernelObject)
+        {
+            if (Handle == 0 || KernelObject == 0)
+                return false;
+
+            EnsureGdiHandleTable();
+            if (GdiHandleTableAddress == 0)
+                return false;
+
+            ushort Index = (ushort)(Handle & 0xFFFF);
+            if (Index == 0 || Index >= GdiHandleEntryCount)
+                return false;
+
+            ulong Entry = GdiHandleTableAddress + (ulong)Index * GdiHandleEntrySize;
+            ulong Encrypted = EncryptGdiPointer(KernelObject);
+            Emulator._emulator.WriteMemory(Entry + 0x10, Encrypted, 8);
+            return true;
+        }
+
+        public ulong GetHwndFromDc(ulong Hdc)
+        {
+            return Win32kHelper.GetHwndFromDc(Emulator, Hdc);
+        }
+
+        public void EnqueueTextRender(ulong Hwnd, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options)
+        {
+            if (DesktopDisplay is GuiThreadManager guiManager)
+                guiManager.EnqueueTextRender(Hwnd, text, x, y, rectLeft, rectTop, rectRight, rectBottom, options);
+        }
+
+        public bool MeasureText(string Text, out int Width, out int Height)
+        {
+            Width = 0;
+            Height = 0;
+
+            EnsureDesktopDisplay();
+            if (DesktopDisplay is GuiThreadManager guiManager)
+                return guiManager.MeasureText(Text ?? string.Empty, out Width, out Height);
+
+            return false;
+        }
+
+        public bool GetTextMetrics(out TextMetricsData Metrics)
+        {
+            Metrics = default;
+
+            EnsureDesktopDisplay();
+            if (DesktopDisplay is GuiThreadManager guiManager)
+                return guiManager.GetTextMetrics(out Metrics);
+
+            return false;
         }
 
         public bool TryBuildUserConnectData(uint Version, uint DispatchCount, uint RequestedSize, out byte[] Data)
@@ -2546,6 +2814,7 @@ return true;
             if (DesktopInfo == 0)
                 return;
 
+            WriteWin32ClientInfoSlot(Teb, Win32ClientInfoPDeskInfoSlot, DesktopInfo);
             WriteWin32ClientInfoSlot(Teb, Win32ClientInfoDesktopSlot, DesktopInfo);
         }
 
@@ -2849,6 +3118,23 @@ return true;
 
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x00, Window.Hwnd, 8);
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x08, Window.ClientWindowAddress, 8);
+
+            int OuterLeft = Window.X == unchecked((int)0x80000000) ? 0 : Window.X;
+            int OuterTop = Window.Y == unchecked((int)0x80000000) ? 0 : Window.Y;
+            int OuterWidth = (int)Window.Width;
+            int OuterHeight = (int)Window.Height;
+            int OuterRight = OuterLeft + OuterWidth;
+            int OuterBottom = OuterTop + OuterHeight;
+
+            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x58, (uint)OuterLeft, 4);
+            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x5C, (uint)OuterTop, 4);
+            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x60, (uint)OuterRight, 4);
+            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x64, (uint)OuterBottom, 4);
+            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x68, (uint)OuterLeft, 4);
+            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x6C, (uint)OuterTop, 4);
+            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x70, (uint)OuterRight, 4);
+            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x74, (uint)OuterBottom, 4);
+
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x78, Window.WndProc, 8);
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x80, ClassObject, 8);
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0xB8, Window.ClientTextBytes, 4);
@@ -3105,29 +3391,51 @@ return true;
             try
             {
                 EnsureDesktopWindow();
-                if (DesktopWindow == null)
+                if (DesktopDisplay is not GuiThreadManager guiManager)
                     return;
 
                 WinWindow Window = GetWindow(GetForegroundWindow());
                 if (Window == null)
                     Window = GetTopLevelWindow();
 
+                string title;
+                int width;
+                int height;
+                bool visible;
+                WindowState state;
+
                 if (Window != null)
                 {
-                    DesktopWindow.Title = string.IsNullOrWhiteSpace(Window.Title) ? DesktopWindowTitle : Window.Title;
-                    DesktopWindow.Width = Math.Max((int)Window.Width, 1);
-                    DesktopWindow.Height = Math.Max((int)Window.Height, 1);
-                    DesktopWindow.Visible = Window.Visible && !Window.Destroyed;
-                    DesktopWindow.State = Window.Minimized ? WindowState.Minimized : Window.Maximized ? WindowState.Maximized : WindowState.Normal;
+                    title = string.IsNullOrWhiteSpace(Window.Title) ? DesktopWindowTitle : Window.Title;
+                    width = Math.Max((int)Window.Width, 1);
+                    height = Math.Max((int)Window.Height, 1);
+                    visible = Window.Visible && !Window.Destroyed;
+                    state = Window.Minimized ? WindowState.Minimized : Window.Maximized ? WindowState.Maximized : WindowState.Normal;
                 }
                 else
                 {
-                    DesktopWindow.Title = DesktopWindowTitle;
-                    DesktopWindow.Visible = true;
-                    DesktopWindow.State = WindowState.Normal;
+                    title = DesktopWindowTitle;
+                    width = 0;
+                    height = 0;
+                    visible = false;
+                    state = WindowState.Normal;
                 }
 
-                DesktopWindow.Present();
+                guiManager.EnqueuePresent(title, width, height, visible, state);
+            }
+            catch
+            {
+            }
+        }
+
+        private void EnsureDesktopDisplay()
+        {
+            if (DesktopDisplay != null)
+                return;
+
+            try
+            {
+                DesktopDisplay = WindowManagerFactory.Create();
             }
             catch
             {
@@ -3139,10 +3447,8 @@ return true;
             if (DesktopWindow != null)
                 return;
 
+            EnsureDesktopDisplay();
             if (DesktopDisplay == null)
-                DesktopDisplay = WindowManagerFactory.Create();
-
-            if (DesktopDisplay == null || !DesktopDisplay.IsConnected)
                 return;
 
             DesktopWindow = DesktopDisplay.CreateWindow(new WindowOptions
