@@ -182,24 +182,49 @@ namespace Brovan.Core.Emulation
             }
         }
 
+        /// <summary>
+        /// Finds the first rule matching the given syscall number/name.
+        /// </summary>
+        public bool TryMatchRule(uint number, string name, out SyscallRule rule)
+        {
+            rule = null;
+            if (Volatile.Read(ref _ruleCount) == 0)
+                return false;
+
+            lock (_lock)
+            {
+                foreach (var r in _rules)
+                {
+                    if ((r.Number.HasValue && r.Number.Value == number) ||
+                        (!string.IsNullOrWhiteSpace(r.Name) && r.Name.Equals(name, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        rule = r;
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
         public SyscallContext HandleSyscall(uint number, string name, ulong[] args)
+        {
+            SyscallRule matched = null;
+            if (HasRules)
+                TryMatchRule(number, name, out matched);
+
+            return HandleSyscall(number, name, args, matched);
+        }
+
+        /// <summary>
+        /// Applies an already-resolved rule to a syscall.
+        /// </summary>
+        public SyscallContext HandleSyscall(uint number, string name, ulong[] args, SyscallRule matched)
         {
             var ctx = new SyscallContext { Number = number, Name = name, Args = args, Emulator = _emu };
 
             if (TraceEnabled)
                 _emu.TriggerEventMessage($"[SYSCALL TRACE] {name ?? "sys_" + number.ToString("X")} (0x{number:X}) args: {string.Join(", ", args.Select(a => $"0x{a:X}"))}", LogFlags.General);
-
-            if (!HasRules)
-                return ctx;
-
-            SyscallRule matched = null;
-            lock (_lock)
-            {
-                foreach (var r in _rules)
-                {
-                    if (r.Matches(ctx)) { matched = r; break; }
-                }
-            }
 
             if (matched != null)
             {

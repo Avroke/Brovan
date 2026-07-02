@@ -124,6 +124,26 @@ namespace Brovan.Core.Emulation
         byte ReadRegisterByte(Registers register);
         byte ReadRegisterByte(int register);
 
+        bool ReadRegisterBatch(int[] registers, ulong[] values, int count)
+        {
+            if (registers == null || values == null || count <= 0 || count > registers.Length || count > values.Length)
+                return false;
+
+            for (int i = 0; i < count; i++)
+                values[i] = ReadRegister(registers[i]);
+            return true;
+        }
+
+        bool WriteRegisterBatch(int[] registers, ulong[] values, int count)
+        {
+            if (registers == null || values == null || count <= 0 || count > registers.Length || count > values.Length)
+                return false;
+
+            for (int i = 0; i < count; i++)
+                WriteRegister(registers[i], values[i]);
+            return true;
+        }
+
         CPUFlags GetCPUFlags();
         bool SetCPUFlags(CPUFlags flags);
 

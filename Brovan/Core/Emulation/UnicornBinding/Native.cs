@@ -89,6 +89,12 @@ namespace Brovan.Core.Emulation
         public static extern UCErrors uc_reg_read_raw(IntPtr uc, int Reg, out byte value);
 
         [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
+        public static extern unsafe UCErrors uc_reg_read_batch(IntPtr uc, int* regs, void** vals, int count);
+
+        [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
+        public static extern unsafe UCErrors uc_reg_write_batch(IntPtr uc, int* regs, void** vals, int count);
+
+        [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
         public static extern UCErrors uc_emu_start(IntPtr uc, ulong begin, ulong until, UIntPtr timeout, UIntPtr count);
 
         [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]

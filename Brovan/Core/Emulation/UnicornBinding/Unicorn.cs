@@ -816,9 +816,6 @@ namespace Brovan.Core.Emulation
                 throw new InvalidOperationException("Unicorn engine is not initialized.");
 
             ulong value = 0;
-            if (!Enum.IsDefined(typeof(Registers), register))
-                return 0;
-
             _error = uc_reg_read(_uc, register, out value);
             return value;
         }
@@ -894,6 +891,64 @@ namespace Brovan.Core.Emulation
             byte Value = 0;
             _error = uc_reg_read_raw(_uc, Register, out Value);
             return Value;
+        }
+
+        /// <summary>
+        /// Reads several registers in a single native call.
+        /// </summary>
+        public unsafe bool ReadRegisterBatch(int[] Registers, ulong[] Values, int Count)
+        {
+            if (DisposedCheck())
+                return false;
+
+            if (Registers == null || Values == null || Count <= 0 || Count > Registers.Length || Count > Values.Length)
+                return false;
+
+            lock (_registerLock)
+            {
+                if (_uc == IntPtr.Zero)
+                    return false;
+
+                fixed (int* RegsPtr = Registers)
+                fixed (ulong* ValsPtr = Values)
+                {
+                    void** PtrArray = stackalloc void*[Count];
+                    for (int i = 0; i < Count; i++)
+                        PtrArray[i] = &ValsPtr[i];
+
+                    _error = uc_reg_read_batch(_uc, RegsPtr, PtrArray, Count);
+                    return _error == UCErrors.UC_ERR_OK;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Writes several registers in a single native call.
+        /// </summary>
+        public unsafe bool WriteRegisterBatch(int[] Registers, ulong[] Values, int Count)
+        {
+            if (DisposedCheck())
+                return false;
+
+            if (Registers == null || Values == null || Count <= 0 || Count > Registers.Length || Count > Values.Length)
+                return false;
+
+            lock (_registerLock)
+            {
+                if (_uc == IntPtr.Zero)
+                    return false;
+
+                fixed (int* RegsPtr = Registers)
+                fixed (ulong* ValsPtr = Values)
+                {
+                    void** PtrArray = stackalloc void*[Count];
+                    for (int i = 0; i < Count; i++)
+                        PtrArray[i] = &ValsPtr[i];
+
+                    _error = uc_reg_write_batch(_uc, RegsPtr, PtrArray, Count);
+                    return _error == UCErrors.UC_ERR_OK;
+                }
+            }
         }
 
         /// <summary>

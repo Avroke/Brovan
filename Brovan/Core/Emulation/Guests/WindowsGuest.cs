@@ -535,16 +535,7 @@ namespace Brovan.Core.Emulation.Guests
 
                 SyscallRule Rule = null;
                 if (Instance.Syscalls.HasRules)
-                {
-                    foreach (var R in Instance.Syscalls.ListRules())
-                    {
-                        if ((R.Number.HasValue && R.Number.Value == Syscall) || (!string.IsNullOrEmpty(R.Name) && R.Name.Equals(HandlerName, StringComparison.OrdinalIgnoreCase)))
-                        {
-                            Rule = R;
-                            break;
-                        }
-                    }
-                }
+                    Instance.Syscalls.TryMatchRule(Syscall, HandlerName, out Rule);
 
                 if (Rule != null)
                 {
@@ -563,7 +554,7 @@ namespace Brovan.Core.Emulation.Guests
                         }
                     }
 
-                    SyscallContext Ctx = Instance.Syscalls.HandleSyscall(Syscall, HandlerName, Args);
+                    SyscallContext Ctx = Instance.Syscalls.HandleSyscall(Syscall, HandlerName, Args, Rule);
                     if (Ctx.Handled)
                     {
                         if (!Instance.SuppressSyscallStatusWrite)

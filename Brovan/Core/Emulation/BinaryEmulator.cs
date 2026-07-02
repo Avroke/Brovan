@@ -330,6 +330,9 @@ namespace Brovan.Core.Emulation
         private readonly HashSet<int> MlfqQueuedThreads = new();
         private readonly uint[] MlfqQuanta = new uint[32];
         private bool MemoryRegionIndexDirty = true;
+
+        private const int GprBatchCount = 18;
+        private int[] _gprBatchRegs;
         internal BinaryEmulatorSettings Settings;
         private InstructionHookCallback Syscall;
         private InstructionHookCallback Privileged;
@@ -1651,31 +1654,43 @@ namespace Brovan.Core.Emulation
             return Guest.CreateEmulatedThread(this, StartAddress, Name, Parameter, StackSizeOverride, BasePriority);
         }
 
+        private int[] GetGprBatchRegs()
+        {
+            int[] Regs = _gprBatchRegs;
+            if (Regs == null)
+            {
+                Regs = new int[GprBatchCount]
+                {
+                    (int)Registers.UC_X86_REG_RAX, (int)Registers.UC_X86_REG_RBX,
+                    (int)Registers.UC_X86_REG_RCX, (int)Registers.UC_X86_REG_RDX,
+                    (int)Registers.UC_X86_REG_RSI, (int)Registers.UC_X86_REG_RDI,
+                    (int)Registers.UC_X86_REG_RBP, (int)Registers.UC_X86_REG_RSP,
+                    (int)Registers.UC_X86_REG_R8,  (int)Registers.UC_X86_REG_R9,
+                    (int)Registers.UC_X86_REG_R10, (int)Registers.UC_X86_REG_R11,
+                    (int)Registers.UC_X86_REG_R12, (int)Registers.UC_X86_REG_R13,
+                    (int)Registers.UC_X86_REG_R14, (int)Registers.UC_X86_REG_R15,
+                    IPRegister,                    (int)Registers.UC_X86_REG_EFLAGS
+                };
+                _gprBatchRegs = Regs;
+            }
+            return Regs;
+        }
+
         public void SaveContext(EmulatedThread t)
         {
             if (t == null || t.Context == null) return;
 
-            t.Context.RAX = _emulator.ReadRegister(Registers.UC_X86_REG_RAX);
-            t.Context.RBX = _emulator.ReadRegister(Registers.UC_X86_REG_RBX);
-            t.Context.RCX = _emulator.ReadRegister(Registers.UC_X86_REG_RCX);
-            t.Context.RDX = _emulator.ReadRegister(Registers.UC_X86_REG_RDX);
+            int[] Regs = GetGprBatchRegs();
+            ulong[] Vals = new ulong[GprBatchCount];
+            if (!_emulator.ReadRegisterBatch(Regs, Vals, GprBatchCount))
+                return;
 
-            t.Context.RSI = _emulator.ReadRegister(Registers.UC_X86_REG_RSI);
-            t.Context.RDI = _emulator.ReadRegister(Registers.UC_X86_REG_RDI);
-            t.Context.RBP = _emulator.ReadRegister(Registers.UC_X86_REG_RBP);
-            t.Context.RSP = _emulator.ReadRegister(Registers.UC_X86_REG_RSP);
-
-            t.Context.R8 = _emulator.ReadRegister(Registers.UC_X86_REG_R8);
-            t.Context.R9 = _emulator.ReadRegister(Registers.UC_X86_REG_R9);
-            t.Context.R10 = _emulator.ReadRegister(Registers.UC_X86_REG_R10);
-            t.Context.R11 = _emulator.ReadRegister(Registers.UC_X86_REG_R11);
-            t.Context.R12 = _emulator.ReadRegister(Registers.UC_X86_REG_R12);
-            t.Context.R13 = _emulator.ReadRegister(Registers.UC_X86_REG_R13);
-            t.Context.R14 = _emulator.ReadRegister(Registers.UC_X86_REG_R14);
-            t.Context.R15 = _emulator.ReadRegister(Registers.UC_X86_REG_R15);
-
-            t.Context.RIP = _emulator.ReadRegister(IPRegister);
-            t.Context.RFLAGS = _emulator.ReadRegister(Registers.UC_X86_REG_EFLAGS);
+            CpuContext c = t.Context;
+            c.RAX = Vals[0];  c.RBX = Vals[1];  c.RCX = Vals[2];  c.RDX = Vals[3];
+            c.RSI = Vals[4];  c.RDI = Vals[5];  c.RBP = Vals[6];  c.RSP = Vals[7];
+            c.R8 = Vals[8];   c.R9 = Vals[9];   c.R10 = Vals[10]; c.R11 = Vals[11];
+            c.R12 = Vals[12]; c.R13 = Vals[13]; c.R14 = Vals[14]; c.R15 = Vals[15];
+            c.RIP = Vals[16]; c.RFLAGS = Vals[17];
         }
 
         public void LoadContext(EmulatedThread t)
@@ -1688,27 +1703,15 @@ namespace Brovan.Core.Emulation
                 t.SwitchingContext = false;
             }
 
-            _emulator.WriteRegister(Registers.UC_X86_REG_RAX, t.Context.RAX);
-            _emulator.WriteRegister(Registers.UC_X86_REG_RBX, t.Context.RBX);
-            _emulator.WriteRegister(Registers.UC_X86_REG_RCX, t.Context.RCX);
-            _emulator.WriteRegister(Registers.UC_X86_REG_RDX, t.Context.RDX);
-
-            _emulator.WriteRegister(Registers.UC_X86_REG_RSI, t.Context.RSI);
-            _emulator.WriteRegister(Registers.UC_X86_REG_RDI, t.Context.RDI);
-            _emulator.WriteRegister(Registers.UC_X86_REG_RBP, t.Context.RBP);
-            _emulator.WriteRegister(Registers.UC_X86_REG_RSP, t.Context.RSP);
-
-            _emulator.WriteRegister(Registers.UC_X86_REG_R8, t.Context.R8);
-            _emulator.WriteRegister(Registers.UC_X86_REG_R9, t.Context.R9);
-            _emulator.WriteRegister(Registers.UC_X86_REG_R10, t.Context.R10);
-            _emulator.WriteRegister(Registers.UC_X86_REG_R11, t.Context.R11);
-            _emulator.WriteRegister(Registers.UC_X86_REG_R12, t.Context.R12);
-            _emulator.WriteRegister(Registers.UC_X86_REG_R13, t.Context.R13);
-            _emulator.WriteRegister(Registers.UC_X86_REG_R14, t.Context.R14);
-            _emulator.WriteRegister(Registers.UC_X86_REG_R15, t.Context.R15);
-
-            _emulator.WriteRegister(IPRegister, t.Context.RIP);
-            _emulator.WriteRegister(Registers.UC_X86_REG_EFLAGS, t.Context.RFLAGS);
+            CpuContext c = t.Context;
+            int[] Regs = GetGprBatchRegs();
+            ulong[] Vals = new ulong[GprBatchCount]
+            {
+                c.RAX, c.RBX, c.RCX, c.RDX, c.RSI, c.RDI, c.RBP, c.RSP,
+                c.R8,  c.R9,  c.R10, c.R11, c.R12, c.R13, c.R14, c.R15,
+                c.RIP, c.RFLAGS
+            };
+            _emulator.WriteRegisterBatch(Regs, Vals, GprBatchCount);
 
             Guest.OnThreadContextLoaded(this, t);
         }
