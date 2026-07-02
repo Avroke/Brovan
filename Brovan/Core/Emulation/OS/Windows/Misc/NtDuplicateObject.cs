@@ -94,7 +94,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 NewHandle = Instance.WinHelper.HandleManager.AddHandle(SourceObject, NewAccess);
                 Instance.WinHelper.HandleManager.SetHandleFlags(NewHandle.Handle, NewAttributes);
-                Instance.WinHelper.WinHandles.Add(NewHandle);
+                Instance.WinHelper.AddWinHandle(NewHandle);
 
                 if (!WriteDuplicatedHandle(Instance, TargetHandlePtr, NewHandle.Handle, HandleSize))
                 {

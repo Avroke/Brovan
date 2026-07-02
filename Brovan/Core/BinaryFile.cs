@@ -310,7 +310,7 @@ namespace Brovan.Core
                 dynamic Header;
                 if (Is64Bit)
                 {
-                    IMAGE_OPTIONAL_HEADER64 OptionalHeader = ReadStruct<IMAGE_OPTIONAL_HEADER64>(Data, DosHeader.e_lfanew + 4 + Marshal.SizeOf<IMAGE_FILE_HEADER>());
+                    IMAGE_OPTIONAL_HEADER64 OptionalHeader = ReadStruct<IMAGE_OPTIONAL_HEADER64>(Data, DosHeader.e_lfanew + 4 + Unsafe.SizeOf<IMAGE_FILE_HEADER>());
                     PE.Subsystem = (Subsystem)OptionalHeader.Subsystem;
                     PE.CheckSum = OptionalHeader.CheckSum;
                     EntryPoint = OptionalHeader.AddressOfEntryPoint;
@@ -332,7 +332,7 @@ namespace Brovan.Core
                 }
                 else
                 {
-                    IMAGE_OPTIONAL_HEADER32 OptionalHeader = ReadStruct<IMAGE_OPTIONAL_HEADER32>(Data, DosHeader.e_lfanew + 4 + Marshal.SizeOf<IMAGE_FILE_HEADER>());
+                    IMAGE_OPTIONAL_HEADER32 OptionalHeader = ReadStruct<IMAGE_OPTIONAL_HEADER32>(Data, DosHeader.e_lfanew + 4 + Unsafe.SizeOf<IMAGE_FILE_HEADER>());
                     PE.Subsystem = (Subsystem)OptionalHeader.Subsystem;
                     PE.CheckSum = OptionalHeader.CheckSum;
                     EntryPoint = OptionalHeader.AddressOfEntryPoint;
@@ -354,14 +354,14 @@ namespace Brovan.Core
                 }
 
                 // Get the offset of the PE sections.
-                int SectionOffset = (DosHeader.e_lfanew + 4) + (Marshal.SizeOf<IMAGE_FILE_HEADER>() + FileHeader.SizeOfOptionalHeader);
+                int SectionOffset = (DosHeader.e_lfanew + 4) + (Unsafe.SizeOf<IMAGE_FILE_HEADER>() + FileHeader.SizeOfOptionalHeader);
 
                 PE.Sections = new PortableBinarySection[FileHeader.NumberOfSections];
 
                 // Get PE Sections.
                 for (int i = 0; i < FileHeader.NumberOfSections; i++)
                 {
-                    if (SectionOffset + Marshal.SizeOf<IMAGE_SECTION_HEADER>() > Data.Length)
+                    if (SectionOffset + Unsafe.SizeOf<IMAGE_SECTION_HEADER>() > Data.Length)
                         break;
                     IMAGE_SECTION_HEADER SectionHeader = ReadStruct<IMAGE_SECTION_HEADER>(Data, SectionOffset);
                     PE.Sections[i] = new PortableBinarySection
@@ -373,7 +373,7 @@ namespace Brovan.Core
                         RawOffset = SectionHeader.PointerToRawData,
                         Characteristics = (SectionCharacteristics)SectionHeader.Characteristics
                     };
-                    SectionOffset += Marshal.SizeOf<IMAGE_SECTION_HEADER>();
+                    SectionOffset += Unsafe.SizeOf<IMAGE_SECTION_HEADER>();
                 }
 
                 BuildPESectionLookupCache();
@@ -654,7 +654,7 @@ namespace Brovan.Core
             // Add entry point as before
             if (Is64Bit)
             {
-                IMAGE_OPTIONAL_HEADER64 OptionalHeader = ReadStruct<IMAGE_OPTIONAL_HEADER64>(DataSpan, DosHeader.e_lfanew + 4 + Marshal.SizeOf<IMAGE_FILE_HEADER>());
+                IMAGE_OPTIONAL_HEADER64 OptionalHeader = ReadStruct<IMAGE_OPTIONAL_HEADER64>(DataSpan, DosHeader.e_lfanew + 4 + Unsafe.SizeOf<IMAGE_FILE_HEADER>());
                 uint EntryRva = OptionalHeader.AddressOfEntryPoint;
 
                 if (TryFindPESectionByRvaFast(EntryRva, out PortableBinarySection EntrySection))
@@ -704,7 +704,7 @@ namespace Brovan.Core
             }
             else
             {
-                IMAGE_OPTIONAL_HEADER32 OptionalHeader = ReadStruct<IMAGE_OPTIONAL_HEADER32>(DataSpan, DosHeader.e_lfanew + 4 + Marshal.SizeOf<IMAGE_FILE_HEADER>());
+                IMAGE_OPTIONAL_HEADER32 OptionalHeader = ReadStruct<IMAGE_OPTIONAL_HEADER32>(DataSpan, DosHeader.e_lfanew + 4 + Unsafe.SizeOf<IMAGE_FILE_HEADER>());
                 uint EntryRva = OptionalHeader.AddressOfEntryPoint;
 
                 // Find the section containing the entry point
@@ -1564,13 +1564,13 @@ namespace Brovan.Core
 
             if (Is64Bit)
             {
-                IMAGE_OPTIONAL_HEADER64 OptionalHeader64 = ReadStruct<IMAGE_OPTIONAL_HEADER64>(BinaryData, DosHeader.e_lfanew + 4 + Marshal.SizeOf<IMAGE_FILE_HEADER>());
+                IMAGE_OPTIONAL_HEADER64 OptionalHeader64 = ReadStruct<IMAGE_OPTIONAL_HEADER64>(BinaryData, DosHeader.e_lfanew + 4 + Unsafe.SizeOf<IMAGE_FILE_HEADER>());
 
                 ExportTableRva = OptionalHeader64.ExportTable.VirtualAddress;
             }
             else
             {
-                IMAGE_OPTIONAL_HEADER32 OptionalHeader32 = ReadStruct<IMAGE_OPTIONAL_HEADER32>(BinaryData, DosHeader.e_lfanew + 4 + Marshal.SizeOf<IMAGE_FILE_HEADER>());
+                IMAGE_OPTIONAL_HEADER32 OptionalHeader32 = ReadStruct<IMAGE_OPTIONAL_HEADER32>(BinaryData, DosHeader.e_lfanew + 4 + Unsafe.SizeOf<IMAGE_FILE_HEADER>());
 
                 ExportTableRva = OptionalHeader32.ExportTable.VirtualAddress;
             }
@@ -1934,13 +1934,13 @@ namespace Brovan.Core
 
             if (Is64Bit)
             {
-                IMAGE_OPTIONAL_HEADER64 OptionalHeader64 = ReadStruct<IMAGE_OPTIONAL_HEADER64>(DataSpan, DosHeader.e_lfanew + 4 + Marshal.SizeOf<IMAGE_FILE_HEADER>());
+                IMAGE_OPTIONAL_HEADER64 OptionalHeader64 = ReadStruct<IMAGE_OPTIONAL_HEADER64>(DataSpan, DosHeader.e_lfanew + 4 + Unsafe.SizeOf<IMAGE_FILE_HEADER>());
 
                 ImportTableRva = OptionalHeader64.DataDirectory[1].VirtualAddress;
             }
             else
             {
-                IMAGE_OPTIONAL_HEADER32 OptionalHeader32 = ReadStruct<IMAGE_OPTIONAL_HEADER32>(DataSpan, DosHeader.e_lfanew + 4 + Marshal.SizeOf<IMAGE_FILE_HEADER>());
+                IMAGE_OPTIONAL_HEADER32 OptionalHeader32 = ReadStruct<IMAGE_OPTIONAL_HEADER32>(DataSpan, DosHeader.e_lfanew + 4 + Unsafe.SizeOf<IMAGE_FILE_HEADER>());
 
                 ImportTableRva = OptionalHeader32.DataDirectory[1].VirtualAddress;
             }
@@ -1951,7 +1951,7 @@ namespace Brovan.Core
             if (!TryRvaToFileOffset(ImportTableRva, out uint ImportTableOffset))
                 return;
 
-            uint DescriptorSize = (uint)Marshal.SizeOf<IMAGE_IMPORT_DESCRIPTOR>();
+            uint DescriptorSize = (uint)Unsafe.SizeOf<IMAGE_IMPORT_DESCRIPTOR>();
             uint PointerSize = (uint)(Is64Bit ? 8 : 4);
 
             while (true)

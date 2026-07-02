@@ -43,7 +43,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             AccessMask Permissions = (AccessMask)(uint)DesiredAccess;
             WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(Mutex, Permissions);
-            Instance.WinHelper.WinHandles.Add(Handle);
+            Instance.WinHelper.AddWinHandle(Handle);
 
             if (!Instance._emulator.WriteMemory(MutantHandlePtr, (ulong)Handle.Handle))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -68,7 +68,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             AccessMask Permissions = (AccessMask)DesiredAccess;
             WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(Mutex, Permissions);
-            Instance.WinHelper.WinHandles.Add(Handle);
+            Instance.WinHelper.AddWinHandle(Handle);
 
             if (!Instance._emulator.WriteMemory(MutantHandlePtr, (uint)Handle.Handle))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;

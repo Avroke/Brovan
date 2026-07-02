@@ -84,7 +84,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (ExistingPort != null && ExistingPort.Handler == null)
                 ExistingPort.Handler = CsrssPortHandler.Handle;
 
-            Instance.WinHelper.WinHandles.Add(Handle);
+            Instance.WinHelper.AddWinHandle(Handle);
 
             if (!Instance._emulator.WriteMemory(PortHandlePtr, (ulong)Handle.Handle))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;

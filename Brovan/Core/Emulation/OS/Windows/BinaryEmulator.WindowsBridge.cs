@@ -47,6 +47,9 @@ namespace Brovan.Core.Emulation
         private WinModule _lastAddressModule = null;
         private ulong _lastAddressModuleStart = 0;
         private ulong _lastAddressModuleEnd = 0;
+        private ulong _lastSectionLookupAddress;
+        private PortableBinarySection _lastSectionLookupResult;
+        private WinModule _lastSectionLookupModule;
         private readonly byte[] _instructionDisasmBuffer = new byte[16];
         private readonly List<KeyValuePair<ulong, IHandleObject>> WindowsTimerHandleSnapshot = new();
         private readonly List<KeyValuePair<ulong, IHandleObject>> WindowsNextTimerHandleSnapshot = new();
@@ -1933,8 +1936,13 @@ namespace Brovan.Core.Emulation
             return null;
         }
 
-        private static bool TryGetSectionByAddress(WinModule module, ulong address, out PortableBinarySection section)
+        private bool TryGetSectionByAddress(WinModule module, ulong address, out PortableBinarySection section)
         {
+            if (address == _lastSectionLookupAddress && ReferenceEquals(module, _lastSectionLookupModule))
+            {
+                section = _lastSectionLookupResult;
+                return true;
+            }
             foreach (PortableBinarySection s in module.Sections.Values)
             {
                 ulong start = module.MappedBase + s.VirtualAddress;
@@ -1942,10 +1950,12 @@ namespace Brovan.Core.Emulation
                 if (address >= start && address < end)
                 {
                     section = s;
+                    _lastSectionLookupAddress = address;
+                    _lastSectionLookupResult = s;
+                    _lastSectionLookupModule = module;
                     return true;
                 }
             }
-
             section = default;
             return false;
         }
@@ -1974,6 +1984,14 @@ namespace Brovan.Core.Emulation
             WinSysHelper Helper = WinHelper;
             if (Thread == null || Helper == null || Helper.WinModules.Count == 0)
                 return;
+
+            // Skip the entire CFT/ENTRY block when no one is listening.
+            bool CftEnabled = this.Debug || (Settings.Flags & LogFlags.General) != 0;
+            if (!CftEnabled)
+            {
+                Thread.LastRIP = Address;
+                return;
+            }
 
             ulong PreviousRip = Thread.LastRIP;
             WinModule MainModule = Helper.WinModules[0];

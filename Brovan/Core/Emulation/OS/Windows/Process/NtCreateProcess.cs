@@ -103,7 +103,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance.WinHelper.InitializeProcessTimes(CreatedProcess, 0, false);
                 Instance.WinHelper.WinProcesses.Add(CreatedProcess);
                 WinHandle NewProcessHandle = Instance.WinHelper.OpenProcessHandle(NewPID, AccessMask.ProcessAllAccess);
-                Instance.WinHelper.WinHandles.Add(NewProcessHandle);
+                Instance.WinHelper.AddWinHandle(NewProcessHandle);
                 return NTSTATUS.STATUS_SUCCESS;
             }
             return Instance.WinUnimplemented;

@@ -88,7 +88,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Instance.WinHelper.WinFiles.Add(FileObj);
 
             WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(FileObj, (AccessMask)DesiredAccess);
-            Instance.WinHelper.WinHandles.Add(Handle);
+            Instance.WinHelper.AddWinHandle(Handle);
 
             Instance._emulator.WriteMemory(FileHandlePtr, Handle.Handle);
             Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 1);

@@ -83,6 +83,13 @@ namespace Brovan.Core.Emulation.OS.Windows
     /// <summary>
     /// Generic handles manager (for Processes, Files, Mutex, etc)
     /// </summary>
+    internal struct HandleEntry
+    {
+        public IHandleObject Object;
+        public AccessMask Permissions;
+        public ObjectHandleFlags Flags;
+    }
+
     internal class HandleManager
     {
         public static readonly ulong KNOWN_DLLS_DIRECTORY = 0x1111;
@@ -92,9 +99,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public static readonly ulong CurrentProcess = ulong.MaxValue;
         public static readonly ulong CurrentThread = 0xFFFFFFFFFFFFFFFE;
         private ulong NextHandle = 0x40;
-        private readonly Dictionary<ulong, IHandleObject> HandleToObject = new();
-        private readonly Dictionary<ulong, AccessMask> HandleToPermissions = new();
-        private readonly Dictionary<ulong, ObjectHandleFlags> HandleToFlags = new();
+        private readonly Dictionary<ulong, HandleEntry> HandleTable = new();
         private readonly Dictionary<string, List<ulong>> ObjectIdToHandles = new();
 
         public WinHandle AddHandle(IHandleObject obj, AccessMask Permissions)
@@ -108,9 +113,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Permissions = Permissions
             };
 
-            HandleToObject[handle] = obj;
-            HandleToPermissions[handle] = Permissions;
-            HandleToFlags[handle] = ObjectHandleFlags.None;
+            HandleTable[handle] = new HandleEntry { Object = obj, Permissions = Permissions, Flags = ObjectHandleFlags.None };
 
             if (!ObjectIdToHandles.TryGetValue(obj.ObjectId, out List<ulong> Handles))
             {
@@ -125,7 +128,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private ulong AllocateHandleValue()
         {
-            while (HandleToObject.ContainsKey(NextHandle) || IsReservedHandleValue(NextHandle))
+            while (HandleTable.ContainsKey(NextHandle) || IsReservedHandleValue(NextHandle))
                 NextHandle += 4;
 
             ulong Handle = NextHandle;
@@ -146,31 +149,31 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public ObjectHandleFlags GetHandleFlags(ulong Handle)
         {
-            if (HandleToFlags.TryGetValue(Handle, out ObjectHandleFlags Flags))
-                return Flags;
+            if (HandleTable.TryGetValue(Handle, out HandleEntry Entry))
+                return Entry.Flags;
             return ObjectHandleFlags.None;
         }
 
         public bool SetHandleFlags(ulong Handle, ObjectHandleFlags Flags)
         {
-            if (!HandleToObject.ContainsKey(Handle))
+            if (!HandleTable.TryGetValue(Handle, out HandleEntry Entry))
                 return false;
-
-            HandleToFlags[Handle] = Flags;
+            Entry.Flags = Flags;
+            HandleTable[Handle] = Entry;
             return true;
         }
 
         public T? GetObjectByHandle<T>(ulong Handle) where T : class, IHandleObject
         {
-            if (HandleToObject.TryGetValue(Handle, out IHandleObject obj) && obj is T typedObj)
+            if (HandleTable.TryGetValue(Handle, out HandleEntry Entry) && Entry.Object is T typedObj)
                 return typedObj;
             return null;
         }
 
         public IHandleObject? GetObjectByHandle(ulong Handle)
         {
-            if (HandleToObject.TryGetValue(Handle, out IHandleObject obj))
-                return obj;
+            if (HandleTable.TryGetValue(Handle, out HandleEntry Entry))
+                return Entry.Object;
             return null;
         }
 
@@ -183,19 +186,17 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public AccessMask GetPermissionsByHandle(ulong Handle)
         {
-            if (HandleToPermissions.TryGetValue(Handle, out AccessMask permissions))
-                return permissions;
+            if (HandleTable.TryGetValue(Handle, out HandleEntry Entry))
+                return Entry.Permissions;
             return AccessMask.None;
         }
 
         public bool RemoveHandle(ulong Handle)
         {
-            if (!HandleToObject.TryGetValue(Handle, out IHandleObject obj))
+            if (!HandleTable.TryGetValue(Handle, out HandleEntry Entry))
                 return false;
-
-            HandleToObject.Remove(Handle);
-            HandleToPermissions.Remove(Handle);
-            HandleToFlags.Remove(Handle);
+            IHandleObject obj = Entry.Object;
+            HandleTable.Remove(Handle);
 
             if (ObjectIdToHandles.TryGetValue(obj.ObjectId, out List<ulong> Handles))
             {
@@ -210,7 +211,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public List<KeyValuePair<ulong, IHandleObject>> SnapshotHandles()
         {
-            return new List<KeyValuePair<ulong, IHandleObject>>(HandleToObject);
+            var Result = new List<KeyValuePair<ulong, IHandleObject>>(HandleTable.Count);
+            foreach (var kv in HandleTable) Result.Add(new KeyValuePair<ulong, IHandleObject>(kv.Key, kv.Value.Object));
+            return Result;
         }
 
         public void SnapshotHandles(List<KeyValuePair<ulong, IHandleObject>> Destination)
@@ -219,26 +222,26 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return;
 
             Destination.Clear();
-            foreach (KeyValuePair<ulong, IHandleObject> Pair in HandleToObject)
-                Destination.Add(Pair);
+            foreach (var kv in HandleTable) Destination.Add(new KeyValuePair<ulong, IHandleObject>(kv.Key, kv.Value.Object));
         }
 
         public bool HandleExists(ulong Handle)
         {
-            return HandleToObject.ContainsKey(Handle);
+            return HandleTable.ContainsKey(Handle);
         }
 
         public bool HandleExists(ulong Handle, HandleType type)
         {
-            if (!HandleExists(Handle))
+            if (!HandleTable.TryGetValue(Handle, out HandleEntry Entry))
                 return false;
-            return HandleToObject.TryGetValue(Handle, out var obj) && obj.ObjectType == type;
+            return Entry.Object != null && Entry.Object.ObjectType == type;
         }
 
         public bool CheckAccess(ulong Handle, AccessMask RequiredAccess)
         {
-            if (!HandleToPermissions.TryGetValue(Handle, out AccessMask GrantedAccess))
+            if (!HandleTable.TryGetValue(Handle, out HandleEntry Entry))
                 return false;
+            AccessMask GrantedAccess = Entry.Permissions;
 
             if (RequiredAccess == AccessMask.GiveTemp)
                 return true;

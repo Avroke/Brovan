@@ -40,7 +40,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 };
 
                 WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(Timer, (AccessMask)DesiredAccess);
-                Instance.WinHelper.WinHandles.Add(Handle);
+                Instance.WinHelper.AddWinHandle(Handle);
 
                 if (!Instance._emulator.WriteMemory(TimerHandlePtr, Handle.Handle))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -89,7 +89,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 };
 
                 WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(Timer, (AccessMask)DesiredAccess);
-                Instance.WinHelper.WinHandles.Add(Handle);
+                Instance.WinHelper.AddWinHandle(Handle);
 
                 if (!Instance._emulator.WriteMemory(TimerHandlePtr, (uint)Handle.Handle))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;

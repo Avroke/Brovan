@@ -1,5 +1,6 @@
 using static Brovan.Core.Helpers.BinaryHelpers;
 using System.Reflection.PortableExecutable;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Brovan.Core.Helpers;
 using System.Text;
@@ -355,7 +356,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Buffer == null)
                 return 0;
 
-            ulong StructSize = (ulong)Marshal.SizeOf<UNICODE_STRING64>();
+            ulong StructSize = (ulong)Unsafe.SizeOf<UNICODE_STRING64>();
             ulong Address = Emulator.MapUniqueAddress(StructSize, MemoryProtection.ReadWrite);
             if (Address == 0)
                 return 0;
@@ -391,7 +392,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
             }
 
-            uint UnicodeStringSize = (uint)Marshal.SizeOf<UNICODE_STRING>();
+            uint UnicodeStringSize = (uint)Unsafe.SizeOf<UNICODE_STRING>();
             if (!Emulator.IsRegionMapped(UnicodeStringPtr, UnicodeStringSize))
             {
                 Status = NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -460,7 +461,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
             }
 
-            uint UnicodeStringSize = (uint)Marshal.SizeOf<UNICODE_STRING64>();
+            uint UnicodeStringSize = (uint)Unsafe.SizeOf<UNICODE_STRING64>();
             if (!Emulator.IsRegionMapped(UnicodeStringPtr, UnicodeStringSize))
             {
                 Status = NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -575,7 +576,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
             }
 
-            uint ObjectAttributesSize = (uint)Marshal.SizeOf<OBJECT_ATTRIBUTES64>();
+            uint ObjectAttributesSize = (uint)Unsafe.SizeOf<OBJECT_ATTRIBUTES64>();
             if (!Emulator.IsRegionMapped(ObjectAttributesPtr, ObjectAttributesSize))
             {
                 Status = NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -739,7 +740,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
             }
 
-            uint ObjectAttributesSize = (uint)Marshal.SizeOf<OBJECT_ATTRIBUTES64>();
+            uint ObjectAttributesSize = (uint)Unsafe.SizeOf<OBJECT_ATTRIBUTES64>();
             if (!Emulator.IsRegionMapped(ObjectAttributesPtr, ObjectAttributesSize))
             {
                 Status = MemoryFailureStatus;
@@ -805,7 +806,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Buffer == null)
                 return 0;
 
-            ulong StructSize = (ulong)Marshal.SizeOf<UNICODE_STRING64>();
+            ulong StructSize = (ulong)Unsafe.SizeOf<UNICODE_STRING64>();
             if (!Emulator.IsRegionMapped(Address, StructSize))
                 return 0;
 
@@ -847,7 +848,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Buffer == null)
                 return 0;
 
-            ulong StructSize = (ulong)Marshal.SizeOf<UNICODE_STRING>();
+            ulong StructSize = (ulong)Unsafe.SizeOf<UNICODE_STRING>();
             if (!Emulator.IsRegionMapped(Address, StructSize))
                 return 0;
 
@@ -1007,6 +1008,20 @@ namespace Brovan.Core.Emulation.OS.Windows
         public List<WinSemaphore> WinSemaphores = new List<WinSemaphore>();
         public List<WinRegistryNotification> RegistryNotifications = new List<WinRegistryNotification>();
         public List<WinSection> WinSections = new List<WinSection>();
+        private readonly Dictionary<ulong, int> WinHandleIndex = new Dictionary<ulong, int>();
+        internal void AddWinHandle(WinHandle h)
+        {    
+            WinHandles.Add(h); WinHandleIndex[h.Handle] = WinHandles.Count - 1;
+        }
+
+        internal void RemoveWinHandle(ulong Handle)
+        {
+            if (!WinHandleIndex.TryGetValue(Handle, out int Idx)) return;
+            int Last = WinHandles.Count - 1;
+            if (Idx != Last) { var Moved = WinHandles[Last]; WinHandles[Idx] = Moved; WinHandleIndex[Moved.Handle] = Idx; }
+            WinHandles.RemoveAt(Last); WinHandleIndex.Remove(Handle);
+        }
+
         public List<WinPort> WinPorts = new List<WinPort>();
         public List<WinEtwRegistration> WinEtwRegistrations = new List<WinEtwRegistration>();
         public List<WinJob> WinJobs = new List<WinJob>();
@@ -2373,7 +2388,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return new WinHandle();
 
             WinHandle Handle = HandleManager.AddHandle(Process, Permissions);
-            WinHandles.Add(Handle);
+            AddWinHandle(Handle);
             return Handle;
         }
 
@@ -3715,7 +3730,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             WinHandle Handle = HandleManager.AddHandle(hFile, Permissions);
-            WinHandles.Add(Handle);
+            AddWinHandle(Handle);
             return Handle;
         }
 
@@ -3830,7 +3845,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             WinHandle Handle = HandleManager.AddHandle(Mutex, Permissions);
-            WinHandles.Add(Handle);
+            AddWinHandle(Handle);
             return Handle;
         }
 
@@ -4864,7 +4879,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             };
 
             WinHandle Handle = HandleManager.AddHandle(RegKey, Permissions);
-            WinHandles.Add(Handle);
+            AddWinHandle(Handle);
             return Handle;
         }
 
@@ -4881,7 +4896,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             WinHandle Handle = HandleManager.AddHandle(Ev, Permissions);
-            WinHandles.Add(Handle);
+            AddWinHandle(Handle);
             return Handle;
         }
 
@@ -4911,7 +4926,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             WinHandle Handle = HandleManager.AddHandle(Timer, Permissions);
-            WinHandles.Add(Handle);
+            AddWinHandle(Handle);
             return Handle;
         }
 
@@ -4950,7 +4965,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             WinHandle Handle = HandleManager.AddHandle(Job, Permissions);
-            WinHandles.Add(Handle);
+            AddWinHandle(Handle);
             return Handle;
         }
 
@@ -5027,7 +5042,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             WinHandle Handle = HandleManager.AddHandle(Semaphore, Permissions);
-            WinHandles.Add(Handle);
+            AddWinHandle(Handle);
             return Handle;
         }
 
@@ -5064,7 +5079,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             WinSections.Add(Sec);
 
             WinHandle Handle = HandleManager.AddHandle(Sec, Permissions);
-            WinHandles.Add(Handle);
+            AddWinHandle(Handle);
             return Handle;
         }
 
@@ -5083,7 +5098,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (HandleManager.RemoveHandle(Handle))
             {
-                WinHandles.RemoveAll(h => h.Handle == Handle);
+                RemoveWinHandle(Handle);
             }
         }
     }

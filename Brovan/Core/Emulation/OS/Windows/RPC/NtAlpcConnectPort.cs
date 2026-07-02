@@ -52,7 +52,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(
                 Port, AccessMask.StandardRightsAll);
-            Instance.WinHelper.WinHandles.Add(Handle);
+            Instance.WinHelper.AddWinHandle(Handle);
 
             if (!Instance._emulator.WriteMemory(PortHandlePtr, (ulong)Handle.Handle))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;

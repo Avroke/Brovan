@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -79,6 +80,7 @@ namespace Brovan.Core.Emulation.OS
             public readonly bool IsExplicit;
             public readonly int Size32;
             public readonly int Size64;
+            public readonly bool IsBlittable;
 
             public TypeDesc(Type T)
             {
@@ -96,6 +98,27 @@ namespace Brovan.Core.Emulation.OS
                 IsExplicit = Expl;
                 Size32 = ComputeSize(Fields, Expl, false);
                 Size64 = ComputeSize(Fields, Expl, true);
+                IsBlittable = ComputeBlittable(Fields);
+            }
+
+            private static bool ComputeBlittable(FieldDesc[] Fields)
+            {
+                foreach (FieldDesc D in Fields)
+                {
+                    Type Ft = D.Field.FieldType;
+                    if (Ft.IsEnum) Ft = Enum.GetUnderlyingType(Ft);
+                    if (Ft == typeof(bool) || Ft == typeof(byte) || Ft == typeof(sbyte)) continue;
+                    if (Ft == typeof(ushort) || Ft == typeof(short)) continue;
+                    if (Ft == typeof(uint) || Ft == typeof(int) || Ft == typeof(float)) continue;
+                    if (Ft == typeof(ulong) || Ft == typeof(long) || Ft == typeof(double)) continue;
+                    if (Ft.IsValueType && !Ft.IsPrimitive && !Ft.IsEnum)
+                    {
+                        if (!GetDesc(Ft).IsBlittable) return false;
+                        continue;
+                    }
+                    return false; // string, byte[], array, pointer -> not blittable
+                }
+                return true;
             }
 
             private static int ComputeSize(FieldDesc[] Fields, bool IsExplicit, bool Is64)
@@ -211,6 +234,25 @@ namespace Brovan.Core.Emulation.OS
                 return WriteStructResult.Fail(WriteStructError.NullDestination, $"Destination address is NULL for {typeof(T).Name}");
 
             bool Is64 = Emulator._binary.Architecture == BinaryArchitecture.x64;
+            TypeDesc Desc = GetDesc(typeof(T));
+
+            if (Desc.IsBlittable)
+            {
+                int Size = Is64 ? Desc.Size64 : Desc.Size32;
+                if (Size <= 0)
+                    return WriteStructResult.Fail(WriteStructError.InvalidStructLayout, $"{typeof(T).Name} has zero size");
+                if (!Emulator.IsRegionMapped(Address, (ulong)Size))
+                    return WriteStructResult.Fail(WriteStructError.DestinationNotMapped, $"{typeof(T).Name} (0x{Size:X} bytes) at 0x{Address:X} is not fully mapped");
+                byte[] Buf = ArrayPool<byte>.Shared.Rent(Size);
+                try
+                {
+                    MemoryMarshal.Write<T>(Buf.AsSpan(0, Size), ref Value);
+                    if (!Emulator.WriteMemory(Address, Buf.AsSpan(0, Size)))
+                        return WriteStructResult.Fail(WriteStructError.DestinationNotMapped, $"WriteMemory failed for {typeof(T).Name} at 0x{Address:X}");
+                }
+                finally { ArrayPool<byte>.Shared.Return(Buf); }
+                return WriteStructResult.Ok;
+            }
 
             using MemoryStream Ms = new();
             using BinaryWriter Bw = new(Ms, Encoding.Unicode, leaveOpen: true);
@@ -245,6 +287,20 @@ namespace Brovan.Core.Emulation.OS
             TypeDesc Desc = GetDesc(typeof(T));
             int Size = Is64 ? Desc.Size64 : Desc.Size32;
             if (Size <= 0) return false;
+
+            if (Desc.IsBlittable)
+            {
+                byte[] Buf = ArrayPool<byte>.Shared.Rent(Size);
+                try
+                {
+                    Span<byte> Span = Buf.AsSpan(0, Size);
+                    if (!Emulator.ReadMemory(Address, Span))
+                        return false;
+                    Value = MemoryMarshal.Read<T>(Span);
+                    return true;
+                }
+                finally { ArrayPool<byte>.Shared.Return(Buf); }
+            }
 
             byte[] Raw = Emulator.ReadMemory(Address, (uint)Size);
             if (Raw == null || Raw.Length != Size) return false;

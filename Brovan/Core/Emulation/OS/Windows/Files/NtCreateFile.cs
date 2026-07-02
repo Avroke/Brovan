@@ -185,7 +185,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static NTSTATUS CreateRegularHandle64(BinaryEmulator Instance, ulong FileHandlePtr, ulong IoStatusBlockPtr, AccessMask Permissions, string Path, uint CreateDisposition, uint CreateOptions)
         {
-            Path = NormalizeRegularPath(Path);
+            Path = NormalizeAndTrimPath(Path);
             bool IsDirectory = (CreateOptions & FILE_DIRECTORY_FILE) != 0 || Path.EndsWith("\\", StringComparison.Ordinal);
 
             if ((CreateOptions & FILE_DIRECTORY_FILE) != 0 && (CreateOptions & FILE_NON_DIRECTORY_FILE) != 0)
@@ -199,8 +199,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_OBJECT_NAME_INVALID, 0);
                 return NTSTATUS.STATUS_OBJECT_NAME_INVALID;
             }
-
-            Path = TrimTrailingDirectorySeparators(Path);
 
             WindowsFileStream Stream = WindowsFileStream.FromGuestPath(Path);
             bool DirectoryExists = Stream.ExistsAsDirectory || IsDriveRootPath(Path);
@@ -226,7 +224,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return Status;
             }
 
-            Stream = WindowsFileStream.FromGuestPath(Path);
             bool FinalExists = IsDirectory ? Stream.ExistsAsDirectory : Stream.ExistsAsFile;
 
             WinFile FileObj = new WinFile
@@ -243,7 +240,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Instance.WinHelper.WinFiles.Add(FileObj);
 
             WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(FileObj, Permissions);
-            Instance.WinHelper.WinHandles.Add(Handle);
+            Instance.WinHelper.AddWinHandle(Handle);
 
             Instance._emulator.WriteMemory(FileHandlePtr, (ulong)Handle.Handle);
             Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, Information);
@@ -253,7 +250,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static NTSTATUS CreateRegularHandle32(BinaryEmulator Instance, uint FileHandlePtr, uint IoStatusBlockPtr, AccessMask Permissions, string Path, uint CreateDisposition, uint CreateOptions)
         {
-            Path = NormalizeRegularPath(Path);
+            Path = NormalizeAndTrimPath(Path);
             bool IsDirectory = (CreateOptions & FILE_DIRECTORY_FILE) != 0 || Path.EndsWith("\\", StringComparison.Ordinal);
 
             if ((CreateOptions & FILE_DIRECTORY_FILE) != 0 && (CreateOptions & FILE_NON_DIRECTORY_FILE) != 0)
@@ -267,8 +264,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance.WinHelper.WriteIoStatusBlock32(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_OBJECT_NAME_INVALID, 0);
                 return NTSTATUS.STATUS_OBJECT_NAME_INVALID;
             }
-
-            Path = TrimTrailingDirectorySeparators(Path);
 
             WindowsFileStream Stream = WindowsFileStream.FromGuestPath(Path);
             bool DirectoryExists = Stream.ExistsAsDirectory || IsDriveRootPath(Path);
@@ -294,7 +289,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return Status;
             }
 
-            Stream = WindowsFileStream.FromGuestPath(Path);
             bool FinalExists = IsDirectory ? Stream.ExistsAsDirectory : Stream.ExistsAsFile;
 
             WinFile FileObj = new WinFile
@@ -311,7 +305,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Instance.WinHelper.WinFiles.Add(FileObj);
 
             WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(FileObj, Permissions);
-            Instance.WinHelper.WinHandles.Add(Handle);
+            Instance.WinHelper.AddWinHandle(Handle);
 
             Instance._emulator.WriteMemory(FileHandlePtr, (uint)Handle.Handle);
             Instance.WinHelper.WriteIoStatusBlock32(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, Information);
@@ -466,11 +460,23 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (string.IsNullOrEmpty(Path))
                 return Path;
-
             while (Path.Length > 3 && Path.EndsWith("\\", StringComparison.Ordinal))
                 Path = Path.Substring(0, Path.Length - 1);
-
             return Path;
+        }
+
+        private static string NormalizeAndTrimPath(string Path)
+        {
+            if (string.IsNullOrEmpty(Path)) return string.Empty;
+            int End = Path.Length;
+            while (End > 0 && Path[End - 1] == '\0') End--;
+            while (End > 3 && Path[End - 1] == '\\') End--;
+            bool HasSlash = false;
+            for (int I = 0; I < End; I++) { if (Path[I] == '/') { HasSlash = true; break; } }
+            if (!HasSlash && End == Path.Length) return Path;
+            char[] Buf = new char[End];
+            for (int I = 0; I < End; I++) { char C = Path[I]; Buf[I] = C == '/' ? '\\' : C; }
+            return new string(Buf);
         }
 
         internal static NTSTATUS CreateDeviceHandle64(BinaryEmulator Instance, ulong FileHandlePtr, ulong IoStatusBlockPtr, AccessMask Permissions, string InternalPath, WinDeviceDelegate Handler)
@@ -487,7 +493,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Instance.WinHelper.WinFiles.Add(FileObj);
             WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(FileObj, Permissions);
-            Instance.WinHelper.WinHandles.Add(Handle);
+            Instance.WinHelper.AddWinHandle(Handle);
 
             Instance._emulator.WriteMemory(FileHandlePtr, (ulong)Handle.Handle);
             Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 1);
@@ -508,7 +514,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Instance.WinHelper.WinFiles.Add(FileObj);
             WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(FileObj, Permissions);
-            Instance.WinHelper.WinHandles.Add(Handle);
+            Instance.WinHelper.AddWinHandle(Handle);
 
             Instance._emulator.WriteMemory(FileHandlePtr, (uint)Handle.Handle);
             Instance.WinHelper.WriteIoStatusBlock32(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 1);

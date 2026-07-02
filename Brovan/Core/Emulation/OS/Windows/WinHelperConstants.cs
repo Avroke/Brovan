@@ -1597,7 +1597,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     break;
 
                 WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(Thread, AccessMask.GiveTemp);
-                Instance.WinHelper.WinHandles.Add(Handle);
+                Instance.WinHelper.AddWinHandle(Handle);
                 Factory.WorkerThreads.Add(Handle.Handle);
             }
         }

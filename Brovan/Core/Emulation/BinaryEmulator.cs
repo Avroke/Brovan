@@ -333,6 +333,7 @@ namespace Brovan.Core.Emulation
 
         private const int GprBatchCount = 18;
         private int[] _gprBatchRegs;
+        private ulong[] _gprBatchScratch;
         internal BinaryEmulatorSettings Settings;
         private InstructionHookCallback Syscall;
         private InstructionHookCallback Privileged;
@@ -610,6 +611,14 @@ namespace Brovan.Core.Emulation
         {
             if ((Settings.Flags & FlagType) != 0)
                 OnMessage?.Invoke(Message, FlagType);
+        }
+
+        public void TriggerEventMessage(Func<string> MessageFactory, LogFlags FlagType)
+        {
+            if ((Settings.Flags & FlagType) == 0 || MessageFactory == null)
+                return;
+            try { OnMessage?.Invoke(MessageFactory(), FlagType); }
+            catch (Exception ex) { OnMessage?.Invoke($"[event] msg factory failed: {ex.GetType().Name}: {ex.Message}", FlagType); }
         }
 
         /// <summary>
@@ -1679,18 +1688,35 @@ namespace Brovan.Core.Emulation
         public void SaveContext(EmulatedThread t)
         {
             if (t == null || t.Context == null) return;
+            ReadGprBatch(t.Context);
+        }
 
+        public bool ReadGprBatch(CpuContext c)
+        {
+            if (c == null) return false;
             int[] Regs = GetGprBatchRegs();
-            ulong[] Vals = new ulong[GprBatchCount];
+            ulong[] Vals = _gprBatchScratch ??= new ulong[GprBatchCount];
             if (!_emulator.ReadRegisterBatch(Regs, Vals, GprBatchCount))
-                return;
-
-            CpuContext c = t.Context;
+                return false;
             c.RAX = Vals[0];  c.RBX = Vals[1];  c.RCX = Vals[2];  c.RDX = Vals[3];
             c.RSI = Vals[4];  c.RDI = Vals[5];  c.RBP = Vals[6];  c.RSP = Vals[7];
             c.R8 = Vals[8];   c.R9 = Vals[9];   c.R10 = Vals[10]; c.R11 = Vals[11];
             c.R12 = Vals[12]; c.R13 = Vals[13]; c.R14 = Vals[14]; c.R15 = Vals[15];
             c.RIP = Vals[16]; c.RFLAGS = Vals[17];
+            return true;
+        }
+
+        public void WriteGprBatch(CpuContext c)
+        {
+            if (c == null) return;
+            int[] Regs = GetGprBatchRegs();
+            ulong[] Vals = _gprBatchScratch ??= new ulong[GprBatchCount];
+            Vals[0]  = c.RAX;  Vals[1]  = c.RBX;  Vals[2]  = c.RCX;  Vals[3]  = c.RDX;
+            Vals[4]  = c.RSI;  Vals[5]  = c.RDI;  Vals[6]  = c.RBP;  Vals[7]  = c.RSP;
+            Vals[8]  = c.R8;   Vals[9]  = c.R9;   Vals[10] = c.R10;  Vals[11] = c.R11;
+            Vals[12] = c.R12;  Vals[13] = c.R13;  Vals[14] = c.R14;  Vals[15] = c.R15;
+            Vals[16] = c.RIP;  Vals[17] = c.RFLAGS;
+            _emulator.WriteRegisterBatch(Regs, Vals, GprBatchCount);
         }
 
         public void LoadContext(EmulatedThread t)
@@ -1703,16 +1729,7 @@ namespace Brovan.Core.Emulation
                 t.SwitchingContext = false;
             }
 
-            CpuContext c = t.Context;
-            int[] Regs = GetGprBatchRegs();
-            ulong[] Vals = new ulong[GprBatchCount]
-            {
-                c.RAX, c.RBX, c.RCX, c.RDX, c.RSI, c.RDI, c.RBP, c.RSP,
-                c.R8,  c.R9,  c.R10, c.R11, c.R12, c.R13, c.R14, c.R15,
-                c.RIP, c.RFLAGS
-            };
-            _emulator.WriteRegisterBatch(Regs, Vals, GprBatchCount);
-
+            WriteGprBatch(t.Context);
             Guest.OnThreadContextLoaded(this, t);
         }
 

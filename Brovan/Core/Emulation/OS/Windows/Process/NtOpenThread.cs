@@ -22,7 +22,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INVALID_CID;
 
             WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(Thread, (AccessMask)DesiredAccess);
-            Instance.WinHelper.WinHandles.Add(Handle);
+            Instance.WinHelper.AddWinHandle(Handle);
             Instance._emulator.WriteMemory(ThreadHandlePtr, Handle.Handle, 8);
 
             return NTSTATUS.STATUS_SUCCESS;

@@ -60,7 +60,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
 
                 WinHandle ExistingHandle = Instance.WinHelper.HandleManager.AddHandle(Existing, DesiredAccess);
-                Instance.WinHelper.WinHandles.Add(ExistingHandle);
+                Instance.WinHelper.AddWinHandle(ExistingHandle);
 
                 if (!Instance._emulator.WriteMemory(SectionHandlePtr, (ulong)ExistingHandle.Handle))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;

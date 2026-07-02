@@ -72,7 +72,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(NewToken, NewAccess);
             Instance.WinHelper.HandleManager.SetHandleFlags(Handle.Handle, ConvertObjectHandleAttributes(HandleAttributes));
-            Instance.WinHelper.WinHandles.Add(Handle);
+            Instance.WinHelper.AddWinHandle(Handle);
 
             bool Written = Is64
                 ? Instance._emulator.WriteMemory(NewTokenHandlePtr, Handle.Handle, 8)

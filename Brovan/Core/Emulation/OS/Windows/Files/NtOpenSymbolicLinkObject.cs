@@ -37,7 +37,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             };
 
             WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(LinkObj, DesiredAccess);
-            Instance.WinHelper.WinHandles.Add(Handle);
+            Instance.WinHelper.AddWinHandle(Handle);
 
             if (!Instance._emulator.WriteMemory(LinkHandlePtr, Handle.Handle))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;

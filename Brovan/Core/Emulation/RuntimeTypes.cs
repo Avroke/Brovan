@@ -82,45 +82,11 @@ namespace Brovan.Core.Emulation
 
             if (State == EmulatedThreadState.Running)
             {
-                Context.RAX = emulator.ReadRegister(Registers.UC_X86_REG_RAX);
-                Context.RBX = emulator.ReadRegister(Registers.UC_X86_REG_RBX);
-                Context.RCX = emulator.ReadRegister(Registers.UC_X86_REG_RCX);
-                Context.RDX = emulator.ReadRegister(Registers.UC_X86_REG_RDX);
-                Context.RSI = emulator.ReadRegister(Registers.UC_X86_REG_RSI);
-                Context.RDI = emulator.ReadRegister(Registers.UC_X86_REG_RDI);
-                Context.RBP = emulator.ReadRegister(Registers.UC_X86_REG_RBP);
-                Context.RSP = emulator.ReadRegister(Registers.UC_X86_REG_RSP);
-                Context.R8 = emulator.ReadRegister(Registers.UC_X86_REG_R8);
-                Context.R9 = emulator.ReadRegister(Registers.UC_X86_REG_R9);
-                Context.R10 = emulator.ReadRegister(Registers.UC_X86_REG_R10);
-                Context.R11 = emulator.ReadRegister(Registers.UC_X86_REG_R11);
-                Context.R12 = emulator.ReadRegister(Registers.UC_X86_REG_R12);
-                Context.R13 = emulator.ReadRegister(Registers.UC_X86_REG_R13);
-                Context.R14 = emulator.ReadRegister(Registers.UC_X86_REG_R14);
-                Context.R15 = emulator.ReadRegister(Registers.UC_X86_REG_R15);
-                Context.RIP = emulator.ReadRegister(Registers.UC_X86_REG_RIP);
-                Context.RFLAGS = emulator.ReadRegister(Registers.UC_X86_REG_EFLAGS);
+                emulator.ReadGprBatch(Context);
                 return;
             }
 
-            emulator.WriteRegister(Registers.UC_X86_REG_RAX, Context.RAX);
-            emulator.WriteRegister(Registers.UC_X86_REG_RBX, Context.RBX);
-            emulator.WriteRegister(Registers.UC_X86_REG_RCX, Context.RCX);
-            emulator.WriteRegister(Registers.UC_X86_REG_RDX, Context.RDX);
-            emulator.WriteRegister(Registers.UC_X86_REG_RSI, Context.RSI);
-            emulator.WriteRegister(Registers.UC_X86_REG_RDI, Context.RDI);
-            emulator.WriteRegister(Registers.UC_X86_REG_RBP, Context.RBP);
-            emulator.WriteRegister(Registers.UC_X86_REG_RSP, Context.RSP);
-            emulator.WriteRegister(Registers.UC_X86_REG_R8, Context.R8);
-            emulator.WriteRegister(Registers.UC_X86_REG_R9, Context.R9);
-            emulator.WriteRegister(Registers.UC_X86_REG_R10, Context.R10);
-            emulator.WriteRegister(Registers.UC_X86_REG_R11, Context.R11);
-            emulator.WriteRegister(Registers.UC_X86_REG_R12, Context.R12);
-            emulator.WriteRegister(Registers.UC_X86_REG_R13, Context.R13);
-            emulator.WriteRegister(Registers.UC_X86_REG_R14, Context.R14);
-            emulator.WriteRegister(Registers.UC_X86_REG_R15, Context.R15);
-            emulator.WriteRegister(Registers.UC_X86_REG_RIP, Context.RIP);
-            emulator.WriteRegister(Registers.UC_X86_REG_EFLAGS, Context.RFLAGS);
+            emulator.WriteGprBatch(Context);
             SwitchingContext = true;
         }
     }
