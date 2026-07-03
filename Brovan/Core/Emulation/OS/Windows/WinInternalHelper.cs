@@ -80,9 +80,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
     }
 
-    /// <summary>
-    /// Generic handles manager (for Processes, Files, Mutex, etc)
-    /// </summary>
     internal struct HandleEntry
     {
         public IHandleObject Object;
@@ -90,6 +87,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ObjectHandleFlags Flags;
     }
 
+    /// <summary>
+    /// Generic handles manager (for Processes, Files, Mutex, etc)
+    /// </summary>
     internal class HandleManager
     {
         public static readonly ulong KNOWN_DLLS_DIRECTORY = 0x1111;

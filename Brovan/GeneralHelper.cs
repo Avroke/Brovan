@@ -137,6 +137,9 @@ namespace Brovan
 
         [DllImport("user32.dll")]
         public static extern int GetSystemMetrics(int nIndex);
+
+        [DllImport("user32.dll")]
+        public static extern int GetSystemMetricsForDpi(int nIndex, uint dpi);
     }
 
     internal class NativeUnixImports

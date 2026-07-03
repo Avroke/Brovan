@@ -94,20 +94,25 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         public readonly int Height;
         public readonly bool Visible;
         public readonly WindowState State;
+        public readonly bool Resizable;
 
-        public PresentCommand(string title, int width, int height, bool visible, WindowState state)
+        public PresentCommand(string title, int width, int height, bool visible, WindowState state, bool resizable)
         {
             Title = title;
             Width = width;
             Height = height;
             Visible = visible;
             State = state;
+            Resizable = resizable;
         }
 
         public override void Execute(IDisplayConnection display, IWindow window)
         {
             if (window == null)
                 return;
+
+            if (window.Resizable != Resizable)
+                window.Resizable = Resizable;
 
             if (window.Title != Title)
                 window.Title = Title;
@@ -123,6 +128,29 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
             if (window.State != State)
                 window.State = State;
+        }
+    }
+
+    internal sealed class RemoveSystemMenuItemCommand : GuiCommand
+    {
+        public readonly uint Command;
+
+        public RemoveSystemMenuItemCommand(uint command)
+        {
+            Command = command;
+        }
+
+        public override void Execute(IDisplayConnection display, IWindow window)
+        {
+            window?.RemoveSystemMenuItem(Command);
+        }
+    }
+
+    internal sealed class ResetSystemMenuCommand : GuiCommand
+    {
+        public override void Execute(IDisplayConnection display, IWindow window)
+        {
+            window?.ResetSystemMenu();
         }
     }
 
@@ -216,12 +244,28 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             }
         }
 
-        public void EnqueuePresent(string title, int width, int height, bool visible, WindowState state)
+        public void EnqueuePresent(string title, int width, int height, bool visible, WindowState state, bool resizable)
         {
             if (_disposed)
                 return;
 
-            _commandQueue.Add(new PresentCommand(title, width, height, visible, state));
+            _commandQueue.Add(new PresentCommand(title, width, height, visible, state, resizable));
+        }
+
+        public void EnqueueRemoveSystemMenuItem(uint command)
+        {
+            if (_disposed)
+                return;
+
+            _commandQueue.Add(new RemoveSystemMenuItemCommand(command));
+        }
+
+        public void EnqueueResetSystemMenu()
+        {
+            if (_disposed)
+                return;
+
+            _commandQueue.Add(new ResetSystemMenuCommand());
         }
 
         public void EnqueueTextRender(ulong hwnd, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options)
@@ -363,6 +407,21 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 {
                     if (_commandQueue.TryTake(out GuiCommand cmd, 16))
                     {
+                        while (cmd is PresentCommand && _commandQueue.TryTake(out GuiCommand Next, 0))
+                        {
+                            if (Next is PresentCommand)
+                            {
+                                cmd = Next;
+                                continue;
+                            }
+
+                            IWindow drainWindow;
+                            lock (_windowLock)
+                                drainWindow = _window;
+                            cmd.Execute(_display, drainWindow);
+                            cmd = Next;
+                        }
+
                         IWindow currentWindow;
                         lock (_windowLock)
                             currentWindow = _window;
