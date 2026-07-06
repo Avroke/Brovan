@@ -61,3 +61,4 @@ nunit-*.xml
 /Brovan/.cache
 /Brovan.Graphics/brovvulk-icd/generated
 /VirtualFS
+/Brovan/Properties

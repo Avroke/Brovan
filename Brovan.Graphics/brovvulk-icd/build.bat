@@ -93,7 +93,7 @@ if /i "%MODE%"=="msvc" (
 ) else (
     "%COMPILER%" -O2 -c "vulkan_shim.c" -I. -I"..\vulkan-headers" -o "obj\build\vulkan_shim.o"
     if not errorlevel 1 (
-        "%COMPILER%" -shared -o "bin\vulkan-1.dll" "obj\build\vulkan_shim.o" "obj\generated\exports.def" -Wl,--out-implib,"bin\vulkan-1.lib"
+        "%COMPILER%" -shared -static -static-libgcc -static-libstdc++ -o "bin\vulkan-1.dll" "obj\build\vulkan_shim.o" "obj\generated\exports.def" -Wl,--out-implib,"bin\vulkan-1.lib" -lkernel32
     )
 )
 
@@ -123,14 +123,14 @@ for %%P in (
     "%ProgramFiles(x86)%\Microsoft Visual Studio\2019\Community\Common7\Tools\VsDevCmd.bat"
     "%ProgramFiles(x86)%\Microsoft Visual Studio\2019\BuildTools\Common7\Tools\VsDevCmd.bat"
 ) do (
-    if exist "%%~P" (
+    if exist %%~P (
         set "VSDEVCMD=%%~P"
         goto :have_vsdevcmd
     )
 )
 
-for /f "delims=" %%P in ('where vswhere.exe 2^>nul') do (
-    for /f "delims=" %%Q in ('"%%P" -latest -products * -requires Microsoft.Component.MSBuild -find Common7\Tools\VsDevCmd.bat 2^>nul') do (
+for /f "usebackq delims=" %%P in (`where vswhere.exe 2^>nul`) do (
+    for /f "usebackq delims=" %%Q in (`"%%P" -latest -products * -requires Microsoft.Component.MSBuild -find Common7\Tools\VsDevCmd.bat 2^>nul`) do (
         if exist "%%Q" (
             set "VSDEVCMD=%%Q"
             goto :have_vsdevcmd
