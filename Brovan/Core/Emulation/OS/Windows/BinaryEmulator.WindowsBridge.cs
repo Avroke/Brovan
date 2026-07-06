@@ -1985,7 +1985,6 @@ namespace Brovan.Core.Emulation
             if (Thread == null || Helper == null || Helper.WinModules.Count == 0)
                 return;
 
-            // Skip the entire CFT/ENTRY block when no one is listening.
             bool CftEnabled = this.Debug || (Settings.Flags & LogFlags.General) != 0;
             if (!CftEnabled)
             {

@@ -137,8 +137,6 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private const uint SWP_NOACTIVATE = 0x0010;
         private const uint SWP_FRAMECHANGED = 0x0020;
 
-        private const uint MF_BYCOMMAND = 0x00000000;
-
         public WindowsWinManager()
         {
             if (!GeneralHelper.IsWindows)
@@ -192,6 +190,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             lock (WindowSync)
                 Windows[hwnd] = window;
 
+            ApplyBrovanAccent(hwnd);
             ApplyInitialState(window, options);
             return window;
         }
@@ -267,6 +266,18 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 options = options with { Height = 600 };
 
             return options;
+        }
+
+        private const int DWMWA_BORDER_COLOR = 34;
+        private const uint BrovanAccentColor = 0x00FFA050;
+
+        private static void ApplyBrovanAccent(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero)
+                return;
+
+            uint color = BrovanAccentColor;
+            DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, ref color, sizeof(uint));
         }
 
         private static void ApplyInitialState(WindowsWindow window, WindowOptions options)
@@ -390,22 +401,6 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     ShowWindow(hwnd, SW_RESTORE);
                     break;
             }
-        }
-
-        internal void RemoveSystemMenuItem(IntPtr hwnd, uint command)
-        {
-            IntPtr menu = GetSystemMenu(hwnd, false);
-            if (menu == IntPtr.Zero)
-                return;
-
-            DeleteMenu(menu, command, MF_BYCOMMAND);
-            DrawMenuBar(hwnd);
-        }
-
-        internal void ResetSystemMenu(IntPtr hwnd)
-        {
-            GetSystemMenu(hwnd, true);
-            DrawMenuBar(hwnd);
         }
 
         internal void ApplyDecorations(IntPtr hwnd, bool decorated, bool resizable)
@@ -646,7 +641,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             private bool _visible;
             private WindowState _state;
             private bool _decorated;
-            private bool _resizable;
+            private readonly bool _resizable;
 
             internal WindowsWindow(WindowsWinManager manager, IntPtr hwnd, WindowOptions options)
             {
@@ -721,21 +716,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 }
             }
 
-            public bool Resizable
-            {
-                get => _resizable;
-                set
-                {
-                    EnsureAlive();
-                    if (_resizable == value)
-                        return;
-
-                    _resizable = value;
-                    _manager.ApplyDecorations(_hwnd, _decorated, _resizable);
-
-                    _manager.ResetSystemMenu(_hwnd);
-                }
-            }
+            public bool Resizable => _resizable;
 
             public bool Decorated
             {
@@ -775,18 +756,6 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
             public void Close() => Dispose();
 
-            public void RemoveSystemMenuItem(uint command)
-            {
-                EnsureAlive();
-                _manager.RemoveSystemMenuItem(_hwnd, command);
-            }
-
-            public void ResetSystemMenu()
-            {
-                EnsureAlive();
-                _manager.ResetSystemMenu(_hwnd);
-            }
-
             public void Dispose()
             {
                 if (_disposed)
@@ -801,7 +770,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             {
                 if (msg == WM_CLOSE)
                 {
-                    _pendingHostInput.Enqueue((msg, 0UL, 0UL));
+                    Close();
                     return IntPtr.Zero;
                 }
 
@@ -943,17 +912,6 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private static extern IntPtr GetWindowLongPtrW(IntPtr hWnd, int nIndex);
 
         [DllImport("user32.dll", SetLastError = true)]
-        private static extern IntPtr GetSystemMenu(IntPtr hWnd, [MarshalAs(UnmanagedType.Bool)] bool bRevert);
-
-        [DllImport("user32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool DeleteMenu(IntPtr hMenu, uint uPosition, uint uFlags);
-
-        [DllImport("user32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool DrawMenuBar(IntPtr hWnd);
-
-        [DllImport("user32.dll", SetLastError = true)]
         private static extern IntPtr SetWindowLongPtrW(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
 
         [DllImport("user32.dll")]
@@ -967,6 +925,9 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
         [DllImport("kernel32.dll")]
         private static extern IntPtr GetModuleHandleW(string lpModuleName);
+
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmSetWindowAttribute(IntPtr hwnd, int dwAttribute, ref uint pvAttribute, int cbAttribute);
 
         [DllImport("gdi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         private static extern int GetDeviceCaps(IntPtr hdc, int nIndex);

@@ -140,16 +140,26 @@ namespace Brovan.Core.Emulation
 
         private static IntPtr Resolve(string LibName, Assembly Asm, DllImportSearchPath? SearchPath)
         {
-            if (!string.Equals(LibName, "unicorn", StringComparison.OrdinalIgnoreCase))
-                return IntPtr.Zero;
+            if (string.Equals(LibName, "unicorn", StringComparison.OrdinalIgnoreCase))
+            {
+                if (GeneralHelper.IsWindows)
+                    return NativeLibrary.Load("unicorn.dll", Asm, SearchPath);
 
-            if (GeneralHelper.IsWindows)
-                return NativeLibrary.Load("unicorn.dll", Asm, SearchPath);
+                if (GeneralHelper.IsLinux)
+                    return NativeLibrary.Load("libunicorn.so", Asm, SearchPath);
 
-            if (GeneralHelper.IsLinux)
-                return NativeLibrary.Load("libunicorn.so", Asm, SearchPath);
+                throw new PlatformNotSupportedException("Brovan currently supports resolving unicorn for Windows and Linux only.");
+            }
 
-            throw new PlatformNotSupportedException("Brovan currently supports resolving unicorn for Windows and Linux only.");
+            if (string.Equals(LibName, "vulkan-1.dll", StringComparison.OrdinalIgnoreCase) && GeneralHelper.IsLinux)
+            {
+                if (NativeLibrary.TryLoad("libvulkan.so.1", out IntPtr handle))
+                    return handle;
+                if (NativeLibrary.TryLoad("libvulkan.so", out handle))
+                    return handle;
+            }
+
+            return IntPtr.Zero;
         }
     }
 }

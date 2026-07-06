@@ -391,7 +391,7 @@ public bool TryGetWindow(IntPtr handle, out LinuxWindow window)
             private bool _visible;
             private bool _decorated;
             private WindowState _state;
-            private bool _resizable;
+            private readonly bool _resizable;
 
             internal LinuxWindow(LinuxWinManager manager, IntPtr display, IntPtr window, WindowOptions options)
             {
@@ -462,15 +462,7 @@ public bool TryGetWindow(IntPtr handle, out LinuxWindow window)
                 }
             }
 
-            public bool Resizable
-            {
-                get => _resizable;
-                set
-                {
-                    EnsureAlive();
-                    _resizable = value;
-                }
-            }
+            public bool Resizable => _resizable;
 
             public bool Decorated
             {
@@ -505,14 +497,6 @@ public bool TryGetWindow(IntPtr handle, out LinuxWindow window)
             public void Hide() => Visible = false;
 
             public void Close() => Dispose();
-
-            public void RemoveSystemMenuItem(uint command)
-            {
-            }
-
-            public void ResetSystemMenu()
-            {
-            }
 
             public void Dispose()
             {

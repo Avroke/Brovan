@@ -6,7 +6,8 @@
         <ImplicitUsings>disable</ImplicitUsings>
         <IsRoslynAnalyzer>true</IsRoslynAnalyzer>
         <IsPackable>false</IsPackable>
-        <EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
+        <EnforceExtendedAnalyzerRules>false</EnforceExtendedAnalyzerRules>
+        <NoWarn>$(NoWarn);RS1035</NoWarn>
     </PropertyGroup>
 
     <ItemGroup>

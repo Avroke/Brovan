@@ -980,8 +980,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         Window = 13,
         EtwRegistrationHandle = 14,
         SemaphoreHandle = 15,
-        JobHandle = 16,
-        Menu = 17
+        JobHandle = 16
     }
 
     public sealed class WinToken : IHandleObject
@@ -1386,12 +1385,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong ClientClassAddress;
         public ulong ClientTextAddress;
         public uint ClientTextBytes;
-        public ulong ClientDpiContextAddress;
-        public ulong DialogPointer;
-        public ushort WindowFNID;
-        public ulong SystemMenuHandle;
-        public bool IsMessageBox;
-        public readonly Dictionary<int, ulong> WindowLongs = new();
         public ulong UserHandleEntryAddress;
 
         public Dictionary<ushort, ulong> AtomProperties = new();
@@ -1405,24 +1398,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public string ObjectId => $"HWND_{Hwnd:X}";
         public HandleType ObjectType => HandleType.Window;
-    }
-
-    public class WinMenuItem
-    {
-        public uint Id;
-        public string Text;
-        public uint Flags;
-    }
-
-    public class WinMenu : IHandleObject
-    {
-        public ulong Handle;
-        public ulong OwnerHwnd;
-        public bool IsSystemMenu;
-        public readonly List<WinMenuItem> Items = new();
-
-        public string ObjectId => $"HMENU_{Handle:X}";
-        public HandleType ObjectType => HandleType.Menu;
     }
 
 

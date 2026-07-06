@@ -63,7 +63,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Normalized = Normalized.Substring(4);
             }
 
-            if (Normalized.Equals("MountPointManager", StringComparison.OrdinalIgnoreCase))
+            if (Normalized.Equals("BrovVulk", StringComparison.OrdinalIgnoreCase))
+                Normalized = "\\Device\\BrovVulk";
+            else if (Normalized.Equals("MountPointManager", StringComparison.OrdinalIgnoreCase))
                 Normalized = "\\Device\\MountPointManager";
             else if (Normalized.Equals("NUL", StringComparison.OrdinalIgnoreCase) ||
                 Normalized.Equals("NUL:", StringComparison.OrdinalIgnoreCase) ||
@@ -1010,8 +1012,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         public List<WinSection> WinSections = new List<WinSection>();
         private readonly Dictionary<ulong, int> WinHandleIndex = new Dictionary<ulong, int>();
         internal void AddWinHandle(WinHandle h)
-        {    
-            WinHandles.Add(h); WinHandleIndex[h.Handle] = WinHandles.Count - 1;
+        {
+            WinHandles.Add(h);
+            WinHandleIndex[h.Handle] = WinHandles.Count - 1;
         }
 
         internal void RemoveWinHandle(ulong Handle)
@@ -1028,7 +1031,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong EtwNotificationEventHandle;
         internal PebLdrTracker LdrTracker;
         public readonly Dictionary<ulong, WinWindow> WinWindows = new();
-        public readonly Dictionary<ulong, WinMenu> WinMenus = new();
         public readonly Dictionary<ushort, WinWindowClass> WinWindowClassesByAtom = new();
         private readonly Dictionary<string, ushort> WinWindowClassAtomsByKey = new(StringComparer.OrdinalIgnoreCase);
         private ushort NextWindowClassAtom = 0xC000;
@@ -1046,10 +1048,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int Win32ClientInfoActiveWindowSlot = 8;
         private const int Win32ClientInfoActiveWindowPointerSlot = 9;
         private const ulong UserSharedInfoMirrorSize = 0x1B54;
-        private const ulong UserServerInfoBaselineDpiOffset = 0x1B56;
-        private const ulong ServerInfoClassAtomsOffset = 0x364;
-        private const ushort FirstPredefinedControlAtom = 0x0080;
-        private const ushort PredefinedControlAtomCount = 6;
         private const ulong UserMessageBitmaskSize = 0x80;
         private const uint UserMessageBitmaskMax = 0x3FF;
         private ulong UserMessageBitmask1Address;
@@ -2626,14 +2624,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return GdiHandleTableAddress;
         }
 
-        public byte GetGdiHandleType(ulong Handle)
-        {
-            if (!ValidateGdiHandle(Handle))
-                return 0;
-
-            return (byte)((Handle >> 16) & 0xFF);
-        }
-
         private const ulong TebGdiBatchOffsetOffset = 0x0FE8;
         private const ulong TebGdiBatchHdcOffset = 0x0FF0;
         private const ulong TebGdiBatchBufferOffset = 0x0FF8;
@@ -2779,79 +2769,53 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Win32kHelper.GetHwndFromDc(Emulator, Hdc);
         }
 
-        private (int X, int Y) GetWindowCanvasOffset(ulong Hwnd)
-        {
-            int OffsetX = 0, OffsetY = 0;
-            WinWindow Current = GetWindow(Hwnd);
-            int Guard = 0;
-            while (Current != null && Current.ParentHwnd != 0 && Guard++ < 64)
-            {
-                OffsetX += Current.X;
-                OffsetY += Current.Y;
-                Current = GetWindow(Current.ParentHwnd);
-            }
-
-            return (OffsetX, OffsetY);
-        }
-
         public void EnqueueTextRender(ulong Hwnd, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options)
         {
             if (DesktopDisplay is GuiThreadManager guiManager)
-            {
-                (int OffsetX, int OffsetY) = GetWindowCanvasOffset(Hwnd);
-                guiManager.EnqueueTextRender(Hwnd, text, x + OffsetX, y + OffsetY, rectLeft + OffsetX, rectTop + OffsetY, rectRight + OffsetX, rectBottom + OffsetY, options);
-            }
+                guiManager.EnqueueTextRender(Hwnd, text, x, y, rectLeft, rectTop, rectRight, rectBottom, options);
         }
 
         public void EnqueueGdiLine(ulong Hwnd, int X1, int Y1, int X2, int Y2, uint PenColor, int PenWidth)
         {
             if (DesktopDisplay is GuiThreadManager guiManager)
-            {
-                (int OffsetX, int OffsetY) = GetWindowCanvasOffset(Hwnd);
                 guiManager.EnqueueGdiPrimitive(new GdiPrimitive
                 {
                     Kind = GdiPrimitiveKind.Line,
-                    X1 = X1 + OffsetX,
-                    Y1 = Y1 + OffsetY,
-                    X2 = X2 + OffsetX,
-                    Y2 = Y2 + OffsetY,
+                    X1 = X1,
+                    Y1 = Y1,
+                    X2 = X2,
+                    Y2 = Y2,
                     Pen = new GdiPenDescriptor { ColorRef = PenColor, Width = PenWidth },
                     HasPen = true,
                 });
-            }
         }
 
         public void EnqueueGdiFillRect(ulong Hwnd, int Left, int Top, int Right, int Bottom, uint BrushColor, uint Rop)
         {
             if (DesktopDisplay is GuiThreadManager guiManager)
-            {
-                (int OffsetX, int OffsetY) = GetWindowCanvasOffset(Hwnd);
                 guiManager.EnqueueGdiPrimitive(new GdiPrimitive
                 {
                     Kind = GdiPrimitiveKind.FillRect,
-                    X1 = Left + OffsetX,
-                    Y1 = Top + OffsetY,
-                    X2 = Right + OffsetX,
-                    Y2 = Bottom + OffsetY,
+                    X1 = Left,
+                    Y1 = Top,
+                    X2 = Right,
+                    Y2 = Bottom,
                     Rop = Rop,
                     Brush = new GdiBrushDescriptor { ColorRef = BrushColor },
                     HasBrush = true,
                 });
-            }
         }
 
         public void EnqueueGdiShape(ulong Hwnd, GdiPrimitiveKind Kind, int Left, int Top, int Right, int Bottom, uint PenColor, int PenWidth, uint BrushColor, int RoundedWidth = 0, int RoundedHeight = 0)
         {
             if (DesktopDisplay is GuiThreadManager guiManager)
-            {
-                (int OffsetX, int OffsetY) = GetWindowCanvasOffset(Hwnd);
                 guiManager.EnqueueGdiPrimitive(new GdiPrimitive
                 {
                     Kind = Kind,
-                    X1 = Left + OffsetX,
-                    Y1 = Top + OffsetY,
-                    X2 = Right + OffsetX,
-                    Y2 = Bottom + OffsetY,
+                    X1 = Left,
+                    Y1 = Top,
+                    X2 = Right,
+                    Y2 = Bottom,
                     RoundedWidth = RoundedWidth,
                     RoundedHeight = RoundedHeight,
                     Pen = new GdiPenDescriptor { ColorRef = PenColor, Width = PenWidth },
@@ -2859,7 +2823,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                     HasPen = true,
                     HasBrush = true,
                 });
-            }
         }
 
         public void EnqueueGdiPoly(ulong Hwnd, GdiPrimitiveKind Kind, GdiPoint[] Points, uint PenColor, int PenWidth, uint BrushColor, bool HasBrush)
@@ -2968,71 +2931,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return 0;
 
             Emulator._emulator.WriteMemory(Address + 0x08, (ulong)UserHandleEntryCount, 8);
-            Emulator._emulator.WriteMemory(Address + UserServerInfoBaselineDpiOffset, (ushort)Win32kHelper.DEFAULT_SCREEN_DPI, 2);
-
-            for (ushort Index = 0; Index < PredefinedControlAtomCount; Index++)
-                Emulator._emulator.WriteMemory(Address + ServerInfoClassAtomsOffset + (ulong)(Index * 2), (ushort)(FirstPredefinedControlAtom + Index), 2);
-
-            int DpiDepSysMetCacheEntries = Win32kHelper.DpiDepSysMetCacheSlotsPerPlateau * Win32kHelper.DpiDepSysMetCachePlateauCount;
-            for (int Index = 0; Index < DpiDepSysMetCacheEntries; Index++)
-                Emulator._emulator.WriteMemory(Address + Win32kHelper.DpiDepSysMetCacheOffset + (ulong)(Index * 4), 0xFFFFFFFFu, 4);
-
-            ulong DpiServerInfoOffset = Win32kHelper.DpiServerInfoStride * (ulong)Win32kHelper.DpiServerInfoPlateauBase;
-
-            ulong DialogFontHandle = Win32kHelper.CreateFont(Emulator, new Win32kFont
-            {
-                Height = 16,
-                Width = 0,
-                Weight = 400,
-                CharSet = 0,
-                PitchAndFamily = 0x22, // DEFAULT_PITCH | FF_SWISS
-                FaceName = "MS Shell Dlg",
-            });
-
-            GetTextMetrics(out TextMetricsData DialogFontMetrics);
-            if (DialogFontMetrics.Height == 0)
-            {
-                DialogFontMetrics.Height = 16;
-                DialogFontMetrics.Ascent = 12;
-                DialogFontMetrics.Descent = 4;
-                DialogFontMetrics.AveCharWidth = 8;
-                DialogFontMetrics.MaxCharWidth = 16;
-                DialogFontMetrics.Weight = 400;
-                DialogFontMetrics.DigitizedAspectX = 96;
-                DialogFontMetrics.DigitizedAspectY = 96;
-                DialogFontMetrics.FirstChar = 0x20;
-                DialogFontMetrics.LastChar = 0xFF;
-                DialogFontMetrics.DefaultChar = 0x20;
-                DialogFontMetrics.BreakChar = 0x20;
-                DialogFontMetrics.PitchAndFamily = 0x01;
-            }
-
-            Emulator._emulator.WriteMemory(Address + DpiServerInfoOffset, (uint)DialogFontHandle, 4);
-            Emulator._emulator.WriteMemory(Address + DpiServerInfoOffset + Win32kHelper.DpiServerInfoFontHandleOffset, (uint)DialogFontHandle, 4);
-            Emulator._emulator.WriteMemory(Address + DpiServerInfoOffset + Win32kHelper.DpiServerInfoCxCharOffset, (uint)DialogFontMetrics.AveCharWidth, 4);
-            Emulator._emulator.WriteMemory(Address + DpiServerInfoOffset + Win32kHelper.DpiServerInfoCyCharOffset, (uint)DialogFontMetrics.Height, 4);
-
-            ulong TmBase = Address + DpiServerInfoOffset + Win32kHelper.DpiServerInfoTextMetricOffset;
-            Emulator._emulator.WriteMemory(TmBase + 0x00, (uint)DialogFontMetrics.Height, 4);
-            Emulator._emulator.WriteMemory(TmBase + 0x04, (uint)DialogFontMetrics.Ascent, 4);
-            Emulator._emulator.WriteMemory(TmBase + 0x08, (uint)DialogFontMetrics.Descent, 4);
-            Emulator._emulator.WriteMemory(TmBase + 0x0C, (uint)DialogFontMetrics.InternalLeading, 4);
-            Emulator._emulator.WriteMemory(TmBase + 0x10, (uint)DialogFontMetrics.ExternalLeading, 4);
-            Emulator._emulator.WriteMemory(TmBase + 0x14, (uint)DialogFontMetrics.AveCharWidth, 4);
-            Emulator._emulator.WriteMemory(TmBase + 0x18, (uint)DialogFontMetrics.MaxCharWidth, 4);
-            Emulator._emulator.WriteMemory(TmBase + 0x1C, (uint)DialogFontMetrics.Weight, 4);
-            Emulator._emulator.WriteMemory(TmBase + 0x20, (uint)DialogFontMetrics.Overhang, 4);
-            Emulator._emulator.WriteMemory(TmBase + 0x24, (uint)DialogFontMetrics.DigitizedAspectX, 4);
-            Emulator._emulator.WriteMemory(TmBase + 0x28, (uint)DialogFontMetrics.DigitizedAspectY, 4);
-            Emulator._emulator.WriteMemory(TmBase + 0x2C, DialogFontMetrics.FirstChar, 2);
-            Emulator._emulator.WriteMemory(TmBase + 0x2E, DialogFontMetrics.LastChar, 2);
-            Emulator._emulator.WriteMemory(TmBase + 0x30, DialogFontMetrics.DefaultChar, 2);
-            Emulator._emulator.WriteMemory(TmBase + 0x32, DialogFontMetrics.BreakChar, 2);
-            Emulator._emulator.WriteMemory(TmBase + 0x34, DialogFontMetrics.Italic, 1);
-            Emulator._emulator.WriteMemory(TmBase + 0x35, DialogFontMetrics.Underlined, 1);
-            Emulator._emulator.WriteMemory(TmBase + 0x36, DialogFontMetrics.StruckOut, 1);
-            Emulator._emulator.WriteMemory(TmBase + 0x37, DialogFontMetrics.PitchAndFamily, 1);
-            Emulator._emulator.WriteMemory(TmBase + 0x38, DialogFontMetrics.CharSet, 1);
 
             UserServerInfoAddress = Address;
             return UserServerInfoAddress;
@@ -3393,20 +3291,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x70, (uint)OuterRight, 4);
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x74, (uint)OuterBottom, 4);
 
-            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x2A, Window.WindowFNID, 2);
-
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x78, Window.WndProc, 8);
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x80, ClassObject, 8);
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0xB8, Window.ClientTextBytes, 4);
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0xC0, TextObject, 8);
-
-            int WindowExtraBytes = GetWindowClass(Window.ClassAtom)?.WindowExtraBytes ?? 0;
-            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0xC8, (uint)WindowExtraBytes, 4);
-
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0xE0, 0UL, 8);
-
-            ulong DpiContext = EnsureUserWindowDpiContext(Window);
-            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x128, DpiContext, 8);
         }
 
         private ulong EnsureUserClassObject(WinWindow Window)
@@ -3456,28 +3345,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Window.ClientTextBytes = (uint)TextBytes;
             return Window.ClientTextAddress;
-        }
-
-        private const int DpiContextQOffset = 0x40;
-        private const uint DpiContextBlockSize = 0x100;
-
-        private ulong EnsureUserWindowDpiContext(WinWindow Window)
-        {
-            if (Window.ClientDpiContextAddress != 0 && Emulator.IsRegionMapped(Window.ClientDpiContextAddress, DpiContextBlockSize))
-                return Window.ClientDpiContextAddress;
-
-            ulong Address = Emulator.MapUniqueAddress(DpiContextBlockSize, MemoryProtection.ReadWrite);
-            if (Address == 0)
-                return 0;
-
-            if (!WriteZeroMemory(Address, DpiContextBlockSize))
-                return 0;
-
-            // P+8 -> Q
-            Emulator._emulator.WriteMemory(Address + 0x08, Address + DpiContextQOffset, 8);
-
-            Window.ClientDpiContextAddress = Address;
-            return Window.ClientDpiContextAddress;
         }
 
         public void SetUserCaptureActive(bool Active)
@@ -3584,14 +3451,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (WinWindowClassAtomsByKey.TryGetValue(Key, out Atom) && WinWindowClassesByAtom.TryGetValue(Atom, out WindowClass))
                 return WindowClass;
 
-            foreach (var Predefined in PredefinedWindowClasses)
-            {
-                if (!string.Equals(Predefined.Name, Name, StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                return GetWindowClass(Predefined.Atom);
-            }
-
             foreach (WinWindowClass Candidate in WinWindowClassesByAtom.Values)
             {
                 if (!string.Equals(Candidate.Name, Name, StringComparison.OrdinalIgnoreCase))
@@ -3605,69 +3464,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             return null;
         }
 
-        private const int DLGWINDOWEXTRA = 30;
-
-        private static readonly (ushort Atom, string Name, int WindowExtra, string WndProcExport)[] PredefinedWindowClasses =
-        {
-            (0x0080, "Button", 0, "NtdllDefWindowProc_W"),
-            (0x0081, "Edit", 0, "NtdllDefWindowProc_W"),
-            (0x0082, "Static", 0, "NtdllDefWindowProc_W"),
-            (0x0083, "ListBox", 0, "NtdllDefWindowProc_W"),
-            (0x0084, "ScrollBar", 0, "NtdllDefWindowProc_W"),
-            (0x0085, "ComboBox", 0, "NtdllDefWindowProc_W"),
-            (0x8002, "#32770", DLGWINDOWEXTRA, "NtdllDialogWndProc_W"),
-        };
-
-        private readonly Dictionary<string, ulong> _ntdllExportCache = new(StringComparer.OrdinalIgnoreCase);
-
-        private ulong ResolveNtdllExport(string ExportName)
-        {
-            if (string.IsNullOrEmpty(ExportName))
-                return 0;
-
-            if (_ntdllExportCache.TryGetValue(ExportName, out ulong Cached) && Cached != 0)
-                return Cached;
-
-            WinModule Ntdll = WinModules.FirstOrDefault(m => m.Name != null && m.Name.Equals("ntdll.dll", StringComparison.OrdinalIgnoreCase));
-            if (Ntdll == null)
-                return 0;
-
-            ulong Address = GetExportAddress(Ntdll, ExportName);
-            if (Address != 0)
-                _ntdllExportCache[ExportName] = Address;
-
-            return Address;
-        }
-
         public WinWindowClass GetWindowClass(ushort Atom)
         {
-            if (WinWindowClassesByAtom.TryGetValue(Atom, out WinWindowClass WindowClass))
-                return WindowClass;
-
-            foreach (var Predefined in PredefinedWindowClasses)
-            {
-                if (Predefined.Atom != Atom)
-                    continue;
-
-                ulong WndProc = ResolveNtdllExport(Predefined.WndProcExport);
-
-                WinWindowClass Seeded = new WinWindowClass
-                {
-                    Atom = Atom,
-                    Name = Predefined.Name,
-                    Style = 0,
-                    WndProc = WndProc,
-                    WindowExtraBytes = Predefined.WindowExtra,
-                };
-
-                // Only cache once the wndproc resolved (user32 mapped). otherwise re-resolve next time.
-                if (WndProc != 0)
-                    WinWindowClassesByAtom[Atom] = Seeded;
-
-                return Seeded;
-            }
-
-            return null;
+            return WinWindowClassesByAtom.TryGetValue(Atom, out WinWindowClass WindowClass) ? WindowClass : null;
         }
 
         private static string BuildWindowClassKey(ulong InstanceHandle, string Name, string Version)
@@ -3743,10 +3542,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// <summary>
         /// Presents the current foreground Win32k window through the host window manager.
         /// </summary>
-        private const uint WS_THICKFRAME = 0x00040000;
-        private const uint WS_MINIMIZEBOX = 0x00020000;
-        private const uint WS_MAXIMIZEBOX = 0x00010000;
-
         public void PresentDesktop()
         {
             try
@@ -3764,7 +3559,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 int height;
                 bool visible;
                 WindowState state;
-                bool resizable;
 
                 if (Window != null)
                 {
@@ -3773,7 +3567,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                     height = Math.Max((int)Window.Height, 1);
                     visible = Window.Visible && !Window.Destroyed;
                     state = Window.Minimized ? WindowState.Minimized : Window.Maximized ? WindowState.Maximized : WindowState.Normal;
-                    resizable = (Window.Style & (WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX)) != 0;
                 }
                 else
                 {
@@ -3782,48 +3575,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                     height = 0;
                     visible = false;
                     state = WindowState.Normal;
-                    resizable = true;
                 }
 
-                guiManager.EnqueuePresent(title, width, height, visible, state, resizable);
-            }
-            catch
-            {
-            }
-        }
-
-        public void ReflectSystemMenuRemoval(WinWindow Window, uint Command)
-        {
-            try
-            {
-                EnsureDesktopWindow();
-                if (DesktopDisplay is not GuiThreadManager guiManager)
-                    return;
-
-                WinWindow Presented = GetWindow(GetForegroundWindow()) ?? GetTopLevelWindow();
-                if (Presented != Window)
-                    return;
-
-                guiManager.EnqueueRemoveSystemMenuItem(Command);
-            }
-            catch
-            {
-            }
-        }
-
-        public void ReflectSystemMenuReset(WinWindow Window)
-        {
-            try
-            {
-                EnsureDesktopWindow();
-                if (DesktopDisplay is not GuiThreadManager guiManager)
-                    return;
-
-                WinWindow Presented = GetWindow(GetForegroundWindow()) ?? GetTopLevelWindow();
-                if (Presented != Window)
-                    return;
-
-                guiManager.EnqueueResetSystemMenu();
+                guiManager.EnqueuePresent(title, width, height, visible, state);
             }
             catch
             {
@@ -3867,6 +3621,18 @@ namespace Brovan.Core.Emulation.OS.Windows
             });
         }
 
+        /// <summary>
+        /// Ensures the single host desktop window exists and returns its native handle (an HWND on
+        /// Windows), or IntPtr.Zero if no host window backend is available. BrovVulk binds a Vulkan
+        /// surface to THIS real on-screen window rather than any guest-side HWND, so DXVK's swapchain
+        /// presents to the actual Brovan window.
+        /// </summary>
+        public IntPtr EnsureHostWindowHandle()
+        {
+            EnsureDesktopWindow();
+            return DesktopWindow?.NativeHandle ?? IntPtr.Zero;
+        }
+
         private WinWindow GetTopLevelWindow()
         {
             for (int i = TopLevelWindows.Count - 1; i >= 0; i--)
@@ -3888,31 +3654,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return Window;
 
             return null;
-        }
-
-        public WinMenu GetMenu(ulong MenuHandle)
-        {
-            if (MenuHandle == 0)
-                return null;
-
-            WinMenus.TryGetValue(MenuHandle, out WinMenu Menu);
-            return Menu;
-        }
-
-        public ulong RegisterMenu(WinMenu Menu)
-        {
-            ulong Handle = AllocateUserHandle();
-            if (Handle == 0)
-                return 0;
-
-            Menu.Handle = Handle;
-            WinMenus[Handle] = Menu;
-            return Handle;
-        }
-
-        public void DestroyMenu(ulong MenuHandle)
-        {
-            WinMenus.Remove(MenuHandle);
         }
 
         public void RegisterWindow(WinWindow Window)
@@ -3946,9 +3687,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             Window.Dirty = true;
             MaterializeUserWindow(Window);
             PresentDesktop();
-
-            if (Window.Visible)
-                Win32kHelper.PostMessage(Emulator, Window.Hwnd, Win32kHelper.WM_PAINT, 0, 0);
         }
 
         public bool DestroyWindow(ulong Hwnd)
@@ -5373,9 +5111,44 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public void CloseHandle(ulong Handle)
         {
+            if (HandleManager.HandleExists(Handle, HandleType.FileHandle))
+            {
+                WinFile Closing = HandleManager.GetObjectByHandle<WinFile>(Handle);
+                if (Closing != null && Closing.DeletePending && !Closing.Device && !string.IsNullOrEmpty(Closing.Path))
+                    ApplyDeleteOnClose(Closing);
+            }
+
             if (HandleManager.RemoveHandle(Handle))
             {
                 RemoveWinHandle(Handle);
+            }
+        }
+
+        private void ApplyDeleteOnClose(WinFile Target)
+        {
+            try
+            {
+                Target.FileStream = null;
+                string VirtualPath = GeneralHelper.IO.ResolveVirtualHostPath(Target.Path, BinaryFormat.PE);
+                if (string.IsNullOrEmpty(VirtualPath))
+                    return;
+
+                if (Target.Directory)
+                {
+                    if (Directory.Exists(VirtualPath))
+                        Directory.Delete(VirtualPath, true);
+                }
+                else if (File.Exists(VirtualPath))
+                {
+                    File.Delete(VirtualPath);
+                }
+
+                WindowsFileStream.InvalidateGuestPathCache();
+                Emulator.TriggerEventMessage($"[+] delete-on-close removed \"{Target.Path}\".", LogFlags.Syscall);
+            }
+            catch (Exception Ex)
+            {
+                Emulator.TriggerEventMessage($"[!] delete-on-close failed for \"{Target.Path}\": {Ex.Message}", LogFlags.Syscall);
             }
         }
     }

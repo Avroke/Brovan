@@ -116,7 +116,7 @@ namespace Brovan.Core.Emulation.OS
                         if (!GetDesc(Ft).IsBlittable) return false;
                         continue;
                     }
-                    return false; // string, byte[], array, pointer -> not blittable
+                    return false;
                 }
                 return true;
             }
