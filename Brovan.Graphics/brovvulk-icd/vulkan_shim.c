@@ -28,14 +28,37 @@ static HANDLE brov_dev(void)
     return g_dev;
 }
 
+static const VkExtensionProperties g_InstanceExtensions[] =
+{
+    { "VK_KHR_surface",        25 },
+    { "VK_KHR_win32_surface",   6 },
+};
+
 VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceExtensionProperties(
     const char *pLayerName, uint32_t *pPropertyCount, VkExtensionProperties *pProperties)
 {
-    (void)pLayerName;
-    (void)pProperties;
+    if (pLayerName != NULL)
+    {
+        if (pPropertyCount)
+            *pPropertyCount = 0;
+        return VK_SUCCESS;
+    }
+
+    uint32_t total = (uint32_t)(sizeof(g_InstanceExtensions) / sizeof(g_InstanceExtensions[0]));
+    if (pProperties == NULL)
+    {
+        if (pPropertyCount)
+            *pPropertyCount = total;
+        return VK_SUCCESS;
+    }
+
+    uint32_t avail = pPropertyCount ? *pPropertyCount : 0;
+    uint32_t copy = avail < total ? avail : total;
+    if (copy > 0)
+        memcpy(pProperties, g_InstanceExtensions, copy * sizeof(VkExtensionProperties));
     if (pPropertyCount)
-        *pPropertyCount = 0;
-    return VK_SUCCESS;
+        *pPropertyCount = copy;
+    return copy < total ? VK_INCOMPLETE : VK_SUCCESS;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceLayerProperties(
@@ -45,6 +68,40 @@ VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceLayerProperties(
     if (pPropertyCount)
         *pPropertyCount = 0;
     return VK_SUCCESS;
+}
+
+static const VkExtensionProperties g_DeviceExtensions[] =
+{
+    { "VK_KHR_swapchain", 70 },
+};
+
+VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateDeviceExtensionProperties(
+    VkPhysicalDevice physicalDevice, const char *pLayerName,
+    uint32_t *pPropertyCount, VkExtensionProperties *pProperties)
+{
+    (void)physicalDevice;
+    if (pLayerName != NULL)
+    {
+        if (pPropertyCount)
+            *pPropertyCount = 0;
+        return VK_SUCCESS;
+    }
+
+    uint32_t total = (uint32_t)(sizeof(g_DeviceExtensions) / sizeof(g_DeviceExtensions[0]));
+    if (pProperties == NULL)
+    {
+        if (pPropertyCount)
+            *pPropertyCount = total;
+        return VK_SUCCESS;
+    }
+
+    uint32_t avail = pPropertyCount ? *pPropertyCount : 0;
+    uint32_t copy = avail < total ? avail : total;
+    if (copy > 0)
+        memcpy(pProperties, g_DeviceExtensions, copy * sizeof(VkExtensionProperties));
+    if (pPropertyCount)
+        *pPropertyCount = copy;
+    return copy < total ? VK_INCOMPLETE : VK_SUCCESS;
 }
 
 #define BVK_HDR 8u
@@ -283,6 +340,7 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instan
     M(vkGetDeviceProcAddr);
     M(vkEnumerateInstanceExtensionProperties);
     M(vkEnumerateInstanceLayerProperties);
+    M(vkEnumerateDeviceExtensionProperties);
 #include "obj/generated/brovvulk_gen_procs.inc"
 #undef M
 

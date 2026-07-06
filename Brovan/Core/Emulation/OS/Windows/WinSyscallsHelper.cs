@@ -3633,6 +3633,30 @@ namespace Brovan.Core.Emulation.OS.Windows
             return DesktopWindow?.NativeHandle ?? IntPtr.Zero;
         }
 
+        public void EnsureHostXlibSurfaceHandles(out IntPtr connection, out IntPtr window)
+        {
+            if (!GeneralHelper.IsLinux)
+            {
+                connection = IntPtr.Zero;
+                window = IntPtr.Zero;
+                return;
+            }
+
+            EnsureDesktopDisplay();
+            EnsureDesktopWindow();
+            if (DesktopDisplay == null || DesktopWindow == null)
+            {
+                connection = IntPtr.Zero;
+                window = IntPtr.Zero;
+                return;
+            }
+
+            IntPtr xDisplay = DesktopDisplay.NativeHandle;
+            connection = BrovVulkLinuxWsi.XGetXCBConnection(xDisplay);
+            window = DesktopWindow.NativeHandle;
+        }
+
+
         private WinWindow GetTopLevelWindow()
         {
             for (int i = TopLevelWindows.Count - 1; i >= 0; i--)

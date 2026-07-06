@@ -558,18 +558,72 @@ namespace Brovan.Generators
 
         private static string EmitHostCase(Model m, Command c, int id)
         {
+            if (c.Name == "vkCreateInstance")
+                return "            case " + id + ":\n            {\n" +
+                    "                uint hasCi = r.ReadU32();\n" +
+                    "                System.IntPtr ci = System.IntPtr.Zero;\n" +
+                    "                if (hasCi != 0) ci = BrovVulkGenStruct.Rebuild(19, r, st);\n" +
+                    "                uint hasAc = r.ReadU32();\n" +
+                    "                if (hasAc != 0) { System.IntPtr ac = BrovVulkGenStruct.Rebuild(0, r, st); *(System.IntPtr*)(ci + 24) = ac; }\n" +
+                    "                if (Brovan.GeneralHelper.IsLinux && ci != System.IntPtr.Zero)\n" +
+                    "                {\n" +
+                    "                    uint extCount = *(uint*)(ci + 48);\n" +
+"                    if (extCount > 1024) extCount = 1024;\n" +
+                    "                    System.IntPtr extPtr = *(System.IntPtr*)(ci + 56);\n" +
+                    "                    if (extCount != 0 && extPtr != System.IntPtr.Zero)\n" +
+                    "                    {\n" +
+                    "                        System.IntPtr newArr = st.Alloc(BrovVulkGenStruct.CheckedBytes(extCount, 8));\n" +
+                    "                        uint newCount = 0;\n" +
+                    "                        bool sawWin32 = false;\n" +
+                    "                        for (uint k = 0; k < extCount; k++)\n" +
+                    "                        {\n" +
+                    "                            System.IntPtr p = System.Runtime.InteropServices.Marshal.ReadIntPtr(extPtr, (int)(k * 8));\n" +
+                    "                            string name = p == System.IntPtr.Zero ? null : System.Runtime.InteropServices.Marshal.PtrToStringAnsi(p);\n" +
+                    "                            if (name == \"VK_KHR_win32_surface\") { sawWin32 = true; continue; }\n" +
+                    "                            System.Runtime.InteropServices.Marshal.WriteIntPtr(newArr, (int)(newCount * 8), p);\n" +
+                    "                            newCount++;\n" +
+                    "                        }\n" +
+                    "                        if (sawWin32)\n" +
+                    "                        {\n" +
+                    "                            System.IntPtr xcbName = System.Runtime.InteropServices.Marshal.StringToHGlobalAnsi(\"VK_KHR_xcb_surface\");\n" +
+                    "                            System.Runtime.InteropServices.Marshal.WriteIntPtr(newArr, (int)(newCount * 8), xcbName);\n" +
+                    "                            newCount++;\n" +
+                    "                            *(uint*)(ci + 48) = newCount;\n" +
+                    "                            *(System.IntPtr*)(ci + 56) = newArr;\n" +
+                    "                        }\n" +
+                    "                    }\n" +
+                    "                }\n" +
+                    "                System.IntPtr vki = System.IntPtr.Zero;\n" +
+                    "                int rr = (int)BrovVulkApi.vkCreateInstance(ci, System.IntPtr.Zero, (System.IntPtr)(&vki));\n" +
+                    "                w.WriteU32(st.Register(vki, \"VkInstance\"));\n" +
+                    "                return rr;\n            }\n";
             if (c.Name == "vkCreateWin32SurfaceKHR")
                 return "            case " + id + ":\n            {\n" +
                     "                System.IntPtr vi = st.Lookup(r.ReadU32(), \"VkInstance\");\n" +
-                    "                System.IntPtr hwnd = inst.WinHelper.EnsureHostWindowHandle();\n" +
-                    "                System.IntPtr hinst = BrovVulkGenNative.GetModuleHandleW(System.IntPtr.Zero);\n" +
-                    "                byte* ci = stackalloc byte[40];\n" +
-                    "                for (int z = 0; z < 40; z++) ci[z] = 0;\n" +
-                    "                *(int*)(ci + 0) = 1000009000;\n" +
-                    "                *(void**)(ci + 24) = (void*)hinst;\n" +
-                    "                *(void**)(ci + 32) = (void*)hwnd;\n" +
                     "                System.IntPtr surf = System.IntPtr.Zero;\n" +
-                    "                int rr = (int)BrovVulkApi.vkCreateWin32SurfaceKHR(vi, (System.IntPtr)ci, System.IntPtr.Zero, (System.IntPtr)(&surf));\n" +
+                    "                int rr;\n" +
+                    "                if (Brovan.GeneralHelper.IsLinux)\n" +
+                    "                {\n" +
+                    "                    System.IntPtr xdpy; System.IntPtr xwin;\n" +
+                    "                    inst.WinHelper.EnsureHostXlibSurfaceHandles(out xdpy, out xwin);\n" +
+                    "                    byte* ci = stackalloc byte[40];\n" +
+                    "                    for (int z = 0; z < 40; z++) ci[z] = 0;\n" +
+                    "                    *(int*)(ci + 0) = 1000005000;\n" +
+                    "                    *(void**)(ci + 24) = (void*)xdpy;\n" +
+                    "                    *(uint*)(ci + 32) = (uint)xwin;\n" +
+                    "                    rr = (int)BrovVulkLinuxWsi.vkCreateXcbSurfaceKHR(vi, (System.IntPtr)ci, System.IntPtr.Zero, (System.IntPtr)(&surf));\n" +
+                    "                }\n" +
+                    "                else\n" +
+                    "                {\n" +
+                    "                    System.IntPtr hwnd = inst.WinHelper.EnsureHostWindowHandle();\n" +
+                    "                    System.IntPtr hinst = BrovVulkGenNative.GetModuleHandleW(System.IntPtr.Zero);\n" +
+                    "                    byte* ci = stackalloc byte[40];\n" +
+                    "                    for (int z = 0; z < 40; z++) ci[z] = 0;\n" +
+                    "                    *(int*)(ci + 0) = 1000009000;\n" +
+                    "                    *(void**)(ci + 24) = (void*)hinst;\n" +
+                    "                    *(void**)(ci + 32) = (void*)hwnd;\n" +
+                    "                    rr = (int)BrovVulkApi.vkCreateWin32SurfaceKHR(vi, (System.IntPtr)ci, System.IntPtr.Zero, (System.IntPtr)(&surf));\n" +
+                    "                }\n" +
                     "                w.WriteU32(st.Register(surf, \"VkSurfaceKHR\"));\n" +
                     "                return rr;\n            }\n";
 
@@ -1112,6 +1166,7 @@ namespace Brovan.Generators
             defB.Append("LIBRARY vulkan-1\nEXPORTS\n");
             defB.Append("vkGetInstanceProcAddr\nvkGetDeviceProcAddr\n");
             defB.Append("vkEnumerateInstanceExtensionProperties\nvkEnumerateInstanceLayerProperties\n");
+            defB.Append("vkEnumerateDeviceExtensionProperties\n");
             pb.Append("#ifndef BROVVULK_GEN_PROTOS_H\n#define BROVVULK_GEN_PROTOS_H\n");
             for (int i = 0; i < cmds.Count; i++)
             {
@@ -1129,7 +1184,8 @@ namespace Brovan.Generators
                     pb.Append("VKAPI_ATTR ").Append(c.Ret).Append(" VKAPI_CALL ").Append(c.Name).Append("(").Append(GuestSig(c)).Append(");\n");
                 procB.Append("M(").Append(c.Name).Append(");\n");
                 if (c.Name != "vkGetInstanceProcAddr" && c.Name != "vkGetDeviceProcAddr"
-                    && c.Name != "vkEnumerateInstanceExtensionProperties" && c.Name != "vkEnumerateInstanceLayerProperties")
+                    && c.Name != "vkEnumerateInstanceExtensionProperties" && c.Name != "vkEnumerateInstanceLayerProperties"
+                    && c.Name != "vkEnumerateDeviceExtensionProperties")
                     defB.Append(c.Name).Append("\n");
             }
             pb.Append("#endif\n");

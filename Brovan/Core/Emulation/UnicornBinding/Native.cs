@@ -159,6 +159,18 @@ namespace Brovan.Core.Emulation
                     return handle;
             }
 
+            if (string.Equals(LibName, "libX11-xcb.so.1", StringComparison.OrdinalIgnoreCase))
+            {
+                if (GeneralHelper.IsLinux)
+                {
+                    if (NativeLibrary.TryLoad("libX11-xcb.so.1", out IntPtr xcbHandle))
+                        return xcbHandle;
+                    if (NativeLibrary.TryLoad("libX11-xcb.so", out xcbHandle))
+                        return xcbHandle;
+                }
+                return IntPtr.Zero;
+            }
+
             return IntPtr.Zero;
         }
     }
