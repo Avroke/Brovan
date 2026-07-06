@@ -26,6 +26,10 @@
     </ItemGroup>
 
     <ItemGroup>
+        <AdditionalFiles Include="..\Brovan.Generators\vk.xml" />
+    </ItemGroup>
+
+    <ItemGroup>
         <ProjectReference Include="../Brovan.Generators/Brovan.Generators.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
     </ItemGroup>
 

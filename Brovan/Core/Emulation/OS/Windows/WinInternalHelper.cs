@@ -347,7 +347,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             WriteKsystemTimeToMemory(OffsetSystemTime, SystemTime);
             WriteKsystemTimeToMemory(OffsetInterruptTime, InterruptTime);
 
-            ulong TickCountQuad = Elapsed100Ns / HundredNsPerDefaultTick;
+            ulong TickCountQuad = InterruptTime / HundredNsPerDefaultTick;
             WriteKsystemTimeToMemory(OffsetTickCountQuad, TickCountQuad);
 
             uint TickCountLow = (uint)TickCountQuad;

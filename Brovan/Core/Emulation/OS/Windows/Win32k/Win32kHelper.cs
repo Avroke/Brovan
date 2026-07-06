@@ -3,7 +3,6 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using Brovan.Core.Emulation.OS.SharedHelpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
-using Brovan;
 
 namespace Brovan.Core.Emulation.OS.Windows.Win32k
 {
@@ -36,136 +35,15 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         public int PenWidth;
     }
 
-    internal struct Win32kFont
-    {
-        public int Height;
-        public int Width;
-        public int Weight;
-        public byte Italic;
-        public byte Underline;
-        public byte StrikeOut;
-        public byte CharSet;
-        public byte PitchAndFamily;
-        public string FaceName;
-    }
-
     internal static class Win32kHelper
     {
         internal const uint ERROR_INVALID_PARAMETER = 87;
         internal const uint ERROR_CALL_NOT_IMPLEMENTED = 120;
         internal const uint ERROR_INVALID_WINDOW_HANDLE = 1400;
-        internal const uint ERROR_INVALID_MENU_HANDLE = 1401;
-        internal const uint ERROR_MENU_ITEM_NOT_FOUND = 1456;
         internal const uint DEFAULT_SCREEN_DPI = 96;
-        internal const ulong DpiServerInfoStride = 104;
-        internal const int DpiServerInfoPlateauBase = 49;
-        internal const ulong DpiServerInfoFontHandleOffset = 4;
-        internal const ulong DpiServerInfoCxCharOffset = 32;
-        internal const ulong DpiServerInfoCyCharOffset = 36;
-        internal const ulong DpiServerInfoTextMetricOffset = 40;
-        internal const ulong DpiDepSysMetCacheOffset = 2284;
-        internal const int DpiDepSysMetCacheSlotsPerPlateau = 30;
-        internal const int DpiDepSysMetCachePlateauCount = 18;
-
-        internal static readonly int[] DpiDepSysMetCacheSlotToSmIndex =
-        {
-             2, 
-             3, 
-             4, 
-             9, 
-             10,
-             11,
-             12,
-             13,
-             14,
-             15,
-             20,
-             21,
-             30,
-             31,
-             32,
-             33,
-             28,
-             29,
-             38,
-             39,
-             49,
-             50,
-             51,
-             52,
-             53,
-             54,
-             55,
-             71,
-             72,
-             92,
-        };
-
-        internal static int GetDpiCacheIndex(uint Dpi)
-        {
-            if (Dpi == DEFAULT_SCREEN_DPI)
-                return 0;
-
-            if (Dpi >= 96 && Dpi % 24 == 0)
-            {
-                int Index = (int)((Dpi - 72) / 24);
-                return Index < DpiDepSysMetCachePlateauCount ? Index : -1;
-            }
-
-            return -1;
-        }
-
-        internal static int ComputeDpiDependentMetric(int SmIndex, uint Dpi)
-        {
-            if (OperatingSystem.IsWindows())
-            {
-                int Value = NativeWinImports.GetSystemMetricsForDpi(SmIndex, Dpi);
-                if (Value != 0)
-                    return Value;
-            }
-
-            double Base96 = SmIndex switch
-            {
-                2 => 17,
-                3 => 17,
-                4 => 19,
-                9 => 17,
-                10 => 17,
-                11 => 32,
-                12 => 32,
-                13 => 32,
-                14 => 32,
-                15 => 19,
-                20 => 17,
-                21 => 17,
-                28 => 136,
-                29 => 39,
-                30 => 21,
-                31 => 21,
-                32 => 8,
-                33 => 8,
-                38 => 75,
-                39 => 75,
-                49 => 16,
-                50 => 16,
-                51 => 19,
-                52 => 18,
-                53 => 18,
-                54 => 18,
-                55 => 18,
-                71 => 16,
-                72 => 16,
-                92 => 4,
-                _ => 16,
-            };
-
-            return (int)Math.Round(Base96 * (Dpi / 96.0));
-        }
 
         internal const byte PenHandleType = 0x30;
         internal const byte BrushHandleType = 0x10;
-        internal const byte FontHandleType = 0x09;
-        internal const byte ColorSpaceHandleType = 0x0A;
 
         internal const uint WM_NULL = 0x0000;
         internal const uint WM_DESTROY = 0x0002;
@@ -214,7 +92,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private const int MSG64_SIZE = 48;
         private const int PAINTSTRUCT64_SIZE = 72;
         private const int MaxWindowTextBytes = 0x1000;
-        private const ulong DefaultSystemCursor = 0x00010000;
 
         private static readonly ConditionalWeakTable<BinaryEmulator, Win32kState> States = new();
 
@@ -223,11 +100,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             public readonly Queue<Win32kMessage> MessageQueue = new();
             public readonly Dictionary<ulong, Win32kDeviceContext> DeviceContexts = new();
             public readonly Dictionary<ulong, Win32kPenBrush> PenBrushObjects = new();
-            public readonly Dictionary<ulong, Win32kFont> Fonts = new();
-            public readonly HashSet<ulong> ColorSpaces = new();
             public ulong NextDeviceContext = FirstDeviceContextHandle;
             public ulong CaptureWindow;
-            public ulong CurrentCursor = DefaultSystemCursor;
         }
 
         private sealed class Win32kDeviceContext
@@ -236,9 +110,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             public ulong Hwnd;
             public bool WindowDc;
             public bool PaintDc;
-            public ulong ColorSpace;
-            // Matches Win32's ICM_OFF, real SetICMMode return value doubles as "previous mode".
-            public int IcmMode = 1;
         }
 
         private static Win32kState GetState(BinaryEmulator Instance)
@@ -352,68 +223,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal static bool RemovePenBrush(BinaryEmulator Instance, ulong Handle)
         {
             return GetState(Instance).PenBrushObjects.Remove(Handle);
-        }
-
-        internal static ulong CreateFont(BinaryEmulator Instance, Win32kFont Font)
-        {
-            ulong Handle = Instance.WinHelper.AllocateGdiHandle(FontHandleType);
-            if (Handle == 0)
-                return 0;
-
-            GetState(Instance).Fonts[Handle] = Font;
-            return Handle;
-        }
-
-        internal static bool TryGetFont(BinaryEmulator Instance, ulong Handle, out Win32kFont Font)
-        {
-            return GetState(Instance).Fonts.TryGetValue(Handle, out Font);
-        }
-
-        internal static ulong SetCursor(BinaryEmulator Instance, ulong Cursor)
-        {
-            Win32kState State = GetState(Instance);
-            ulong Previous = State.CurrentCursor;
-            State.CurrentCursor = Cursor;
-            return Previous;
-        }
-
-        internal static ulong CreateColorSpace(BinaryEmulator Instance)
-        {
-            ulong Handle = Instance.WinHelper.AllocateGdiHandle(ColorSpaceHandleType);
-            if (Handle == 0)
-                return 0;
-
-            GetState(Instance).ColorSpaces.Add(Handle);
-            return Handle;
-        }
-
-        internal static bool DeleteColorSpace(BinaryEmulator Instance, ulong Handle)
-        {
-            return GetState(Instance).ColorSpaces.Remove(Handle);
-        }
-
-        internal static ulong SetDcColorSpace(BinaryEmulator Instance, ulong Hdc, ulong ColorSpace)
-        {
-            Win32kState State = GetState(Instance);
-            if (!State.DeviceContexts.TryGetValue(Hdc, out Win32kDeviceContext Dc))
-                return 0;
-
-            ulong Previous = Dc.ColorSpace;
-            Dc.ColorSpace = ColorSpace;
-            return Previous;
-        }
-
-        internal static int SetDcIcmMode(BinaryEmulator Instance, ulong Hdc, int Mode)
-        {
-            Win32kState State = GetState(Instance);
-            if (!State.DeviceContexts.TryGetValue(Hdc, out Win32kDeviceContext Dc))
-                return 0;
-
-            const int ICM_QUERY = 3;
-            int Previous = Dc.IcmMode;
-            if (Mode != ICM_QUERY)
-                Dc.IcmMode = Mode;
-            return Previous;
         }
 
         internal static bool PostMessage(BinaryEmulator Instance, ulong Hwnd, uint Message, ulong WParam, ulong LParam)
@@ -630,24 +439,19 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
         }
 
-        private static void InvalidateWindowRecursive(BinaryEmulator Instance, WinWindow Window)
-        {
-            if (Window == null)
-                return;
-
-            Window.Dirty = true;
-            PostMessage(Instance, Window.Hwnd, WM_PAINT, 0, 0);
-
-            foreach (ulong ChildHwnd in Window.Children)
-                InvalidateWindowRecursive(Instance, Instance.WinHelper.GetWindow(ChildHwnd));
-        }
-
         internal static bool InvalidateWindow(BinaryEmulator Instance, ulong Hwnd)
         {
             if (Hwnd == 0)
             {
                 foreach (ulong TopLevelHwnd in Instance.WinHelper.TopLevelWindows)
-                    InvalidateWindowRecursive(Instance, Instance.WinHelper.GetWindow(TopLevelHwnd));
+                {
+                    WinWindow TopLevel = Instance.WinHelper.GetWindow(TopLevelHwnd);
+                    if (TopLevel != null)
+                    {
+                        TopLevel.Dirty = true;
+                        PostMessage(Instance, TopLevel.Hwnd, WM_PAINT, 0, 0);
+                    }
+                }
 
                 Instance.WinHelper.PresentDesktop();
                 return true;
@@ -657,7 +461,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Window == null)
                 return false;
 
-            InvalidateWindowRecursive(Instance, Window);
+            Window.Dirty = true;
+            PostMessage(Instance, Hwnd, WM_PAINT, 0, 0);
             Instance.WinHelper.PresentDesktop();
             return true;
         }
@@ -740,7 +545,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return Instance._emulator.ReadMemoryString(Address, MaxWindowTextBytes, Encoding)?.TrimEnd('\0');
         }
 
-        internal static ulong WriteWindowText(BinaryEmulator Instance, string Text, ulong BufferAddress, ulong CapacityCharacters, bool Ansi)
+        private static ulong WriteWindowText(BinaryEmulator Instance, string Text, ulong BufferAddress, ulong CapacityCharacters, bool Ansi)
         {
             if (BufferAddress == 0 || CapacityCharacters == 0)
                 return 0;

@@ -181,7 +181,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
         WindowState State { get; set; }
 
-        bool Resizable { get; set; }
+        bool Resizable { get; }
 
         bool Decorated { get; set; }
 
@@ -194,10 +194,6 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         void Hide();
 
         void Close();
-
-        void RemoveSystemMenuItem(uint command);
-
-        void ResetSystemMenu();
     }
 
     public static class WindowManagerFactory

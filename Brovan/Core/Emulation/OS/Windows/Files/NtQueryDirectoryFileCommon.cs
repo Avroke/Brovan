@@ -48,11 +48,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             bool ReturnSingleEntry = (QueryFlags & SL_RETURN_SINGLE_ENTRY) != 0;
             bool NoCursorUpdate = (QueryFlags & SL_NO_CURSOR_UPDATE) != 0;
 
-            if (DirectoryHandle.DirectoryEntries == null || RestartScan || !string.Equals(DirectoryHandle.DirectoryMask ?? string.Empty, Mask, StringComparison.OrdinalIgnoreCase))
+            bool MaskProvided = !string.IsNullOrEmpty(Mask);
+            bool MaskChanged = MaskProvided && !string.Equals(DirectoryHandle.DirectoryMask ?? string.Empty, Mask, StringComparison.OrdinalIgnoreCase);
+
+            if (DirectoryHandle.DirectoryEntries == null || RestartScan || MaskChanged)
             {
-                DirectoryHandle.DirectoryEntries = ScanDirectory(HostPath, Mask);
+                string EffectiveMask = MaskProvided ? Mask : (DirectoryHandle.DirectoryMask ?? string.Empty);
+                DirectoryHandle.DirectoryEntries = ScanDirectory(HostPath, EffectiveMask);
                 DirectoryHandle.DirectoryIndex = 0;
-                DirectoryHandle.DirectoryMask = Mask;
+                DirectoryHandle.DirectoryMask = EffectiveMask;
                 Instance.TriggerEventMessage($"[+] NtQueryDirectoryFile: Enumerating directory \"{DirectoryHandle.Path}\".", LogFlags.Syscall);
             }
 
@@ -72,10 +76,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 ulong NewOffset = AlignUp(CurrentOffset, 8);
                 WinDirectoryEntry Entry = DirectoryHandle.DirectoryEntries[CurrentIndex];
                 string EntryName = Entry.Name ?? string.Empty;
-                int FileNameByteLength = Encoding.Unicode.GetByteCount(EntryName);
-                Span<byte> FileNameBytes = Instance.WinHelper.Shared.GetSpan((uint)FileNameByteLength);
-                if (FileNameByteLength != 0)
-                    Encoding.Unicode.GetBytes(EntryName.AsSpan(), FileNameBytes);
+                byte[] FileNameBytes = EntryName.Length == 0 ? Array.Empty<byte>() : Encoding.Unicode.GetBytes(EntryName);
 
                 ulong HeaderSize = GetHeaderSize(FileInformationClass);
                 ulong EntrySize = HeaderSize + (ulong)FileNameBytes.Length;
@@ -203,6 +204,31 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static List<WinDirectoryEntry> ScanDirectory(string HostPath, string Mask)
         {
             List<WinDirectoryEntry> Entries = new List<WinDirectoryEntry>();
+
+            try
+            {
+                DirectoryInfo Self = new DirectoryInfo(HostPath);
+                long SelfCreation = Self.CreationTimeUtc.ToFileTimeUtc();
+                long SelfAccess = Self.LastAccessTimeUtc.ToFileTimeUtc();
+                long SelfWrite = Self.LastWriteTimeUtc.ToFileTimeUtc();
+                uint DirAttr = (uint)(FileAttributes.Directory);
+                foreach (string Dot in new[] { ".", ".." })
+                {
+                    if (!MatchesMask(Dot, Mask))
+                        continue;
+                    Entries.Add(new WinDirectoryEntry
+                    {
+                        Name = Dot,
+                        FileAttributes = DirAttr,
+                        CreationTime = SelfCreation,
+                        LastAccessTime = SelfAccess,
+                        LastWriteTime = SelfWrite,
+                        ChangeTime = SelfWrite
+                    });
+                }
+            }
+            catch { }
+
             IEnumerable<string> FileSystemEntries;
 
             try

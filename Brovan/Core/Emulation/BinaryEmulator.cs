@@ -617,6 +617,7 @@ namespace Brovan.Core.Emulation
         {
             if ((Settings.Flags & FlagType) == 0 || MessageFactory == null)
                 return;
+
             try { OnMessage?.Invoke(MessageFactory(), FlagType); }
             catch (Exception ex) { OnMessage?.Invoke($"[event] msg factory failed: {ex.GetType().Name}: {ex.Message}", FlagType); }
         }
