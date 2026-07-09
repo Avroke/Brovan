@@ -143,7 +143,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance._emulator.WriteMemory(BaseAddressPtr, Base, 8);
                 Instance._emulator.WriteMemory(ViewSizePtr, Size, 8);
 
-                Instance.TriggerEventMessage($"[+] NtMapViewOfSection: SharedSection Base=0x{Base:X}, Size=0x{Size:X}", LogFlags.Syscall);
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[+] NtMapViewOfSection: SharedSection Base=0x{Base:X}, Size=0x{Size:X}", LogFlags.Syscall);
 
                 return NTSTATUS.STATUS_SUCCESS;
             }
@@ -219,7 +220,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                     NTSTATUS Status = NTSTATUS.STATUS_SUCCESS;
 
-                    Instance.TriggerEventMessage(
+                    if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                        Instance.TriggerEventMessage(
                         $"[+] NtMapViewOfSection: Section=0x{SectionHandle:X}, Base=0x{ReturnedBase:X}, Size=0x{ReturnedSize:X}, Image=1, ImageSectionId=0x{Module.ImageSectionId:X}, Prot=0x{Win32Protect:X}, MapOrdinal={Module.ImageMapOrdinal}, Status={Status}.",
                         LogFlags.Syscall);
 
@@ -254,7 +256,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance._emulator.WriteMemory(ViewSizePtr, ReturnedSize, 8))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            Instance.TriggerEventMessage($"[+] NtMapViewOfSection: Section=0x{SectionHandle:X}, Base=0x{ReturnedBase:X}, Size=0x{ReturnedSize:X}, Image={Section.IsImage}, Prot=0x{Win32Protect:X}", LogFlags.Syscall);
+            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                Instance.TriggerEventMessage($"[+] NtMapViewOfSection: Section=0x{SectionHandle:X}, Base=0x{ReturnedBase:X}, Size=0x{ReturnedSize:X}, Image={Section.IsImage}, Prot=0x{Win32Protect:X}", LogFlags.Syscall);
 
             return NTSTATUS.STATUS_SUCCESS;
         }

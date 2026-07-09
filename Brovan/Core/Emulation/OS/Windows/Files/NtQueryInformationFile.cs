@@ -78,7 +78,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 case FILE_INFORMATION_CLASS.FileIdInformation:
                     return HandleFileIdInformation(Instance, File, IoStatusBlock, FileInformation, Length);
                 default:
-                    Instance.TriggerEventMessage($"[!] NtQueryInformationFile: FileInformationClass {InfoClass} (0x{FileInformationClass:X}) not implemented.", LogFlags.Syscall);
+                    if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                        Instance.TriggerEventMessage($"[!] NtQueryInformationFile: FileInformationClass {InfoClass} (0x{FileInformationClass:X}) not implemented.", LogFlags.Syscall);
                     Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_INFO_CLASS, 0);
                     return NTSTATUS.STATUS_INVALID_INFO_CLASS;
             }

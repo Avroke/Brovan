@@ -122,7 +122,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_ACCESS_DENIED;
             }
 
-            Instance.TriggerEventMessage($"[+] NtFlushVirtualMemory: Base=0x{BaseAddress:X}, Size=0x{FlushedSize:X}, File=\"{Section.Path}\".", LogFlags.Syscall);
+            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                Instance.TriggerEventMessage($"[+] NtFlushVirtualMemory: Base=0x{BaseAddress:X}, Size=0x{FlushedSize:X}, File=\"{Section.Path}\".", LogFlags.Syscall);
             return NTSTATUS.STATUS_SUCCESS;
         }
 

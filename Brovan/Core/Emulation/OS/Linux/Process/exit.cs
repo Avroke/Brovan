@@ -11,7 +11,8 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
             EmulatedThread CurrentThread = Instance.CurrentThread;
             if (CurrentThread == null)
             {
-                Instance.TriggerEventMessage($"[!] Process has been terminated with error code: {error_code}", LogFlags.Important);
+                if ((Instance.Settings.Flags & LogFlags.Important) != 0)
+                    Instance.TriggerEventMessage($"[!] Process has been terminated with error code: {error_code}", LogFlags.Important);
                 Helper.SetReturnValue(Instance, Context, LinuxErrno.ESUCCESS);
                 Instance.StopEmulation();
                 return;
@@ -23,7 +24,8 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
             LinuxGuest.CleanupExitedThread(Instance, CurrentThread);
 
             bool HasOtherRunningThreads = Instance.Threads.Values.Any(t => t != null && t.ThreadId != CurrentThread.ThreadId && t.State != EmulatedThreadState.Terminated);
-            Instance.TriggerEventMessage($"[{(error_code == 0 ? '+' : '!')}] Thread with ID {CurrentThread.ThreadId} has been terminated with error code: {error_code}", LogFlags.Important);
+            if ((Instance.Settings.Flags & LogFlags.Important) != 0)
+                Instance.TriggerEventMessage($"[{(error_code == 0 ? '+' : '!')}] Thread with ID {CurrentThread.ThreadId} has been terminated with error code: {error_code}", LogFlags.Important);
             Helper.SetReturnValue(Instance, Context, LinuxErrno.ESUCCESS);
 
             Instance._emulator.WriteRegister(Instance.IPRegister, 0UL);

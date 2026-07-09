@@ -45,7 +45,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (RegKey == null)
                     return NTSTATUS.STATUS_INVALID_HANDLE;
 
-                Instance.TriggerEventMessage($"[+] NtQueryKey Running with the FullPath: {RegKey.FullPath}", LogFlags.Syscall);
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[+] NtQueryKey Running with the FullPath: {RegKey.FullPath}", LogFlags.Syscall);
 
                 if (KeyInformationClass == KEY_INFORMATION_CLASS.KeyNameInformation)
                 {

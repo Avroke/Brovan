@@ -22,7 +22,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 ushort LanguageId = QueryInstallLanguage(Instance);
                 Instance._emulator.WriteMemory(LanguageIdPtr, LanguageId, 2);
-                Instance.TriggerEventMessage($"[+] NtQueryInstallUILanguage: 0x{LanguageId:X4}", LogFlags.Syscall);
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[+] NtQueryInstallUILanguage: 0x{LanguageId:X4}", LogFlags.Syscall);
                 return NTSTATUS.STATUS_SUCCESS;
             }
             else if (Instance._binary.Architecture == BinaryArchitecture.x86)
@@ -34,7 +35,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 ushort LanguageId = QueryInstallLanguage(Instance);
                 Instance._emulator.WriteMemory(LanguageIdPtr, LanguageId, 2);
-                Instance.TriggerEventMessage($"[+] NtQueryInstallUILanguage (x86): 0x{LanguageId:X4}", LogFlags.Syscall);
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[+] NtQueryInstallUILanguage (x86): 0x{LanguageId:X4}", LogFlags.Syscall);
                 return NTSTATUS.STATUS_SUCCESS;
             }
 

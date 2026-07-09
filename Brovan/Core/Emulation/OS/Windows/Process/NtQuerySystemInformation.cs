@@ -101,7 +101,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                             if (!Instance.WriteMemory(SystemInformationPtr, Buffer.Slice(0, (int)FullSize)))
                                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                            Instance.TriggerEventMessage($"[+] NtQuerySystemInformation: SystemTimeOfDayInformation (Boot=0x{BootTime:X}, Now=0x{CurrentTime:X}, TZId={TimeZoneId}).", LogFlags.Syscall);
+                            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                                Instance.TriggerEventMessage($"[+] NtQuerySystemInformation: SystemTimeOfDayInformation (Boot=0x{BootTime:X}, Now=0x{CurrentTime:X}, TZId={TimeZoneId}).", LogFlags.Syscall);
                             return NTSTATUS.STATUS_SUCCESS;
                         }
 
@@ -345,7 +346,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                         }
 
                     case SYSTEM_INFORMATION_CLASS.SystemControlFlowTransition:
-                        Instance.TriggerEventMessage($"[!] Warbird transition query using NtQuerySystemInformation at 0x{Instance.ReadRegister(Instance.IPRegister):X}.", LogFlags.Suspicious);
+                        if ((Instance.Settings.Flags & LogFlags.Suspicious) != 0)
+                            Instance.TriggerEventMessage($"[!] Warbird transition query using NtQuerySystemInformation at 0x{Instance.ReadRegister(Instance.IPRegister):X}.", LogFlags.Suspicious);
                         return NTSTATUS.STATUS_NOT_IMPLEMENTED;
 
                     case SYSTEM_INFORMATION_CLASS.SystemProcessInformation:
@@ -507,7 +509,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                             return NTSTATUS.STATUS_SUCCESS;
                         }
                     default:
-                        Instance.TriggerEventMessage($"[!] Unsupported NtQuerySystemInformation class: 0x{SystemInformationClass:X}", LogFlags.Issues);
+                        if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
+                            Instance.TriggerEventMessage($"[!] Unsupported NtQuerySystemInformation class: 0x{SystemInformationClass:X}", LogFlags.Issues);
                         break;
                 }
             }

@@ -3098,7 +3098,8 @@ namespace Brovan.Core.Emulation.OS.Linux
                     Thread.Context.RAX = unchecked((ulong)ExitCode);
             }
 
-            Instance.TriggerEventMessage($"[!] Linux process terminated by signal {Signal}.", LogFlags.Issues);
+            if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
+                Instance.TriggerEventMessage($"[!] Linux process terminated by signal {Signal}.", LogFlags.Issues);
             Instance._emulator.StopEmulation();
         }
 

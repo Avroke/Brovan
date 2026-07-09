@@ -254,21 +254,29 @@ namespace Brovan.Core.Emulation.OS
                 return WriteStructResult.Ok;
             }
 
-            using MemoryStream Ms = new();
-            using BinaryWriter Bw = new(Ms, Encoding.Unicode, leaveOpen: true);
+            int SlowSize = Is64 ? Desc.Size64 : Desc.Size32;
+            if (SlowSize <= 0)
+                return WriteStructResult.Fail(WriteStructError.InvalidStructLayout, $"{typeof(T).Name} has zero size");
+            byte[] SlowBuf = ArrayPool<byte>.Shared.Rent(SlowSize);
+            try
+            {
+                using MemoryStream Ms = new(SlowBuf, 0, SlowSize, writable: true, publiclyVisible: false);
+                using BinaryWriter Bw = new(Ms, Encoding.Unicode, leaveOpen: true);
 
-            WriteStructResult R = BuildFields(Emulator, Bw, Value, 0, Is64);
-            if (!R.Success) return R;
+                WriteStructResult R = BuildFields(Emulator, Bw, Value, 0, Is64);
+                if (!R.Success) return R;
 
-            Bw.Flush();
-            byte[] Bytes = Ms.ToArray();
+                Bw.Flush();
+                int Written = (int)Ms.Position;
 
-            if (!Emulator.IsRegionMapped(Address, (ulong)Bytes.Length))
-                return WriteStructResult.Fail(WriteStructError.DestinationNotMapped, $"{typeof(T).Name} (0x{Bytes.Length:X} bytes) at 0x{Address:X} is not fully mapped");
-            if (!Emulator.WriteMemory(Address, Bytes))
-                return WriteStructResult.Fail(WriteStructError.DestinationNotMapped, $"WriteMemory failed for {typeof(T).Name} at 0x{Address:X}");
+                if (!Emulator.IsRegionMapped(Address, (ulong)Written))
+                    return WriteStructResult.Fail(WriteStructError.DestinationNotMapped, $"{typeof(T).Name} (0x{Written:X} bytes) at 0x{Address:X} is not fully mapped");
+                if (!Emulator.WriteMemory(Address, SlowBuf.AsSpan(0, Written)))
+                    return WriteStructResult.Fail(WriteStructError.DestinationNotMapped, $"WriteMemory failed for {typeof(T).Name} at 0x{Address:X}");
 
-            return WriteStructResult.Ok;
+                return WriteStructResult.Ok;
+            }
+            finally { ArrayPool<byte>.Shared.Return(SlowBuf); }
         }
 
         /// <summary>
@@ -302,13 +310,18 @@ namespace Brovan.Core.Emulation.OS
                 finally { ArrayPool<byte>.Shared.Return(Buf); }
             }
 
-            byte[] Raw = Emulator.ReadMemory(Address, (uint)Size);
-            if (Raw == null || Raw.Length != Size) return false;
+            byte[] Raw = ArrayPool<byte>.Shared.Rent(Size);
+            try
+            {
+                if (!Emulator.ReadMemory(Address, Raw.AsSpan(0, Size)))
+                    return false;
 
-            object Boxed = Value;
-            if (!ReadFields(Emulator, Raw, 0, ref Boxed, 0, Is64)) return false;
+                object Boxed = Value;
+                if (!ReadFields(Emulator, Raw, 0, ref Boxed, 0, Is64)) return false;
 
-            Value = (T)Boxed;
+                Value = (T)Boxed;
+            }
+            finally { ArrayPool<byte>.Shared.Return(Raw); }
             return true;
         }
 
@@ -433,19 +446,24 @@ namespace Brovan.Core.Emulation.OS
 
                             if (Et.IsValueType && !Et.IsPrimitive && !Et.IsEnum)
                             {
-                                using MemoryStream SubMs = new();
-                                using BinaryWriter SubBw = new(SubMs, Encoding.Unicode, leaveOpen: true);
+                                byte[] SubBuf = ArrayPool<byte>.Shared.Rent(ElemSize);
+                                try
+                                {
+                                    using MemoryStream SubMs = new(SubBuf, 0, ElemSize, writable: true, publiclyVisible: false);
+                                    using BinaryWriter SubBw = new(SubMs, Encoding.Unicode, leaveOpen: true);
 
-                                WriteStructResult Inner = BuildFields(Emulator, SubBw, ElemVal, Depth + 1, Is64);
-                                if (!Inner.Success) return Inner;
+                                    WriteStructResult Inner = BuildFields(Emulator, SubBw, ElemVal, Depth + 1, Is64);
+                                    if (!Inner.Success) return Inner;
 
-                                SubBw.Flush();
-                                byte[] SubBytes = SubMs.ToArray();
+                                    SubBw.Flush();
+                                    int SubWritten = (int)SubMs.Position;
 
-                                if (SubBytes.Length != ElemSize)
-                                    return WriteStructResult.Fail(WriteStructError.InvalidStructLayout, $"Inline array field {D.Field.Name}[{I}] serialized to 0x{SubBytes.Length:X} bytes, expected 0x{ElemSize:X}");
+                                    if (SubWritten != ElemSize)
+                                        return WriteStructResult.Fail(WriteStructError.InvalidStructLayout, $"Inline array field {D.Field.Name}[{I}] serialized to 0x{SubWritten:X} bytes, expected 0x{ElemSize:X}");
 
-                                Bw.Write(SubBytes);
+                                    Bw.Write(SubBuf.AsSpan(0, SubWritten));
+                                }
+                                finally { ArrayPool<byte>.Shared.Return(SubBuf); }
                                 continue;
                             }
 
@@ -539,17 +557,26 @@ namespace Brovan.Core.Emulation.OS
                 {
                     if (D.PtrAttr != null && D.PtrAttr.ContentType == PointerContentType.Struct)
                     {
-                        using MemoryStream SubMs = new();
-                        using BinaryWriter SubBw = new(SubMs, Encoding.Unicode, leaveOpen: true);
-                        WriteStructResult Inner = BuildFields(Emulator, SubBw, FieldVal, Depth + 1, Is64);
-                        if (!Inner.Success) return Inner;
-                        SubBw.Flush();
-                        byte[] SubBytes = SubMs.ToArray();
-                        ulong Ptr = Emulator.MapUniqueAddress((ulong)SubBytes.Length, MemoryProtection.ReadWrite);
-                        if (Ptr == 0) return WriteStructResult.Fail(WriteStructError.PointerAllocationFailed, $"AllocateMemory failed for struct pointer field {D.Field.Name}");
-                        if (!Emulator.IsRegionMapped(Ptr, (ulong)SubBytes.Length)) return WriteStructResult.Fail(WriteStructError.PointerDestinationNotMapped, $"Allocated region 0x{Ptr:X} for {Ft.Name} is not mapped");
-                        if (!Emulator.WriteMemory(Ptr, SubBytes)) return WriteStructResult.Fail(WriteStructError.PointerDestinationNotMapped, $"WriteMemory failed for struct pointer field {D.Field.Name} at 0x{Ptr:X}");
-                        if (Is64) Bw.Write(Ptr); else Bw.Write((uint)Ptr);
+                        TypeDesc SubDesc = GetDesc(Ft);
+                        int SubSize = Is64 ? SubDesc.Size64 : SubDesc.Size32;
+                        if (SubSize <= 0)
+                            return WriteStructResult.Fail(WriteStructError.InvalidStructLayout, $"Struct pointer field {D.Field.Name} has zero size");
+                        byte[] SubBuf = ArrayPool<byte>.Shared.Rent(SubSize);
+                        try
+                        {
+                            using MemoryStream SubMs = new(SubBuf, 0, SubSize, writable: true, publiclyVisible: false);
+                            using BinaryWriter SubBw = new(SubMs, Encoding.Unicode, leaveOpen: true);
+                            WriteStructResult Inner = BuildFields(Emulator, SubBw, FieldVal, Depth + 1, Is64);
+                            if (!Inner.Success) return Inner;
+                            SubBw.Flush();
+                            int SubWritten = (int)SubMs.Position;
+                            ulong Ptr = Emulator.MapUniqueAddress((ulong)SubWritten, MemoryProtection.ReadWrite);
+                            if (Ptr == 0) return WriteStructResult.Fail(WriteStructError.PointerAllocationFailed, $"AllocateMemory failed for struct pointer field {D.Field.Name}");
+                            if (!Emulator.IsRegionMapped(Ptr, (ulong)SubWritten)) return WriteStructResult.Fail(WriteStructError.PointerDestinationNotMapped, $"Allocated region 0x{Ptr:X} for {Ft.Name} is not mapped");
+                            if (!Emulator.WriteMemory(Ptr, SubBuf.AsSpan(0, SubWritten))) return WriteStructResult.Fail(WriteStructError.PointerDestinationNotMapped, $"WriteMemory failed for struct pointer field {D.Field.Name} at 0x{Ptr:X}");
+                            if (Is64) Bw.Write(Ptr); else Bw.Write((uint)Ptr);
+                        }
+                        finally { ArrayPool<byte>.Shared.Return(SubBuf); }
                     }
                     else
                     {

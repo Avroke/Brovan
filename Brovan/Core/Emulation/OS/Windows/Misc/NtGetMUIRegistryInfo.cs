@@ -32,7 +32,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (DataPtr != 0 && BufferSize != 0 && !Instance.IsRegionMapped(DataPtr, BufferSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            Instance.TriggerEventMessage($"[+] NtGetMUIRegistryInfo: No kernel MUI registry cache is exposed (Flags=0x{Flags:X}, BufferSize=0x{BufferSize:X}).", LogFlags.Syscall);
+            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                Instance.TriggerEventMessage($"[+] NtGetMUIRegistryInfo: No kernel MUI registry cache is exposed (Flags=0x{Flags:X}, BufferSize=0x{BufferSize:X}).", LogFlags.Syscall);
             return NTSTATUS.STATUS_NOT_SUPPORTED;
         }
     }

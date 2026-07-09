@@ -84,7 +84,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
             }
 
-            Instance.TriggerEventMessage($"[+] NtDuplicateToken: Token=0x{ExistingTokenHandle:X} -> 0x{Handle.Handle:X}, Type={NewToken.Type}, Access=0x{(uint)NewAccess:X}.", LogFlags.Syscall);
+            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                Instance.TriggerEventMessage($"[+] NtDuplicateToken: Token=0x{ExistingTokenHandle:X} -> 0x{Handle.Handle:X}, Type={NewToken.Type}, Access=0x{(uint)NewAccess:X}.", LogFlags.Syscall);
             return NTSTATUS.STATUS_SUCCESS;
         }
 

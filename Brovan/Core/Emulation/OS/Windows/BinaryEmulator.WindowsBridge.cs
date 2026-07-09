@@ -820,7 +820,8 @@ namespace Brovan.Core.Emulation
                             break;
 
                         default:
-                            TriggerEventMessage($"[-] Unsupported relocation type {RelocationType} in {Module.Name}", LogFlags.Issues);
+                            if ((Settings.Flags & LogFlags.Issues) != 0)
+                                TriggerEventMessage($"[-] Unsupported relocation type {RelocationType} in {Module.Name}", LogFlags.Issues);
                             break;
                     }
                 }
@@ -2004,14 +2005,16 @@ namespace Brovan.Core.Emulation
                         IsExecutableSection(CurrSection) &&
                         !string.Equals(PrevSection.SectionName, CurrSection.SectionName, StringComparison.OrdinalIgnoreCase))
                     {
-                        TriggerEventMessage($"[/] [CFT] {MainModule.Name} executable section change: {PrevSection.SectionName} (0x{PreviousRip:X}) -> {CurrSection.SectionName} (0x{Address:X})", LogFlags.General);
+                        if ((Settings.Flags & LogFlags.General) != 0)
+                            TriggerEventMessage($"[/] [CFT] {MainModule.Name} executable section change: {PrevSection.SectionName} (0x{PreviousRip:X}) -> {CurrSection.SectionName} (0x{Address:X})", LogFlags.General);
                         Thread.LastRIP = Address;
                         return;
                     }
                 }
                 else if (!InsideAnyWinModule(Address, Helper))
                 {
-                    TriggerEventMessage($"[/] [CFT] {MainModule.Name} (0x{PreviousRip:X}) -> 0x{Address:X} (NO MODULE)", LogFlags.General);
+                    if ((Settings.Flags & LogFlags.General) != 0)
+                        TriggerEventMessage($"[/] [CFT] {MainModule.Name} (0x{PreviousRip:X}) -> 0x{Address:X} (NO MODULE)", LogFlags.General);
                     Thread.LastRIP = Address;
                     return;
                 }
@@ -2024,7 +2027,8 @@ namespace Brovan.Core.Emulation
                     {
                         LastFunc = Func;
                         WinModule PreviousModule = PreviousRip != 0 ? FindModuleByAddress(PreviousRip, Helper) : null;
-                        TriggerEventMessage($"[!] [ENTRY] {CurrentModule.Name}!{Func} @ 0x{Address:X} from {PreviousModule?.Name} @ 0x{PreviousRip:X}", LogFlags.General);
+                        if ((Settings.Flags & LogFlags.General) != 0)
+                            TriggerEventMessage($"[!] [ENTRY] {CurrentModule.Name}!{Func} @ 0x{Address:X} from {PreviousModule?.Name} @ 0x{PreviousRip:X}", LogFlags.General);
                     }
                 }
             }

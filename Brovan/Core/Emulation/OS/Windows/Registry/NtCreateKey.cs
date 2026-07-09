@@ -38,7 +38,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return Status;
                 }
 
-                Instance.TriggerEventMessage($"[+] NtCreateKey Running with the KeyPath: {KeyPath}", LogFlags.Syscall);
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[+] NtCreateKey Running with the KeyPath: {KeyPath}", LogFlags.Syscall);
 
                 KeyPath = Instance.WinHelper.NormalizeNtRegistryPath(KeyPath);
                 if (string.IsNullOrEmpty(KeyPath))

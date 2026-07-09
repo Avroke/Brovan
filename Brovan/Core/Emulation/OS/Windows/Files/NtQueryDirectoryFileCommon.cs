@@ -57,7 +57,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 DirectoryHandle.DirectoryEntries = ScanDirectory(HostPath, EffectiveMask);
                 DirectoryHandle.DirectoryIndex = 0;
                 DirectoryHandle.DirectoryMask = EffectiveMask;
-                Instance.TriggerEventMessage($"[+] NtQueryDirectoryFile: Enumerating directory \"{DirectoryHandle.Path}\".", LogFlags.Syscall);
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[+] NtQueryDirectoryFile: Enumerating directory \"{DirectoryHandle.Path}\".", LogFlags.Syscall);
             }
 
             if (DirectoryHandle.DirectoryIndex >= DirectoryHandle.DirectoryEntries.Count)

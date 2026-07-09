@@ -65,7 +65,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (!Instance._emulator.WriteMemory(SectionHandlePtr, (ulong)ExistingHandle.Handle))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                Instance.TriggerEventMessage($"[+] NtOpenSection: Name=\"{Name}\", FullName=\"{FullName}\", Handle=0x{ExistingHandle.Handle:X} (reused).", LogFlags.Syscall);
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[+] NtOpenSection: Name=\"{Name}\", FullName=\"{FullName}\", Handle=0x{ExistingHandle.Handle:X} (reused).", LogFlags.Syscall);
 
                 return NTSTATUS.STATUS_SUCCESS;
             }
@@ -84,7 +85,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (!Instance._emulator.WriteMemory(SectionHandlePtr, (ulong)SharedSectionHandle.Handle))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                Instance.TriggerEventMessage($"[+] NtOpenSection: Name=\"{Name}\", FullName=\"{FullName}\", Handle=0x{SharedSectionHandle.Handle:X}, SharedSection.", LogFlags.Syscall);
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[+] NtOpenSection: Name=\"{Name}\", FullName=\"{FullName}\", Handle=0x{SharedSectionHandle.Handle:X}, SharedSection.", LogFlags.Syscall);
 
                 return NTSTATUS.STATUS_SUCCESS;
             }
@@ -121,7 +123,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance._emulator.WriteMemory(SectionHandlePtr, (ulong)Handle.Handle))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            Instance.TriggerEventMessage($"[+] NtOpenSection: Name=\"{Name}\", FullName=\"{FullName}\", File=\"{ResolvedBackingPath}\", Handle=0x{Handle.Handle:X}, Attributes=0x{AllocationAttributes:X}.", LogFlags.Syscall);
+            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                Instance.TriggerEventMessage($"[+] NtOpenSection: Name=\"{Name}\", FullName=\"{FullName}\", File=\"{ResolvedBackingPath}\", Handle=0x{Handle.Handle:X}, Attributes=0x{AllocationAttributes:X}.", LogFlags.Syscall);
 
             return NTSTATUS.STATUS_SUCCESS;
         }

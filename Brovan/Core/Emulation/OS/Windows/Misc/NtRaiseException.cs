@@ -120,7 +120,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             CurrentThread.ExitCode = unchecked((int)ExceptionCode);
 
             Instance.Threads[(uint)Instance.CurrentThreadId] = CurrentThread;
-            Instance.TriggerEventMessage($"[!] NtRaiseException triggered with Exception Code: 0x{ExceptionCode:X}", LogFlags.Issues);
+            if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
+                Instance.TriggerEventMessage($"[!] NtRaiseException triggered with Exception Code: 0x{ExceptionCode:X}", LogFlags.Issues);
             Instance._emulator.StopEmulation();
 
             return NTSTATUS.STATUS_SUCCESS;

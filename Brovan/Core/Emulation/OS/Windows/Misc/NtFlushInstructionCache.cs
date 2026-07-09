@@ -16,7 +16,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (ProcessHandle != ulong.MaxValue && !Instance.WinHelper.ValidProcessHandle(ProcessHandle))
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
-            Instance.TriggerEventMessage($"[+] NtFlushInstructionCache: base=0x{BaseAddress:X}, length=0x{Length:X}", LogFlags.Syscall);
+            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                Instance.TriggerEventMessage($"[+] NtFlushInstructionCache: base=0x{BaseAddress:X}, length=0x{Length:X}", LogFlags.Syscall);
             return NTSTATUS.STATUS_SUCCESS;
         }
     }

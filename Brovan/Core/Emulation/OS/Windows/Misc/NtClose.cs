@@ -23,7 +23,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
                 else
                 {
-                    Instance.TriggerEventMessage($"[!] NtClose: received invalid handle 0x{Handle:X}.", LogFlags.Syscall);
+                    if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                        Instance.TriggerEventMessage($"[!] NtClose: received invalid handle 0x{Handle:X}.", LogFlags.Syscall);
                     return NTSTATUS.STATUS_INVALID_HANDLE;
                 }
             }
@@ -44,7 +45,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
                 else
                 {
-                    Instance.TriggerEventMessage($"[!] NtClose: received invalid handle 0x{Handle:X}.", LogFlags.Syscall);
+                    if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                        Instance.TriggerEventMessage($"[!] NtClose: received invalid handle 0x{Handle:X}.", LogFlags.Syscall);
                     return NTSTATUS.STATUS_INVALID_HANDLE;
                 }
             }

@@ -14,7 +14,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (RegKey == null)
                     return NTSTATUS.STATUS_INVALID_HANDLE;
 
-                Instance.TriggerEventMessage($"[+] NtDeleteKey Running with the FullPath: {RegKey.FullPath}", LogFlags.Syscall);
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[+] NtDeleteKey Running with the FullPath: {RegKey.FullPath}", LogFlags.Syscall);
 
                 if (!Instance.WinHelper.DeleteRegistryKeyPath(RegKey.FullPath))
                     return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;

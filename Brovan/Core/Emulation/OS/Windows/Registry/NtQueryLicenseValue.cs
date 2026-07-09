@@ -1,4 +1,4 @@
-﻿using Brovan.Core.Helpers;
+using Brovan.Core.Helpers;
 using System;
 using System.Text;
 using static Brovan.Core.Helpers.BinaryHelpers;
@@ -182,7 +182,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 NTSTATUS QueryStatus = QueryLicenseValue(Instance, ValueName, TypePtr, DataPtr, DataSize, ResultDataSizePtr);
                 if (QueryStatus == NTSTATUS.STATUS_SUCCESS || QueryStatus == NTSTATUS.STATUS_BUFFER_TOO_SMALL)
-                    Instance.TriggerEventMessage($"[+] NtQueryLicenseValue: \"{ValueName}\"", LogFlags.Syscall);
+                    if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                        Instance.TriggerEventMessage($"[+] NtQueryLicenseValue: \"{ValueName}\"", LogFlags.Syscall);
                 return QueryStatus;
             }
 
@@ -199,7 +200,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 NTSTATUS QueryStatus = QueryLicenseValue(Instance, ValueName, TypePtr, DataPtr, DataSize, ResultDataSizePtr);
                 if (QueryStatus == NTSTATUS.STATUS_SUCCESS || QueryStatus == NTSTATUS.STATUS_BUFFER_TOO_SMALL)
-                    Instance.TriggerEventMessage($"[+] NtQueryLicenseValue (x86): \"{ValueName}\"", LogFlags.Syscall);
+                    if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                        Instance.TriggerEventMessage($"[+] NtQueryLicenseValue (x86): \"{ValueName}\"", LogFlags.Syscall);
                 return QueryStatus;
             }
 

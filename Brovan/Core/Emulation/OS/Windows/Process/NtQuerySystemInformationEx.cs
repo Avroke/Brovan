@@ -89,7 +89,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                             // Configuration.VariantPayload
                             Instance._emulator.WriteMemory(SystemInformationPtr + 0x10, 0u);
 
-                            Instance.TriggerEventMessage($"[+] NtQuerySystemInformationEx: SystemFeatureConfigurationInformation (Type={ConfigurationType}, FeatureId={FeatureId}, Stamp={ChangeStamp}).", LogFlags.Syscall);
+                            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                                Instance.TriggerEventMessage($"[+] NtQuerySystemInformationEx: SystemFeatureConfigurationInformation (Type={ConfigurationType}, FeatureId={FeatureId}, Stamp={ChangeStamp}).", LogFlags.Syscall);
                             return NTSTATUS.STATUS_SUCCESS;
                         }
 
@@ -131,7 +132,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 Instance._emulator.WriteMemory(EntryBase + 0x10, 0UL);
                             }
 
-                            Instance.TriggerEventMessage($"[+] NtQuerySystemInformationEx: SystemFeatureConfigurationSectionInformation (Stamp={OverallChangeStamp}).", LogFlags.Syscall);
+                            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                                Instance.TriggerEventMessage($"[+] NtQuerySystemInformationEx: SystemFeatureConfigurationSectionInformation (Stamp={OverallChangeStamp}).", LogFlags.Syscall);
                             return NTSTATUS.STATUS_SUCCESS;
                         }
 
@@ -188,7 +190,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                             if (!Instance.WriteMemory(SystemInformationPtr, Buffer.Slice(0, (int)FullSize)))
                                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                            Instance.TriggerEventMessage($"[+] NtQuerySystemInformationEx: SystemTimeOfDayInformation (Boot=0x{BootTime:X}, Now=0x{CurrentTime:X}, TZId={TimeZoneId}).", LogFlags.Syscall);
+                            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                                Instance.TriggerEventMessage($"[+] NtQuerySystemInformationEx: SystemTimeOfDayInformation (Boot=0x{BootTime:X}, Now=0x{CurrentTime:X}, TZId={TimeZoneId}).", LogFlags.Syscall);
                             return NTSTATUS.STATUS_SUCCESS;
                         }
 
@@ -466,7 +469,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 return NTSTATUS.STATUS_SUCCESS;
                             }
 
-                            Instance.TriggerEventMessage($"[!] Unsupported SystemLogicalProcessorAndGroupInformation request: 0x{Request:X}.", LogFlags.Suspicious);
+                            if ((Instance.Settings.Flags & LogFlags.Suspicious) != 0)
+                                Instance.TriggerEventMessage($"[!] Unsupported SystemLogicalProcessorAndGroupInformation request: 0x{Request:X}.", LogFlags.Suspicious);
                             return NTSTATUS.STATUS_NOT_SUPPORTED;
                         }
 
@@ -517,7 +521,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                         }
 
                     case SYSTEM_INFORMATION_CLASS.SystemControlFlowTransition:
-                        Instance.TriggerEventMessage($"[!] Warbird transition query using NtQuerySystemInformationEx at 0x{Instance.ReadRegister(Instance.IPRegister):X}.", LogFlags.Suspicious);
+                        if ((Instance.Settings.Flags & LogFlags.Suspicious) != 0)
+                            Instance.TriggerEventMessage($"[!] Warbird transition query using NtQuerySystemInformationEx at 0x{Instance.ReadRegister(Instance.IPRegister):X}.", LogFlags.Suspicious);
                         return NTSTATUS.STATUS_NOT_IMPLEMENTED;
 
                     case SYSTEM_INFORMATION_CLASS.SystemProcessInformation:
@@ -657,7 +662,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                             return NTSTATUS.STATUS_SUCCESS;
                         }
                     default:
-                        Instance.TriggerEventMessage($"[-] Unsupported SYSTEM_INFO_CLASS: 0x{SystemInformationClass:X}", LogFlags.Issues);
+                        if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
+                            Instance.TriggerEventMessage($"[-] Unsupported SYSTEM_INFO_CLASS: 0x{SystemInformationClass:X}", LogFlags.Issues);
                         return Instance.WinUnimplemented;
                 }
             }

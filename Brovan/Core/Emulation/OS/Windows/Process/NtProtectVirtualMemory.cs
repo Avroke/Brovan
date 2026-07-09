@@ -169,7 +169,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                             return NTSTATUS.STATUS_ACCESS_VIOLATION;
                     }
 
-                    Instance.TriggerEventMessage($"[+] NtProtectVirtualMemory (BaseAddress: 0x{BaseAddress:X}, RegionSize: {RegionSize}, New Protections: {NewProt})", LogFlags.Syscall);
+                    if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                        Instance.TriggerEventMessage($"[+] NtProtectVirtualMemory (BaseAddress: 0x{BaseAddress:X}, RegionSize: {RegionSize}, New Protections: {NewProt})", LogFlags.Syscall);
 
                     return NTSTATUS.STATUS_SUCCESS;
                 }

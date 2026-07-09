@@ -27,7 +27,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
                 }
 
-                Instance.TriggerEventMessage($"[+] NtTraceEvent: TraceHandle=0x{TraceHandle:X}, Flags=0x{Flags:X}, FieldSize=0x{FieldSize:X}.", LogFlags.Syscall);
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[+] NtTraceEvent: TraceHandle=0x{TraceHandle:X}, Flags=0x{Flags:X}, FieldSize=0x{FieldSize:X}.", LogFlags.Syscall);
                 return NTSTATUS.STATUS_SUCCESS;
             }
             else
@@ -47,7 +48,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
                 }
 
-                Instance.TriggerEventMessage($"[+] NtTraceEvent (x86): TraceHandle=0x{TraceHandle:X}, Flags=0x{Flags:X}, FieldSize=0x{FieldSize:X}.", LogFlags.Syscall);
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[+] NtTraceEvent (x86): TraceHandle=0x{TraceHandle:X}, Flags=0x{Flags:X}, FieldSize=0x{FieldSize:X}.", LogFlags.Syscall);
                 return NTSTATUS.STATUS_SUCCESS;
             }
         }

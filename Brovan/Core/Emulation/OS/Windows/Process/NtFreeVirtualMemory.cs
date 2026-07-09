@@ -59,7 +59,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                     if (Instance.IsRegionFreed(BaseAddress, false))
                     {
-                        Instance.TriggerEventMessage($"[!!] Double-Free detected for the allocated memory that have the base address 0x{BaseAddress:X}.", LogFlags.Issues);
+                        if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
+                            Instance.TriggerEventMessage($"[!!] Double-Free detected for the allocated memory that have the base address 0x{BaseAddress:X}.", LogFlags.Issues);
                         return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
                     }
 
@@ -89,7 +90,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
                 }
 
-                Instance.TriggerEventMessage($"[+] NtFreeVirtualMemory (BaseAddress: 0x{BaseAddress:X}, RegionSize: {RegionSize}, Release: {Release})", LogFlags.Syscall);
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[+] NtFreeVirtualMemory (BaseAddress: 0x{BaseAddress:X}, RegionSize: {RegionSize}, Release: {Release})", LogFlags.Syscall);
 
                 Instance._emulator.WriteMemory(BaseAddressPtr, AlignedBase);
                 Instance._emulator.WriteMemory(RegionSizePtr, AlignedSize);
@@ -145,7 +147,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                     if (Instance.IsRegionFreed(BaseAddress, false))
                     {
-                        Instance.TriggerEventMessage($"[!!] Double-Free detected for the allocated memory that have the base address 0x{BaseAddress:X}.", LogFlags.Issues);
+                        if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
+                            Instance.TriggerEventMessage($"[!!] Double-Free detected for the allocated memory that have the base address 0x{BaseAddress:X}.", LogFlags.Issues);
                         return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
                     }
 
@@ -175,7 +178,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
                 }
 
-                Instance.TriggerEventMessage($"[+] NtFreeVirtualMemory (BaseAddress: 0x{BaseAddress:X}, RegionSize: {RegionSize}, Release: {Release})", LogFlags.Syscall);
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[+] NtFreeVirtualMemory (BaseAddress: 0x{BaseAddress:X}, RegionSize: {RegionSize}, Release: {Release})", LogFlags.Syscall);
 
                 Instance._emulator.WriteMemory(BaseAddressPtr, (uint)AlignedBase);
                 Instance._emulator.WriteMemory(RegionSizePtr, (uint)AlignedSize);

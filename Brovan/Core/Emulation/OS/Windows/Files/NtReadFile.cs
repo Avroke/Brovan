@@ -128,7 +128,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, (ulong)ToRead);
 
-            Instance.TriggerEventMessage($"[+] NtReadFile: File=0x{FileHandle:X}, Offset=0x{Offset:X}, Read=0x{ToRead:X}.", LogFlags.Syscall);
+            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                Instance.TriggerEventMessage($"[+] NtReadFile: File=0x{FileHandle:X}, Offset=0x{Offset:X}, Read=0x{ToRead:X}.", LogFlags.Syscall);
 
             return NTSTATUS.STATUS_SUCCESS;
         }
@@ -158,7 +159,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, (ulong)ToWrite);
 
-            Instance.TriggerEventMessage($"[+] NtReadFile: STDIN read {ToWrite} bytes", LogFlags.Syscall);
+            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                Instance.TriggerEventMessage($"[+] NtReadFile: STDIN read {ToWrite} bytes", LogFlags.Syscall);
 
             return NTSTATUS.STATUS_SUCCESS;
         }

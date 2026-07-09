@@ -422,33 +422,64 @@ namespace Brovan.Core.Emulation.Guests
             return Protections;
         }
 
+        private static readonly int[] X64SyscallRegs = new int[]
+        {
+            (int)Registers.UC_X86_REG_RAX,
+            (int)Registers.UC_X86_REG_RIP,
+            (int)Registers.UC_X86_REG_RDI,
+            (int)Registers.UC_X86_REG_RSI,
+            (int)Registers.UC_X86_REG_RDX,
+            (int)Registers.UC_X86_REG_R10,
+            (int)Registers.UC_X86_REG_R8,
+            (int)Registers.UC_X86_REG_R9,
+        };
+
+        private readonly ulong[] _x64SyscallValues = new ulong[8];
+
         public bool TryHandleSyscall(BinaryEmulator Instance)
         {
             try
             {
-                int syscall = unchecked((int)Instance.ReadRegister(Registers.UC_X86_REG_RAX));
-                ulong Rip = Instance.ReadRegister(Instance.IPRegister);
+                ulong[] Vals = _x64SyscallValues;
+                if (!Instance._emulator.ReadRegisterBatch(X64SyscallRegs, Vals, 8))
+                {
+                    Vals[0] = Instance.ReadRegister(Registers.UC_X86_REG_RAX);
+                    Vals[1] = Instance.ReadRegister(Instance.IPRegister);
+                    Vals[2] = Instance.ReadRegister(Registers.UC_X86_REG_RDI);
+                    Vals[3] = Instance.ReadRegister(Registers.UC_X86_REG_RSI);
+                    Vals[4] = Instance.ReadRegister(Registers.UC_X86_REG_RDX);
+                    Vals[5] = Instance.ReadRegister(Registers.UC_X86_REG_R10);
+                    Vals[6] = Instance.ReadRegister(Registers.UC_X86_REG_R8);
+                    Vals[7] = Instance.ReadRegister(Registers.UC_X86_REG_R9);
+                }
+
+                int syscall = unchecked((int)Vals[0]);
+                ulong Rip = Vals[1];
+
                 if (X64Dictionary.TryGetValue(syscall, out LinuxSyscallEntry Entry))
                 {
                     LinuxSyscallContext Context = new LinuxSyscallContext();
                     Context.Abi = SyscallAbi.X64;
-                    Context.Arg0 = Instance.ReadRegister(Registers.UC_X86_REG_RDI);
-                    Context.Arg1 = Instance.ReadRegister(Registers.UC_X86_REG_RSI);
-                    Context.Arg2 = Instance.ReadRegister(Registers.UC_X86_REG_RDX);
-                    Context.Arg3 = Instance.ReadRegister(Registers.UC_X86_REG_R10);
-                    Context.Arg4 = Instance.ReadRegister(Registers.UC_X86_REG_R8);
-                    Context.Arg5 = Instance.ReadRegister(Registers.UC_X86_REG_R9);
+                    Context.Arg0 = Vals[2];
+                    Context.Arg1 = Vals[3];
+                    Context.Arg2 = Vals[4];
+                    Context.Arg3 = Vals[5];
+                    Context.Arg4 = Vals[6];
+                    Context.Arg5 = Vals[7];
                     Entry.Handler.Handle(Instance, Helper, Context);
                     ulong ReturnValue = Instance.ReadRegister(Registers.UC_X86_REG_RAX);
                     if (Instance.Syscalls?.TraceEnabled == true)
                         Instance.Syscalls.RecordSyscall(GuestOsKind.Linux, Context.Abi, unchecked((uint)syscall), Entry.Name, GetLinuxSyscallArguments(Context), ReturnValue, Rip, true);
-                    Instance.TriggerEventMessage($"[+] Syscall {Entry.Name} (0x{syscall:X}) has been executed, returned 0x{ReturnValue:X}.", LogFlags.Issues);
+                    if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
+                        Instance.TriggerEventMessage($"[+] Syscall {Entry.Name} (0x{syscall:X}) has been executed, returned 0x{ReturnValue:X}.", LogFlags.Issues);
                 }
                 else
                 {
+                    ulong[] Args = new ulong[] { Vals[2], Vals[3], Vals[4], Vals[5], Vals[6], Vals[7] };
                     if (Instance.Syscalls?.TraceEnabled == true)
-                        Instance.Syscalls.RecordSyscall(GuestOsKind.Linux, SyscallAbi.X64, unchecked((uint)syscall), null, ReadLinuxSyscallArguments64(Instance), Instance.ReadRegister(Registers.UC_X86_REG_RAX), Rip, false);
-                    Instance.TriggerEventMessage($"[!] Unknown linux syscall with the number 0x{syscall:X} has been executed.", LogFlags.Issues);
+                        Instance.Syscalls.RecordSyscall(GuestOsKind.Linux, SyscallAbi.X64, unchecked((uint)syscall), null, Args, Vals[0], Rip, false);
+                    if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
+                        Instance.TriggerEventMessage($"[!] Unknown linux syscall with the number 0x{syscall:X} has been executed.", LogFlags.Issues);
                 }
             }
             catch (Exception ex)
@@ -461,19 +492,6 @@ namespace Brovan.Core.Emulation.Guests
         private static ulong[] GetLinuxSyscallArguments(LinuxSyscallContext Context)
         {
             return new[] { Context.Arg0, Context.Arg1, Context.Arg2, Context.Arg3, Context.Arg4, Context.Arg5 };
-        }
-
-        private static ulong[] ReadLinuxSyscallArguments64(BinaryEmulator Instance)
-        {
-            return new[]
-            {
-                Instance.ReadRegister(Registers.UC_X86_REG_RDI),
-                Instance.ReadRegister(Registers.UC_X86_REG_RSI),
-                Instance.ReadRegister(Registers.UC_X86_REG_RDX),
-                Instance.ReadRegister(Registers.UC_X86_REG_R10),
-                Instance.ReadRegister(Registers.UC_X86_REG_R8),
-                Instance.ReadRegister(Registers.UC_X86_REG_R9)
-            };
         }
 
         private static ulong[] ReadLinuxSyscallArguments32(BinaryEmulator Instance)
@@ -512,13 +530,15 @@ namespace Brovan.Core.Emulation.Guests
                         ulong ReturnValue = Instance.ReadRegister32(Registers.UC_X86_REG_EAX);
                         if (Instance.Syscalls?.TraceEnabled == true)
                             Instance.Syscalls.RecordSyscall(GuestOsKind.Linux, Context.Abi, unchecked((uint)syscall), Entry.Name, GetLinuxSyscallArguments(Context), ReturnValue, Rip, true);
-                        Instance.TriggerEventMessage($"[+] Interrupt Syscall {Entry.Name} (0x{syscall:X}) has been executed, returned 0x{ReturnValue:X}.", LogFlags.Issues);
+                        if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
+                            Instance.TriggerEventMessage($"[+] Interrupt Syscall {Entry.Name} (0x{syscall:X}) has been executed, returned 0x{ReturnValue:X}.", LogFlags.Issues);
                     }
                     else
                     {
                         if (Instance.Syscalls?.TraceEnabled == true)
                             Instance.Syscalls.RecordSyscall(GuestOsKind.Linux, SyscallAbi.X86, unchecked((uint)syscall), null, ReadLinuxSyscallArguments32(Instance), Instance.ReadRegister32(Registers.UC_X86_REG_EAX), Rip, false);
-                        Instance.TriggerEventMessage($"[!] Unknown linux syscall interrupt with the number 0x{syscall:X} has been executed.", LogFlags.Issues);
+                        if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
+                            Instance.TriggerEventMessage($"[!] Unknown linux syscall interrupt with the number 0x{syscall:X} has been executed.", LogFlags.Issues);
                     }
                     return true;
                 }

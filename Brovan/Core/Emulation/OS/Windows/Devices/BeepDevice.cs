@@ -47,7 +47,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (Duration != 0)
             {
-                Instance.TriggerEventMessage($"[+] BeepDevice: requested {Frequency} Hz for {Duration} ms.", LogFlags.Syscall);
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[+] BeepDevice: requested {Frequency} Hz for {Duration} ms.", LogFlags.Syscall);
             }
 
             return NTSTATUS.STATUS_SUCCESS;

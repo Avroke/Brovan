@@ -46,7 +46,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return HandleProcessInstrumentationCallback(Instance, ProcessInformation, ProcessInformationLength);
 
                 default:
-                    Instance.TriggerEventMessage($"[!] NtSetInformationProcess: {InfoClass} (0x{(uint)InfoClass:X}) not implemented.", LogFlags.Syscall);
+                    if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                        Instance.TriggerEventMessage($"[!] NtSetInformationProcess: {InfoClass} (0x{(uint)InfoClass:X}) not implemented.", LogFlags.Syscall);
                     return NTSTATUS.STATUS_SUCCESS;
             }
         }
@@ -80,7 +81,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (CurrentProcess != null)
                 CurrentProcess.InstrumentationCallback = Callback;
 
-            Instance.TriggerEventMessage($"[!] NtSetInformationProcess: ProcessInstrumentationCallback=0x{Callback:X}.", LogFlags.Syscall);
+            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                Instance.TriggerEventMessage($"[!] NtSetInformationProcess: ProcessInstrumentationCallback=0x{Callback:X}.", LogFlags.Syscall);
             return NTSTATUS.STATUS_SUCCESS;
         }
 

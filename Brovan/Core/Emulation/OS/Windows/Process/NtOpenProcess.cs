@@ -67,7 +67,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
                 }
 
-                Instance.TriggerEventMessage($"[+] Process opened a handle to the process \"{TargetProcess.Name}\" with the PID \"{TargetProcess.PID}\".", LogFlags.Syscall);
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[+] Process opened a handle to the process \"{TargetProcess.Name}\" with the PID \"{TargetProcess.PID}\".", LogFlags.Syscall);
                 return NTSTATUS.STATUS_SUCCESS;
             }
             else
@@ -127,7 +128,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
                 }
 
-                Instance.TriggerEventMessage($"[+] Process opened a handle to the process \"{TargetProcess.Name}\" with the PID \"{TargetProcess.PID}\".", LogFlags.General);
+                if ((Instance.Settings.Flags & LogFlags.General) != 0)
+                    Instance.TriggerEventMessage($"[+] Process opened a handle to the process \"{TargetProcess.Name}\" with the PID \"{TargetProcess.PID}\".", LogFlags.General);
                 return NTSTATUS.STATUS_SUCCESS;
             }
         }

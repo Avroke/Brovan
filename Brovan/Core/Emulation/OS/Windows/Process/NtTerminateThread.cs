@@ -37,7 +37,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance._emulator.StopEmulation();
             }
 
-            Instance.TriggerEventMessage($"[{(ExitStatus == 0 ? '+' : '!')}] Thread with ID {TargetThread.ThreadId} was terminated with the status code 0x{ExitStatus:X}", LogFlags.General);
+            if ((Instance.Settings.Flags & LogFlags.General) != 0)
+                Instance.TriggerEventMessage($"[{(ExitStatus == 0 ? '+' : '!')}] Thread with ID {TargetThread.ThreadId} was terminated with the status code 0x{ExitStatus:X}", LogFlags.General);
 
             return NTSTATUS.STATUS_SUCCESS;
         }

@@ -171,7 +171,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 RegionSize = BinaryEmulator.AlignUp(RegionSizeRaw, PageSize);
 
-                Instance.TriggerEventMessage($"[+] NtAllocateVirtualMemory (BaseAddress: 0x{BaseAddress:X}, RegionSize: {RegionSize}, Commit: {Commit}, Reserve: {Reserve})", LogFlags.Syscall);
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[+] NtAllocateVirtualMemory (BaseAddress: 0x{BaseAddress:X}, RegionSize: {RegionSize}, Commit: {Commit}, Reserve: {Reserve})", LogFlags.Syscall);
 
                 if (!Reserve && Commit && BaseAddress == 0)
                     Reserve = true;
@@ -278,7 +279,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 RegionSize = BinaryEmulator.AlignUp(RegionSizeRaw, PageSize);
 
-                Instance.TriggerEventMessage($"[+] NtAllocateVirtualMemory (BaseAddress: 0x{BaseAddress:X}, RegionSize: {RegionSize}, Commit: {Commit}, Reserve: {Reserve})", LogFlags.Syscall);
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[+] NtAllocateVirtualMemory (BaseAddress: 0x{BaseAddress:X}, RegionSize: {RegionSize}, Commit: {Commit}, Reserve: {Reserve})", LogFlags.Syscall);
 
                 if (!Reserve && Commit && BaseAddress == 0)
                     Reserve = true;

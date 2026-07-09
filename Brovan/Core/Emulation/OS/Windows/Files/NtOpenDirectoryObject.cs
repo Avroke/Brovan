@@ -28,14 +28,16 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (!Instance.WinHelper.TryGetKnownObjectDirectoryHandle(FullName, out ulong OutHandle))
             {
-                Instance.TriggerEventMessage($"[!] NtOpenDirectoryObject object name not found: Name=\"{ObjectName}\", DesiredAccess=0x{((ulong)DesiredAccess):X}", LogFlags.Syscall);
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[!] NtOpenDirectoryObject object name not found: Name=\"{ObjectName}\", DesiredAccess=0x{((ulong)DesiredAccess):X}", LogFlags.Syscall);
                 return NTSTATUS.STATUS_NOT_SUPPORTED;
             }
 
             if (!Instance._emulator.WriteMemory(DirectoryHandlePtr, OutHandle))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            Instance.TriggerEventMessage($"[+] NtOpenDirectoryObject: Name=\"{ObjectName}\", DesiredAccess=0x{((ulong)DesiredAccess):X}, Handle=0x{OutHandle:X}.", LogFlags.Syscall);
+            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                Instance.TriggerEventMessage($"[+] NtOpenDirectoryObject: Name=\"{ObjectName}\", DesiredAccess=0x{((ulong)DesiredAccess):X}, Handle=0x{OutHandle:X}.", LogFlags.Syscall);
 
             return NTSTATUS.STATUS_SUCCESS;
         }

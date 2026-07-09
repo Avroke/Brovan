@@ -72,7 +72,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
             }
 
-            Instance.TriggerEventMessage(
+            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                Instance.TriggerEventMessage(
                 $"[+] NtAlpcConnectPort: Port=\"{PortName}\", Handle=0x{Handle.Handle:X}",
                 LogFlags.Syscall);
 

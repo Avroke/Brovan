@@ -1,4 +1,4 @@
-﻿using static Brovan.Core.Helpers.BinaryHelpers;
+using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
@@ -204,7 +204,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
             }
 
-            Instance.TriggerEventMessage($"[+] NtCreateProcessEx: Created process \"{CreatedProcess.Name}\" (PID {CreatedProcess.PID}) from parent PID {CreatedProcess.PPID}.", LogFlags.Syscall);
+            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                Instance.TriggerEventMessage($"[+] NtCreateProcessEx: Created process \"{CreatedProcess.Name}\" (PID {CreatedProcess.PID}) from parent PID {CreatedProcess.PPID}.", LogFlags.Syscall);
             return NTSTATUS.STATUS_SUCCESS;
         }
     }

@@ -54,7 +54,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 0);
-            Instance.TriggerEventMessage($"[+] NtUnlockFile: File=0x{FileHandle:X}, Offset=0x{Offset:X}, Length=0x{Length:X}, Key=0x{Key:X}.", LogFlags.Syscall);
+            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                Instance.TriggerEventMessage($"[+] NtUnlockFile: File=0x{FileHandle:X}, Offset=0x{Offset:X}, Length=0x{Length:X}, Key=0x{Key:X}.", LogFlags.Syscall);
             return NTSTATUS.STATUS_SUCCESS;
         }
 

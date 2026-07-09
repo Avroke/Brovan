@@ -11,7 +11,8 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
         public void Handle(BinaryEmulator Instance, LinuxSyscallsHelper Helper, LinuxSyscallContext Context)
         {
             ulong error_code = Context.Arg0;
-            Instance.TriggerEventMessage($"[!] Process has been terminated with error code: {error_code}", LogFlags.Important);
+            if ((Instance.Settings.Flags & LogFlags.Important) != 0)
+                Instance.TriggerEventMessage($"[!] Process has been terminated with error code: {error_code}", LogFlags.Important);
             Helper.SetReturnValue(Instance, Context, LinuxErrno.ESUCCESS);
             Instance.StopEmulation();
         }

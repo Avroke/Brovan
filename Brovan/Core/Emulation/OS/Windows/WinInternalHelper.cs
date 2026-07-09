@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -711,7 +711,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     continue;
 
                 var info = kv.Value;
-                Emulator.TriggerEventMessage($"[+] Loaded {info.BaseName} at 0x{info.DllBase:X}.", LogFlags.General);
+                if ((Emulator.Settings.Flags & LogFlags.General) != 0)
+                    Emulator.TriggerEventMessage($"[+] Loaded {info.BaseName} at 0x{info.DllBase:X}.", LogFlags.General);
 
                 var existing = WinHelper.WinModules.FirstOrDefault(m => m != null && m.MappedBase == info.DllBase);
                 if (existing == null)
@@ -757,7 +758,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     continue;
 
                 var info = kv.Value;
-                Emulator.TriggerEventMessage($"[-] Unloaded {info.BaseName} at 0x{info.DllBase:X}.", LogFlags.General);
+                if ((Emulator.Settings.Flags & LogFlags.General) != 0)
+                    Emulator.TriggerEventMessage($"[-] Unloaded {info.BaseName} at 0x{info.DllBase:X}.", LogFlags.General);
 
                 var existing = WinHelper.WinModules.FirstOrDefault(m => m != null && m.MappedBase == info.DllBase);
                 if (existing != null)

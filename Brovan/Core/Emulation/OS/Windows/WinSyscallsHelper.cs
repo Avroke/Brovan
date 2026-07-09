@@ -878,14 +878,28 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// <returns></returns>
         public ulong GetArg64(int Index, bool UInt = false)
         {
+            if (_argCacheValid)
+            {
+                switch (Index)
+                {
+                    case 0: return _argCacheR10;
+                    case 1: return _argCacheRDX;
+                    case 2: return _argCacheR8;
+                    case 3: return _argCacheR9;
+                }
+                ulong StackArgAddress = _argCacheRSP + 0x28UL + (ulong)((Index - 4) * 8);
+                return UInt ? Emulator._emulator.ReadMemoryUInt(StackArgAddress) : Emulator._emulator.ReadMemoryULong(StackArgAddress);
+            }
+
+            // Fallback (no cache)
             if (Index == 0) return Emulator._emulator.ReadRegister(Registers.UC_X86_REG_R10);
             if (Index == 1) return Emulator._emulator.ReadRegister(Registers.UC_X86_REG_RDX);
             if (Index == 2) return Emulator._emulator.ReadRegister(Registers.UC_X86_REG_R8);
             if (Index == 3) return Emulator._emulator.ReadRegister(Registers.UC_X86_REG_R9);
 
             ulong RSP = Emulator._emulator.ReadRegister(Registers.UC_X86_REG_RSP);
-            ulong StackArgAddress = RSP + 0x28UL + (ulong)((Index - 4) * 8);
-            return UInt ? Emulator._emulator.ReadMemoryUInt(StackArgAddress) : Emulator._emulator.ReadMemoryULong(StackArgAddress);
+            ulong StackArgAddress2 = RSP + 0x28UL + (ulong)((Index - 4) * 8);
+            return UInt ? Emulator._emulator.ReadMemoryUInt(StackArgAddress2) : Emulator._emulator.ReadMemoryULong(StackArgAddress2);
         }
 
         /// <summary>
@@ -1006,6 +1020,64 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal string SyntheticVolumeWin32GuidPath { get; private set; }
         internal byte[] SyntheticMountDevUniqueId { get; private set; }
         private BinaryEmulator Emulator;
+
+        private bool _argCacheValid;
+        private ulong _argCacheR10;
+        private ulong _argCacheRDX;
+        private ulong _argCacheR8;
+        private ulong _argCacheR9;
+        private ulong _argCacheRSP;
+
+        // Batch register array for GetArg64
+        private static readonly int[] WinX64SyscallArgRegs = new int[]
+        {
+            (int)Registers.UC_X86_REG_R10,
+            (int)Registers.UC_X86_REG_RDX,
+            (int)Registers.UC_X86_REG_R8,
+            (int)Registers.UC_X86_REG_R9,
+            (int)Registers.UC_X86_REG_RSP,
+        };
+
+        private readonly ulong[] _winX64SyscallArgValues = new ulong[5];
+
+        /// <summary>
+        /// the 5 registers (R10, RDX, R8, R9, RSP) in a single batch read.
+        /// Called once before the syscall handler
+        /// runs; GetArg64 then reads from the cache.
+        /// </summary>
+        public void BeginSyscall()
+        {
+            if (Emulator._binary.Architecture != BinaryArchitecture.x64)
+            {
+                _argCacheValid = false;
+                return;
+            }
+            ulong[] Vals = _winX64SyscallArgValues;
+            if (!Emulator._emulator.ReadRegisterBatch(WinX64SyscallArgRegs, Vals, 5))
+            {
+                // Fallback: individual reads
+                Vals[0] = Emulator._emulator.ReadRegister(Registers.UC_X86_REG_R10);
+                Vals[1] = Emulator._emulator.ReadRegister(Registers.UC_X86_REG_RDX);
+                Vals[2] = Emulator._emulator.ReadRegister(Registers.UC_X86_REG_R8);
+                Vals[3] = Emulator._emulator.ReadRegister(Registers.UC_X86_REG_R9);
+                Vals[4] = Emulator._emulator.ReadRegister(Registers.UC_X86_REG_RSP);
+            }
+            _argCacheR10  = Vals[0];
+            _argCacheRDX  = Vals[1];
+            _argCacheR8   = Vals[2];
+            _argCacheR9   = Vals[3];
+            _argCacheRSP  = Vals[4];
+            _argCacheValid = true;
+        }
+
+        /// <summary>
+        /// the syscall handler returns (in a finally block).
+        /// </summary>
+        public void EndSyscall()
+        {
+            _argCacheValid = false;
+        }
+
         public List<WinEvent> WinEvents = new List<WinEvent>();
         public List<WinSemaphore> WinSemaphores = new List<WinSemaphore>();
         public List<WinRegistryNotification> RegistryNotifications = new List<WinRegistryNotification>();
@@ -1459,7 +1531,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (NewRsp < StackLow || (NewRsp + AllocationSize) > StackHigh)
                 {
-                    Emulator.TriggerEventMessage($"[-] InvokeException failed: insufficient stack space (RSP=0x{InitialRsp:X}, NewRSP=0x{NewRsp:X}, Need=0x{AllocationSize:X}).", LogFlags.Issues);
+                    if ((Emulator.Settings.Flags & LogFlags.Issues) != 0)
+                        Emulator.TriggerEventMessage($"[-] InvokeException failed: insufficient stack space (RSP=0x{InitialRsp:X}, NewRSP=0x{NewRsp:X}, Need=0x{AllocationSize:X}).", LogFlags.Issues);
                     return;
                 }
             }
@@ -1493,7 +1566,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (!Emulator.IsRegionMapped(NewRsp, AllocationSize))
                 {
-                    Emulator.TriggerEventMessage($"[-] InvokeException failed: exception stack frame is not mapped (NewRSP=0x{NewRsp:X}, Size=0x{AllocationSize:X}).", LogFlags.Issues);
+                    if ((Emulator.Settings.Flags & LogFlags.Issues) != 0)
+                        Emulator.TriggerEventMessage($"[-] InvokeException failed: exception stack frame is not mapped (NewRSP=0x{NewRsp:X}, Size=0x{AllocationSize:X}).", LogFlags.Issues);
                     return;
                 }
             }
@@ -1756,7 +1830,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (NewRsp < StackLow || (NewRsp + AllocationSize) > StackHigh)
                 {
-                    Emulator.TriggerEventMessage($"[-] DispatchNextUserApc failed: insufficient stack space (RSP=0x{InitialRsp:X}, NewRSP=0x{NewRsp:X}, Need=0x{AllocationSize:X}).", LogFlags.Issues);
+                    if ((Emulator.Settings.Flags & LogFlags.Issues) != 0)
+                        Emulator.TriggerEventMessage($"[-] DispatchNextUserApc failed: insufficient stack space (RSP=0x{InitialRsp:X}, NewRSP=0x{NewRsp:X}, Need=0x{AllocationSize:X}).", LogFlags.Issues);
                     return false;
                 }
             }
@@ -1777,7 +1852,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (!Emulator.IsRegionMapped(NewRsp, AllocationSize))
             {
-                Emulator.TriggerEventMessage($"[-] DispatchNextUserApc failed: APC stack frame is not mapped (NewRSP=0x{NewRsp:X}, Size=0x{AllocationSize:X}).", LogFlags.Issues);
+                if ((Emulator.Settings.Flags & LogFlags.Issues) != 0)
+                    Emulator.TriggerEventMessage($"[-] DispatchNextUserApc failed: APC stack frame is not mapped (NewRSP=0x{NewRsp:X}, Size=0x{AllocationSize:X}).", LogFlags.Issues);
                 return false;
             }
 
@@ -2134,7 +2210,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 Finished = true;
                 if (TriggerMessage)
-                    Emulator.TriggerEventMessage($"[+] Loaded {Module.Name} at 0x{Module.MappedBase:X}.", LogFlags.General);
+                    if ((Emulator.Settings.Flags & LogFlags.General) != 0)
+                        Emulator.TriggerEventMessage($"[+] Loaded {Module.Name} at 0x{Module.MappedBase:X}.", LogFlags.General);
             }
             finally
             {
@@ -5173,11 +5250,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
 
                 WindowsFileStream.InvalidateGuestPathCache();
-                Emulator.TriggerEventMessage($"[+] delete-on-close removed \"{Target.Path}\".", LogFlags.Syscall);
+                if ((Emulator.Settings.Flags & LogFlags.Syscall) != 0)
+                    Emulator.TriggerEventMessage($"[+] delete-on-close removed \"{Target.Path}\".", LogFlags.Syscall);
             }
             catch (Exception Ex)
             {
-                Emulator.TriggerEventMessage($"[!] delete-on-close failed for \"{Target.Path}\": {Ex.Message}", LogFlags.Syscall);
+                if ((Emulator.Settings.Flags & LogFlags.Syscall) != 0)
+                    Emulator.TriggerEventMessage($"[!] delete-on-close failed for \"{Target.Path}\": {Ex.Message}", LogFlags.Syscall);
             }
         }
     }

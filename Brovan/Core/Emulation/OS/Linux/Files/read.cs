@@ -87,7 +87,8 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
                     return;
                 }
 
-                Instance.TriggerEventMessage($"[!] Special path handler not set for {FileDesc.Path}.", LogFlags.Important);
+                if ((Instance.Settings.Flags & LogFlags.Important) != 0)
+                    Instance.TriggerEventMessage($"[!] Special path handler not set for {FileDesc.Path}.", LogFlags.Important);
                 Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENODEV);
                 return;
             }

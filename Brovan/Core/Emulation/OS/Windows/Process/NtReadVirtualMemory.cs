@@ -50,7 +50,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                     if (Instance.IsRegionFreed(Buffer, true))
                     {
-                        Instance.TriggerEventMessage($"[!!] Tried reading from a freed buffer at 0x{Buffer:X} while using NtReadVirtualMemory.", LogFlags.Issues);
+                        if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
+                            Instance.TriggerEventMessage($"[!!] Tried reading from a freed buffer at 0x{Buffer:X} while using NtReadVirtualMemory.", LogFlags.Issues);
                         return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
                     }
 
@@ -96,7 +97,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (!Instance.WriteMemory(BufferPtr, Instance.WinHelper.GenerateRandomData((int)NumberOfBytesToRead))) // generate random data?
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                    Instance.TriggerEventMessage($"[+] The emulated process tried to read the memory of process \"{Process.Name}\", random data was generated for it.", LogFlags.Syscall);
+                    if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                        Instance.TriggerEventMessage($"[+] The emulated process tried to read the memory of process \"{Process.Name}\", random data was generated for it.", LogFlags.Syscall);
                     return NTSTATUS.STATUS_SUCCESS;
                 }
             }

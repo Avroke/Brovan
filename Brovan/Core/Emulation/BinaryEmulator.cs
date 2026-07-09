@@ -457,7 +457,22 @@ namespace Brovan.Core.Emulation
         private bool SchedulerRefreshRequested;
         internal bool EscapeScheduler;
 
-        internal EmulatedThread CurrentThread => CurrentThreadId == -1 || !Threads.TryGetValue((uint)CurrentThreadId, out EmulatedThread thread) ? null : thread;
+        private EmulatedThread _currentThreadCache;
+
+        internal EmulatedThread CurrentThread
+        {
+            get
+            {
+                int tid = CurrentThreadId;
+                if (tid == -1) return null;
+                if (_currentThreadCache != null && (int)_currentThreadCache.ThreadId == tid)
+                    return _currentThreadCache;
+                if (Threads.TryGetValue((uint)tid, out EmulatedThread t))
+                { _currentThreadCache = t; return t; }
+                _currentThreadCache = null;
+                return null;
+            }
+        }
 
         internal TGuest GetGuest<TGuest>() where TGuest : class, IGuestEnvironment
         {
@@ -628,7 +643,8 @@ namespace Brovan.Core.Emulation
         internal void TriggerDebugMessage(string Message)
         {
             if (Debug)
-                TriggerEventMessage($"[DBG] {Message}", LogFlags.General);
+                if ((Settings.Flags & LogFlags.General) != 0)
+                    TriggerEventMessage($"[DBG] {Message}", LogFlags.General);
         }
 
         /// <summary>
@@ -641,11 +657,13 @@ namespace Brovan.Core.Emulation
 
             try
             {
-                TriggerEventMessage($"[DBG] {MessageFactory()}", LogFlags.General);
+                if ((Settings.Flags & LogFlags.General) != 0)
+                    TriggerEventMessage($"[DBG] {MessageFactory()}", LogFlags.General);
             }
             catch (Exception ex)
             {
-                TriggerEventMessage($"[DBG] debug message failed: {ex.GetType().Name}: {ex.Message}", LogFlags.General);
+                if ((Settings.Flags & LogFlags.General) != 0)
+                    TriggerEventMessage($"[DBG] debug message failed: {ex.GetType().Name}: {ex.Message}", LogFlags.General);
             }
         }
 
@@ -1420,7 +1438,8 @@ namespace Brovan.Core.Emulation
             LinuxGuest Linux = GetGuest<LinuxGuest>();
             if (Linux != null && !Linux.Helper.CpuidEnabled)
             {
-                TriggerEventMessage($"[!] CPUID instruction was blocked by arch_prctl at 0x{IP:X}.", LogFlags.CPUID | LogFlags.Issues);
+                if ((Settings.Flags & (LogFlags.CPUID | LogFlags.Issues)) != 0)
+                    TriggerEventMessage($"[!] CPUID instruction was blocked by arch_prctl at 0x{IP:X}.", LogFlags.CPUID | LogFlags.Issues);
                 return true;
             }
 
@@ -1559,7 +1578,8 @@ namespace Brovan.Core.Emulation
                 uint visibleEbx = ReadVisibleEbx();
                 uint visibleEcx = ReadVisibleEcx();
                 uint visibleEdx = ReadVisibleEdx();
-                TriggerEventMessage($"[+] CPUID instruction was executed with the leaf 0x{Leaf:X}, subleaf 0x{SubLeaf:X} at 0x{IP:X}. => EAX=0x{visibleEax:X} EBX=0x{visibleEbx:X} ECX=0x{visibleEcx:X} EDX=0x{visibleEdx:X}", LogFlags.CPUID);
+                if ((Settings.Flags & LogFlags.CPUID) != 0)
+                    TriggerEventMessage($"[+] CPUID instruction was executed with the leaf 0x{Leaf:X}, subleaf 0x{SubLeaf:X} at 0x{IP:X}. => EAX=0x{visibleEax:X} EBX=0x{visibleEbx:X} ECX=0x{visibleEcx:X} EDX=0x{visibleEdx:X}", LogFlags.CPUID);
                 return true;
             }
             catch
@@ -1595,7 +1615,8 @@ namespace Brovan.Core.Emulation
                 WriteRegister32(Registers.UC_X86_REG_EDX, (uint)(ticks >> 32));
             }
 
-            TriggerEventMessage($"[+] RDTSC Instruction Executed at 0x{IP:X}.", LogFlags.RDTSC);
+            if ((Settings.Flags & LogFlags.RDTSC) != 0)
+                TriggerEventMessage($"[+] RDTSC Instruction Executed at 0x{IP:X}.", LogFlags.RDTSC);
             StopAfterSyntheticInstruction(IP + 2);
         }
 
@@ -1618,31 +1639,14 @@ namespace Brovan.Core.Emulation
                 WriteRegister32(Registers.UC_X86_REG_ECX, (uint)CurrentThreadId);
             }
 
-            TriggerEventMessage($"[+] RDTSCP Instruction Executed at 0x{IP:X}.", LogFlags.RDTSCP);
+            if ((Settings.Flags & LogFlags.RDTSCP) != 0)
+                TriggerEventMessage($"[+] RDTSCP Instruction Executed at 0x{IP:X}.", LogFlags.RDTSCP);
             StopAfterSyntheticInstruction(IP + 3);
         }
 
         internal ulong AllocateThreadStack(ulong StackSize)
         {
-            ulong StackBase = MapUniqueAddress(StackSize, MemoryProtection.ReadWrite);
-            if (StackBase != 0)
-            {
-                ulong Remaining = StackSize;
-                ulong Address = StackBase;
-                while (Remaining >= 8)
-                {
-                    _emulator.WriteMemory(Address, 0UL, 8);
-                    Address += 8;
-                    Remaining -= 8;
-                }
-                while (Remaining > 0)
-                {
-                    _emulator.WriteMemory(Address, (byte)0, 1);
-                    Address++;
-                    Remaining--;
-                }
-            }
-            return StackBase;
+            return MapUniqueAddress(StackSize, MemoryProtection.ReadWrite);
         }
 
         internal ulong BuildInitialContext(ulong RIP, ulong RSP, ulong RCX = 0, ulong RDX = 0, uint Flags = 0x00100000 | 0x00000001 | 0x00000002)
@@ -1736,15 +1740,12 @@ namespace Brovan.Core.Emulation
 
         private void SwitchToThread(int ThreadId)
         {
-            if (!Threads.ContainsKey((uint)ThreadId))
+            if (!Threads.TryGetValue((uint)ThreadId, out EmulatedThread next))
                 return;
-
-            EmulatedThread next = Threads[(uint)ThreadId];
-
-            if (CurrentThread != null)
-                SaveContext(CurrentThread);
-
+            EmulatedThread cur = _currentThreadCache;
+            if (cur != null) SaveContext(cur);
             CurrentThreadId = ThreadId;
+            _currentThreadCache = next;
             LoadContext(next);
         }
 
@@ -2013,7 +2014,8 @@ namespace Brovan.Core.Emulation
         {
             if (Debug && Thread != null)
             {
-                TriggerDebugMessage($"scheduler: wait satisfied tid={Thread.ThreadId} index={Thread.WaitSatisfiedIndex} timedOut={Thread.WaitTimedOut}");
+                if (Debug)
+                    TriggerDebugMessage($"scheduler: wait satisfied tid={Thread.ThreadId} index={Thread.WaitSatisfiedIndex} timedOut={Thread.WaitTimedOut}");
             }
 
             Guest.OnThreadWaitSatisfied(this, Thread);
@@ -2040,7 +2042,8 @@ namespace Brovan.Core.Emulation
                 if (Thread.State == EmulatedThreadState.Suspended && Thread.SuspendCount == 0)
                 {
                     if (Debug)
-                        TriggerDebugMessage($"scheduler: resumed suspended tid={Thread.ThreadId}");
+                        if (Debug)
+                            TriggerDebugMessage($"scheduler: resumed suspended tid={Thread.ThreadId}");
 
                     Thread.State = EmulatedThreadState.Ready;
                     Changed = true;
@@ -2207,7 +2210,8 @@ namespace Brovan.Core.Emulation
             }
 
             if (Debug)
-                TriggerDebugMessage($"scheduler: rebuilt queues live={ThreadOrder.Count} queued={InQueue.Count} tick={SchedulerTick} work={SchedulerWorkTick}");
+                if (Debug)
+                    TriggerDebugMessage($"scheduler: rebuilt queues live={ThreadOrder.Count} queued={InQueue.Count} tick={SchedulerTick} work={SchedulerWorkTick}");
         }
 
         public bool RunMlfqScheduler(uint BaseQuantumInstructions = 200000, int Levels = 4, ulong MaxTotalInstructions = 0, uint MaxSlices = 0, long AgingThresholdSlices = 50)
@@ -2249,7 +2253,8 @@ namespace Brovan.Core.Emulation
             bool WakeupScanRequired = true;
 
             if (Debug)
-                TriggerDebugMessage($"scheduler: start threads={ThreadOrder.Count} levels={Levels} baseQuantum={BaseQuantumInstructions} maxInstructions={MaxTotalInstructions} maxSlices={MaxSlices}");
+                if (Debug)
+                    TriggerDebugMessage($"scheduler: start threads={ThreadOrder.Count} levels={Levels} baseQuantum={BaseQuantumInstructions} maxInstructions={MaxTotalInstructions} maxSlices={MaxSlices}");
 
             RebuildMlfqReadyQueues(ReadyQueues, InQueue, Levels, SchedulerTick, SchedulerWorkTick, AgingThresholdBudget, 1);
             SchedulerRefreshRequested = false;
@@ -2271,7 +2276,8 @@ namespace Brovan.Core.Emulation
                     if (ThreadOrderChanged)
                     {
                         if (Debug)
-                            TriggerDebugMessage($"scheduler: thread list changed old={KnownThreadOrderCount} new={ThreadOrder.Count}");
+                            if (Debug)
+                                TriggerDebugMessage($"scheduler: thread list changed old={KnownThreadOrderCount} new={ThreadOrder.Count}");
                         EnsureMlfqRunnableThreadsEnqueued(ReadyQueues, InQueue, Levels, SchedulerTick);
                         KnownThreadOrderCount = ThreadOrder.Count;
                     }
@@ -2279,7 +2285,8 @@ namespace Brovan.Core.Emulation
                     if (WakeupScanRequired || SchedulerRefreshRequested)
                     {
                         if (Debug)
-                            TriggerDebugMessage($"scheduler: wakeup scan required={WakeupScanRequired} refresh={SchedulerRefreshRequested} tick={SchedulerTick}");
+                            if (Debug)
+                                TriggerDebugMessage($"scheduler: wakeup scan required={WakeupScanRequired} refresh={SchedulerRefreshRequested} tick={SchedulerTick}");
 
                         UpdateMlfqWakeups(ReadyQueues, InQueue, Levels, SchedulerTick);
                         KnownThreadOrderCount = ThreadOrder.Count;
@@ -2302,14 +2309,16 @@ namespace Brovan.Core.Emulation
                         if (!HasLiveMlfqThread())
                         {
                             if (Debug)
-                                TriggerDebugMessage($"scheduler: finished no live threads total={Total} slices={Slices}");
+                                if (Debug)
+                                    TriggerDebugMessage($"scheduler: finished no live threads total={Total} slices={Slices}");
                             return true;
                         }
 
                         if (TryGetNextWaitSleepMs(out int SleepMs, int.MaxValue))
                         {
                             if (Debug)
-                                TriggerDebugMessage($"scheduler: no runnable thread, advancing guest time by {SleepMs}ms");
+                                if (Debug)
+                                    TriggerDebugMessage($"scheduler: no runnable thread, advancing guest time by {SleepMs}ms");
                             if (HasActiveGetMessageWait())
                                 Thread.Sleep(Math.Min(SleepMs, 16));
                             AdvanceEmulatedTimeMilliseconds(SleepMs, AdvanceTimestampCounter: true);
@@ -2327,7 +2336,8 @@ namespace Brovan.Core.Emulation
                         }
 
                         if (Debug)
-                            TriggerDebugMessage($"scheduler: no runnable thread and no pending wakeup total={Total} slices={Slices}");
+                            if (Debug)
+                                TriggerDebugMessage($"scheduler: no runnable thread and no pending wakeup total={Total} slices={Slices}");
                         return true;
                     }
                 }
@@ -2335,9 +2345,11 @@ namespace Brovan.Core.Emulation
                 if (CurrentThreadId != (int)ImmaBeEmulatedOOO.ThreadId)
                 {
                     if ((Settings.Flags & LogFlags.General) != 0)
-                        TriggerEventMessage($"[!] Switching to thread with ID {ImmaBeEmulatedOOO.ThreadId}", LogFlags.General);
+                        if ((Settings.Flags & LogFlags.General) != 0)
+                            TriggerEventMessage($"[!] Switching to thread with ID {ImmaBeEmulatedOOO.ThreadId}", LogFlags.General);
                     if (Debug)
-                        TriggerDebugMessage($"scheduler: switch {CurrentThreadId} -> {ImmaBeEmulatedOOO.ThreadId} queue={SelectedLevel} state={ImmaBeEmulatedOOO.State} rip=0x{ImmaBeEmulatedOOO.Context?.RIP ?? 0:X}");
+                        if (Debug)
+                            TriggerDebugMessage($"scheduler: switch {CurrentThreadId} -> {ImmaBeEmulatedOOO.ThreadId} queue={SelectedLevel} state={ImmaBeEmulatedOOO.State} rip=0x{ImmaBeEmulatedOOO.Context?.RIP ?? 0:X}");
                 }
 
                 SwitchToThread((int)ImmaBeEmulatedOOO.ThreadId);
@@ -2351,7 +2363,8 @@ namespace Brovan.Core.Emulation
 
                 if (Debug && (Slices < 64 || (Slices & 0xFF) == 0))
                 {
-                    TriggerDebugMessage($"scheduler: run tid={ImmaBeEmulatedOOO.ThreadId} queue={SelectedLevel} quantum={QuantumInstructions} priority={ImmaBeEmulatedOOO.EffectivePriority} boost={ImmaBeEmulatedOOO.DynamicBoost} spin={ImmaBeEmulatedOOO.SpinWaitScore} rip=0x{RipBeforeSlice:X}");
+                    if (Debug)
+                        TriggerDebugMessage($"scheduler: run tid={ImmaBeEmulatedOOO.ThreadId} queue={SelectedLevel} quantum={QuantumInstructions} priority={ImmaBeEmulatedOOO.EffectivePriority} boost={ImmaBeEmulatedOOO.DynamicBoost} spin={ImmaBeEmulatedOOO.SpinWaitScore} rip=0x{RipBeforeSlice:X}");
                 }
                 bool State = false;
                 bool SliceRequestedRefresh = false;
@@ -2364,7 +2377,8 @@ namespace Brovan.Core.Emulation
                 catch (Exception ex)
                 {
                     if (Debug)
-                        TriggerDebugMessage($"scheduler: slice exception tid={ImmaBeEmulatedOOO.ThreadId} {ex.GetType().Name}: {ex.Message}");
+                        if (Debug)
+                            TriggerDebugMessage($"scheduler: slice exception tid={ImmaBeEmulatedOOO.ThreadId} {ex.GetType().Name}: {ex.Message}");
 
                     if (ImmaBeEmulatedOOO.State != EmulatedThreadState.Terminated)
                         ImmaBeEmulatedOOO.ExitCode = unchecked((int)(uint)ImmaBeEmulatedOOO.Context.RAX);
@@ -2384,7 +2398,8 @@ namespace Brovan.Core.Emulation
                 if (EscapeScheduler)
                 {
                     if (Debug)
-                        TriggerDebugMessage($"scheduler: escape requested after slice tid={ImmaBeEmulatedOOO.ThreadId}");
+                        if (Debug)
+                            TriggerDebugMessage($"scheduler: escape requested after slice tid={ImmaBeEmulatedOOO.ThreadId}");
 
                     EscapeScheduler = false;
                     return true;
@@ -2469,19 +2484,22 @@ namespace Brovan.Core.Emulation
 
                 if (Debug && (Slices <= 64 || (Slices & 0xFF) == 0 || ImmaBeEmulatedOOO.State != StateBeforeSlice || SliceRequestedRefresh || AdvancedEmulatedTime))
                 {
-                    TriggerDebugMessage($"scheduler: slice tid={ImmaBeEmulatedOOO.ThreadId} {StateBeforeSlice}->{ImmaBeEmulatedOOO.State} work={SchedulerSliceWork} total={Total} rip=0x{RipBeforeSlice:X}->0x{ImmaBeEmulatedOOO.Context?.RIP ?? 0:X} refresh={SliceRequestedRefresh} advancedTime={AdvancedEmulatedTime} boost={ImmaBeEmulatedOOO.DynamicBoost}");
+                    if (Debug)
+                        TriggerDebugMessage($"scheduler: slice tid={ImmaBeEmulatedOOO.ThreadId} {StateBeforeSlice}->{ImmaBeEmulatedOOO.State} work={SchedulerSliceWork} total={Total} rip=0x{RipBeforeSlice:X}->0x{ImmaBeEmulatedOOO.Context?.RIP ?? 0:X} refresh={SliceRequestedRefresh} advancedTime={AdvancedEmulatedTime} boost={ImmaBeEmulatedOOO.DynamicBoost}");
                 }
 
                 if (MaxTotalInstructions != 0 && Total >= MaxTotalInstructions)
                 {
                     if (Debug)
-                        TriggerDebugMessage($"scheduler: max instruction budget reached total={Total} slices={Slices}");
+                        if (Debug)
+                            TriggerDebugMessage($"scheduler: max instruction budget reached total={Total} slices={Slices}");
                     return true;
                 }
                 if (MaxSlices != 0 && Slices >= MaxSlices)
                 {
                     if (Debug)
-                        TriggerDebugMessage($"scheduler: max slice budget reached total={Total} slices={Slices}");
+                        if (Debug)
+                            TriggerDebugMessage($"scheduler: max slice budget reached total={Total} slices={Slices}");
                     return true;
                 }
             }
@@ -2523,7 +2541,8 @@ namespace Brovan.Core.Emulation
             }
 
             ulong Rip = ReadRegister(IPRegister);
-            TriggerEventMessage($"[-] Invalid memory {GetAction(Type)} related to the address 0x{Address:X} at 0x{Rip:X}.", LogFlags.Issues);
+            if ((Settings.Flags & LogFlags.Issues) != 0)
+                TriggerEventMessage($"[-] Invalid memory {GetAction(Type)} related to the address 0x{Address:X} at 0x{Rip:X}.", LogFlags.Issues);
 
             bool Continue = false;
             if (Settings.InvalidOperationsCallback != null)

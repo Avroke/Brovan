@@ -120,7 +120,8 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
             if (ApiNumber != 0)
             {
-                Instance.TriggerEventMessage($"CsrssPortHandler: Port=\"{Port?.Name}\", Api=0x{ApiNumber:X8}, Dll={DllIndex}, Index={ApiIndex}.", LogFlags.Syscall);
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"CsrssPortHandler: Port=\"{Port?.Name}\", Api=0x{ApiNumber:X8}, Dll={DllIndex}, Index={ApiIndex}.", LogFlags.Syscall);
             }
 
             if (ApiIndex == 0)
@@ -197,7 +198,8 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         {
             if (TryBuildDceRpcReply(Port, SendData, out byte[] RpcReply, Instance))
             {
-                Instance.TriggerEventMessage($"GenericRpcPort: Port=\"{Port?.Name}\", ReplyLength=0x{RpcReply.Length:X}.", LogFlags.Syscall);
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"GenericRpcPort: Port=\"{Port?.Name}\", ReplyLength=0x{RpcReply.Length:X}.", LogFlags.Syscall);
                 return RpcReply;
             }
 
@@ -430,7 +432,8 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
             Instance._emulator.WriteMemory(OutputPointer, ActivationContextData, 8);
             WriteU64(Reply, OffBaseSrvActCtxDataPointer, ActivationContextData);
-            Instance.TriggerEventMessage($"CsrssPortHandler: BaseSrvCreateActivationContext -> Data=0x{ActivationContextData:X}, Out=0x{OutputPointer:X}.", LogFlags.Syscall);
+            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                Instance.TriggerEventMessage($"CsrssPortHandler: BaseSrvCreateActivationContext -> Data=0x{ActivationContextData:X}, Out=0x{OutputPointer:X}.", LogFlags.Syscall);
             return true;
         }
 
@@ -475,7 +478,8 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             Instance._emulator.WriteMemory(ConnectionInfo, Data.Slice(0, WriteLength));
             WriteU32(Reply, OffClientConnectConnectionInfoSize, (uint)WriteLength);
 
-            Instance.TriggerEventMessage($"CsrssPortHandler: Connected server {ServerId}, ConnectionInfo=0x{ConnectionInfo:X}, Size=0x{WriteLength:X}.", LogFlags.Syscall);
+            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                Instance.TriggerEventMessage($"CsrssPortHandler: Connected server {ServerId}, ConnectionInfo=0x{ConnectionInfo:X}, Size=0x{WriteLength:X}.", LogFlags.Syscall);
         }
 
         private static void TryZeroCapturedBuffer(byte[] Reply, BinaryEmulator Instance, int PointerOffset, int SizeOffset)
@@ -532,7 +536,8 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             if (!IsEventLogPort(Port) || !TryBuildEventLogStub(Opnum, out byte[] Stub))
                 return BuildDceRpcFault(SendData, RpcOffset, 0x000006BAu);
 
-            Instance.TriggerEventMessage($"EventLogRpc: Opnum=0x{Opnum:X}, StubLength=0x{Stub.Length:X}.", LogFlags.Syscall);
+            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                Instance.TriggerEventMessage($"EventLogRpc: Opnum=0x{Opnum:X}, StubLength=0x{Stub.Length:X}.", LogFlags.Syscall);
             return BuildDceRpcResponse(SendData, RpcOffset, Stub);
         }
 

@@ -29,7 +29,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return Status;
                 }
 
-                Instance.TriggerEventMessage($"[+] NtOpenKey Running with the KeyPath: {KeyPath}", LogFlags.Syscall);
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[+] NtOpenKey Running with the KeyPath: {KeyPath}", LogFlags.Syscall);
 
                 WinHandle Handle = Instance.WinHelper.OpenRegistryKey(KeyPath, DesiredAccess);
                 if (Handle != null && Handle.Handle != 0)

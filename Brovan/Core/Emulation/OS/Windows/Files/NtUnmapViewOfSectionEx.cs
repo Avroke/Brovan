@@ -36,8 +36,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INVALID_ADDRESS;
 
             if (Flags == 0 && string.Equals(SyscallName, nameof(NtUnmapViewOfSection), StringComparison.Ordinal))
-                Instance.TriggerEventMessage($"[+] NtUnmapViewOfSection: Base=0x{BaseAddress:X}", LogFlags.Syscall);
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[+] NtUnmapViewOfSection: Base=0x{BaseAddress:X}", LogFlags.Syscall);
             else
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                 Instance.TriggerEventMessage($"[+] {SyscallName}: Base=0x{BaseAddress:X}, Flags=0x{Flags:X}.", LogFlags.Syscall);
 
             return NTSTATUS.STATUS_SUCCESS;

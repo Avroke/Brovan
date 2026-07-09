@@ -54,7 +54,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (CasingSizePtr != 0) Instance._emulator.WriteMemory(CasingSizePtr, CasingSize, 8);
                 if (CanWriteVer) Instance._emulator.WriteMemory(CurrentVerPtr, 0u);
 
-                Instance.TriggerEventMessage($"[+] NtInitializeNlsFiles: locale.nls -> 0x{addr:X} (0x{MapSize:X}), LCID=0x{LCID:X}, CasingSize=0x{CasingSize:X}", LogFlags.Syscall);
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[+] NtInitializeNlsFiles: locale.nls -> 0x{addr:X} (0x{MapSize:X}), LCID=0x{LCID:X}, CasingSize=0x{CasingSize:X}", LogFlags.Syscall);
 
                 return NTSTATUS.STATUS_SUCCESS;
             }
@@ -107,7 +108,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (CasingSizePtr != 0) Instance._emulator.WriteMemory(CasingSizePtr, CasingSize, 8);
                 if (CanWriteVer) Instance._emulator.WriteMemory(CurrentVerPtr, 0u);
 
-                Instance.TriggerEventMessage($"[+] NtInitializeNlsFiles (x86): locale.nls -> 0x{addr:X} (0x{MapSize:X}), LCID=0x{LCID:X}, CasingSize=0x{CasingSize:X}", LogFlags.Syscall);
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[+] NtInitializeNlsFiles (x86): locale.nls -> 0x{addr:X} (0x{MapSize:X}), LCID=0x{LCID:X}, CasingSize=0x{CasingSize:X}", LogFlags.Syscall);
 
                 return NTSTATUS.STATUS_SUCCESS;
             }

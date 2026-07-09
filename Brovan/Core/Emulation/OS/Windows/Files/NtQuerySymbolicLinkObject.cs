@@ -64,7 +64,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Out.MaximumLength >= RequiredBytes + 2)
                 Instance._emulator.WriteMemory(Out.Buffer + RequiredBytes, (ushort)0, 2);
 
-            Instance.TriggerEventMessage($"[+] NtQuerySymbolicLinkObject: Handle=0x{LinkHandle:X}, Target=\"{Target}\" (Len={RequiredBytes}).", LogFlags.Syscall);
+            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                Instance.TriggerEventMessage($"[+] NtQuerySymbolicLinkObject: Handle=0x{LinkHandle:X}, Target=\"{Target}\" (Len={RequiredBytes}).", LogFlags.Syscall);
 
             return NTSTATUS.STATUS_SUCCESS;
         }

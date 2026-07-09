@@ -60,7 +60,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance._emulator.WriteMemory(SecurityDescriptorPtr, SecurityDescriptor))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            Instance.TriggerEventMessage($"NtQuerySecurityObject: Handle=0x{Handle:X}, SecurityInformation=0x{SecurityInformation:X}, Length=0x{Length:X}.", LogFlags.Syscall);
+            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                Instance.TriggerEventMessage($"NtQuerySecurityObject: Handle=0x{Handle:X}, SecurityInformation=0x{SecurityInformation:X}, Length=0x{Length:X}.", LogFlags.Syscall);
             return NTSTATUS.STATUS_SUCCESS;
         }
 

@@ -565,21 +565,32 @@ namespace Brovan.Core.Emulation.Guests
 
                         if (CaptureSyscallHistory)
                             Instance.Syscalls.RecordSyscall(GuestOsKind.Windows, Abi, Syscall, HandlerName, Ctx.Args, Ctx.ReturnValue, Rip, IsImplemented, true);
-                        Instance.TriggerEventMessage($"[SYSCALL MANAGER] Syscall 0x{Syscall:X} handled, returned 0x{Ctx.ReturnValue:X}.", LogFlags.General);
+                        if ((Instance.Settings.Flags & LogFlags.General) != 0)
+                            Instance.TriggerEventMessage($"[SYSCALL MANAGER] Syscall 0x{Syscall:X} handled, returned 0x{Ctx.ReturnValue:X}.", LogFlags.General);
                         return true;
                     }
                 }
 
                 if (IsImplemented)
                 {
-                    NTSTATUS Status = Entry.Handler.Handle(Instance);
+                    Instance.WinHelper.BeginSyscall();
+                    NTSTATUS Status;
+                    try
+                    {
+                        Status = Entry.Handler.Handle(Instance);
+                    }
+                    finally
+                    {
+                        Instance.WinHelper.EndSyscall();
+                    }
                     if (Instance.Settings.SyscallNotificationCallback != null)
                     {
                         Instance.Settings.SyscallNotificationCallback.Invoke(Instance.ReadRegister(Instance.IPRegister), Syscall, HandlerName, (ulong)(uint)Status);
                     }
                     else
                     {
-                        Instance.TriggerEventMessage($"[+] Syscall {HandlerName} (0x{Syscall:X}) executed, returned {Status}.", LogFlags.General);
+                        if ((Instance.Settings.Flags & LogFlags.General) != 0)
+                            Instance.TriggerEventMessage($"[+] Syscall {HandlerName} (0x{Syscall:X}) executed, returned {Status}.", LogFlags.General);
                     }
 
                     if (CaptureSyscallHistory)
@@ -599,7 +610,8 @@ namespace Brovan.Core.Emulation.Guests
                     }
                     else
                     {
-                        Instance.TriggerEventMessage($"[!] Syscall 0x{Syscall:X} not implemented. returned {Instance.WinUnimplemented}.", LogFlags.General);
+                        if ((Instance.Settings.Flags & LogFlags.General) != 0)
+                            Instance.TriggerEventMessage($"[!] Syscall 0x{Syscall:X} not implemented. returned {Instance.WinUnimplemented}.", LogFlags.General);
                     }
 
                     if (CaptureSyscallHistory)
@@ -617,7 +629,8 @@ namespace Brovan.Core.Emulation.Guests
             catch (Exception ex)
             {
                 Utils.LogError($"[-] [TryHandleWinSyscall] ERROR: {ex.Message}\nStackTrace:\n\n{ex.StackTrace}");
-                Instance.TriggerEventMessage($"[-] Error while handling a Windows Syscall: {ex.Message}", LogFlags.Issues);
+                if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
+                    Instance.TriggerEventMessage($"[-] Error while handling a Windows Syscall: {ex.Message}", LogFlags.Issues);
                 return true;
             }
         }
@@ -681,7 +694,8 @@ namespace Brovan.Core.Emulation.Guests
                     QueueUserModeException(Instance, NTSTATUS.STATUS_BREAKPOINT);
                     return true;
                 case 0x29:
-                    Instance.TriggerEventMessage($"[!] The Emulated Program asked to Fast-Fail at 0x{Instance.ReadRegister(Instance.IPRegister):X}.", LogFlags.General);
+                    if ((Instance.Settings.Flags & LogFlags.General) != 0)
+                        Instance.TriggerEventMessage($"[!] The Emulated Program asked to Fast-Fail at 0x{Instance.ReadRegister(Instance.IPRegister):X}.", LogFlags.General);
                     Instance.StopEmulation();
                     return true;
                 case 0x2E:

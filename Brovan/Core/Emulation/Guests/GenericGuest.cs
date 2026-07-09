@@ -153,30 +153,35 @@ namespace Brovan.Core.Emulation.Guests
 
         public bool TryHandleSyscall(BinaryEmulator Instance)
         {
-            Instance.TriggerEventMessage($"[!] Generic guest hit a syscall at 0x{Instance._emulator.ReadRegister(ProgramCounterRegister):X}.", LogFlags.Issues);
+            if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
+                Instance.TriggerEventMessage($"[!] Generic guest hit a syscall at 0x{Instance._emulator.ReadRegister(ProgramCounterRegister):X}.", LogFlags.Issues);
             return false;
         }
 
         public bool TryHandleInterrupt(BinaryEmulator Instance, uint InterruptNumber)
         {
-            Instance.TriggerEventMessage($"[!] Generic guest hit interrupt 0x{InterruptNumber:X} at 0x{Instance._emulator.ReadRegister(ProgramCounterRegister):X}.", LogFlags.Issues);
+            if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
+                Instance.TriggerEventMessage($"[!] Generic guest hit interrupt 0x{InterruptNumber:X} at 0x{Instance._emulator.ReadRegister(ProgramCounterRegister):X}.", LogFlags.Issues);
             return false;
         }
 
         public void HandlePrivilegedInstruction(BinaryEmulator Instance)
         {
-            Instance.TriggerEventMessage($"[!] Generic guest executed a privileged instruction at 0x{Instance._emulator.ReadRegister(ProgramCounterRegister):X}.", LogFlags.Issues);
+            if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
+                Instance.TriggerEventMessage($"[!] Generic guest executed a privileged instruction at 0x{Instance._emulator.ReadRegister(ProgramCounterRegister):X}.", LogFlags.Issues);
         }
 
         public void HandleInvalidInstruction(BinaryEmulator Instance)
         {
-            Instance.TriggerEventMessage($"[!] Generic guest executed an invalid instruction at 0x{Instance._emulator.ReadRegister(ProgramCounterRegister):X}.", LogFlags.Issues);
+            if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
+                Instance.TriggerEventMessage($"[!] Generic guest executed an invalid instruction at 0x{Instance._emulator.ReadRegister(ProgramCounterRegister):X}.", LogFlags.Issues);
             Instance.StopEmulation();
         }
 
         public bool HandleInvalidMemory(BinaryEmulator Instance, BackendMemoryAccessType Type, ulong Address, uint Size, ulong Value)
         {
-            Instance.TriggerEventMessage($"[!] Generic guest {Type} at 0x{Address:X} (size {Size}) from 0x{Instance._emulator.ReadRegister(ProgramCounterRegister):X}.", LogFlags.Issues);
+            if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
+                Instance.TriggerEventMessage($"[!] Generic guest {Type} at 0x{Address:X} (size {Size}) from 0x{Instance._emulator.ReadRegister(ProgramCounterRegister):X}.", LogFlags.Issues);
             return false;
         }
 

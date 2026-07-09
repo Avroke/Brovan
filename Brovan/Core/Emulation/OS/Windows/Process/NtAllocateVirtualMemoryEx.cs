@@ -162,7 +162,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 bool Reserve = (AllocationTypeValue & 0x2000UL) != 0; // MEM_RESERVE
                 bool Commit = (AllocationTypeValue & 0x1000UL) != 0;  // MEM_COMMIT
 
-                Instance.TriggerEventMessage($"[+] NtAllocateVirtualMemoryEx (BaseAddress: 0x{BaseAddress:X}, RegionSize: {RegionSize}, Commit: {Commit}, Reserve: {Reserve})", LogFlags.Syscall);
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[+] NtAllocateVirtualMemoryEx (BaseAddress: 0x{BaseAddress:X}, RegionSize: {RegionSize}, Commit: {Commit}, Reserve: {Reserve})", LogFlags.Syscall);
 
                 if (!Reserve && !Commit)
                 {
@@ -269,7 +270,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 bool Reserve = (AllocationTypeValue & 0x2000U) != 0;
                 bool Commit = (AllocationTypeValue & 0x1000U) != 0;
 
-                Instance.TriggerEventMessage($"[+] NtAllocateVirtualMemoryEx (BaseAddress: 0x{BaseAddress:X}, RegionSize: {RegionSize}, Commit: {Commit}, Reserve: {Reserve})", LogFlags.Syscall);
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[+] NtAllocateVirtualMemoryEx (BaseAddress: 0x{BaseAddress:X}, RegionSize: {RegionSize}, Commit: {Commit}, Reserve: {Reserve})", LogFlags.Syscall);
 
                 if (!Reserve && !Commit)
                     return NTSTATUS.STATUS_INVALID_PARAMETER;

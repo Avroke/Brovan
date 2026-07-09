@@ -45,7 +45,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (SectionSizePtr != 0)
                     Instance._emulator.WriteMemory(SectionSizePtr, (uint)Size);
 
-                Instance.TriggerEventMessage($"[+] NtGetNlsSectionPtr: C_{SectionData}.NLS -> 0x{Address:X} (0x{Size:X}).", LogFlags.Syscall);
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[+] NtGetNlsSectionPtr: C_{SectionData}.NLS -> 0x{Address:X} (0x{Size:X}).", LogFlags.Syscall);
                 return NTSTATUS.STATUS_SUCCESS;
             }
             else
@@ -88,7 +89,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (SectionSizePtr != 0)
                     Instance._emulator.WriteMemory(SectionSizePtr, (uint)Size);
 
-                Instance.TriggerEventMessage($"[+] NtGetNlsSectionPtr (x86): C_{SectionData}.NLS -> 0x{Address:X} (0x{Size:X}).", LogFlags.Syscall);
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[+] NtGetNlsSectionPtr (x86): C_{SectionData}.NLS -> 0x{Address:X} (0x{Size:X}).", LogFlags.Syscall);
                 return NTSTATUS.STATUS_SUCCESS;
             }
         }

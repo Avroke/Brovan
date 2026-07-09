@@ -42,7 +42,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance._emulator.WriteMemory(LinkHandlePtr, Handle.Handle))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            Instance.TriggerEventMessage($"[+] NtOpenSymbolicLinkObject: Name=\"{Name}\", FullName=\"{FullName}\", Target=\"{Target}\", Handle=0x{Handle.Handle:X}.", LogFlags.Syscall);
+            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                Instance.TriggerEventMessage($"[+] NtOpenSymbolicLinkObject: Name=\"{Name}\", FullName=\"{FullName}\", Target=\"{Target}\", Handle=0x{Handle.Handle:X}.", LogFlags.Syscall);
 
             return NTSTATUS.STATUS_SUCCESS;
         }

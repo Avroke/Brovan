@@ -14,7 +14,8 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
                 return;
             }
 
-            Instance.TriggerEventMessage($"[openat] Opening file with path {PathValue}", LogFlags.Syscall);
+            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                Instance.TriggerEventMessage($"[openat] Opening file with path {PathValue}", LogFlags.Syscall);
 
             int DirFd = unchecked((int)Context.Arg0);
             string ResolvedPath = ResolveGuestPath(Helper, DirFd, PathValue, out LinuxErrno Error);

@@ -31,8 +31,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 bool IsErrorSeverity = (((uint)ErrorStatus >> 30) & 0x3) >= 2;
                 if (ValidResponseOptions == 6 && IsErrorSeverity)
-                    Instance.TriggerEventMessage($"[!] NtRaiseHardError requested ShutdownSystem (Normally causes BSOD). Status={ErrorStatus} (0x{(uint)ErrorStatus:X8}){FirstParameter}", LogFlags.Issues);
+                    if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
+                        Instance.TriggerEventMessage($"[!] NtRaiseHardError requested ShutdownSystem (Normally causes BSOD). Status={ErrorStatus} (0x{(uint)ErrorStatus:X8}){FirstParameter}", LogFlags.Issues);
                 else
+                    if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
                     Instance.TriggerEventMessage($"[-] NtRaiseHardError -> {ErrorStatus} (0x{(uint)ErrorStatus:X8}){FirstParameter}", LogFlags.Issues);
 
                 return NTSTATUS.STATUS_SUCCESS;
@@ -61,7 +63,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     FirstParameter = $", Parameter0=0x{Parameter:X8}";
                 }
 
-                Instance.TriggerEventMessage($"[-] NtRaiseHardError -> {ErrorStatus} (0x{(uint)ErrorStatus:X8}){FirstParameter}", LogFlags.Issues);
+                if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
+                    Instance.TriggerEventMessage($"[-] NtRaiseHardError -> {ErrorStatus} (0x{(uint)ErrorStatus:X8}){FirstParameter}", LogFlags.Issues);
 
                 return NTSTATUS.STATUS_SUCCESS;
             }

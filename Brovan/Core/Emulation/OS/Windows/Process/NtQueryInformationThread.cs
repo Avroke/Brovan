@@ -192,7 +192,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     }
 
                 default:
-                    Instance.TriggerEventMessage($"[!] NtQueryInformationThread: Unsupported class=0x{ThreadInformationClass:X}, len=0x{ThreadInformationLength:X}", LogFlags.Issues);
+                    if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
+                        Instance.TriggerEventMessage($"[!] NtQueryInformationThread: Unsupported class=0x{ThreadInformationClass:X}, len=0x{ThreadInformationLength:X}", LogFlags.Issues);
                     return NTSTATUS.STATUS_NOT_SUPPORTED;
             }
         }

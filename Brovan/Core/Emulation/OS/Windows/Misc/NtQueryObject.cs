@@ -48,7 +48,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 case OBJECT_INFORMATION_CLASS.ObjectHandleFlagInformation:
                     return QueryHandleFlagInformation(Instance, Handle, ObjectInformation, ObjectInformationLength, ReturnLength);
                 default:
-                    Instance.TriggerEventMessage($"[!] NtQueryObject: {ObjectInformationClass} (0x{(uint)ObjectInformationClass:X}) not implemented.", LogFlags.Syscall);
+                    if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                        Instance.TriggerEventMessage($"[!] NtQueryObject: {ObjectInformationClass} (0x{(uint)ObjectInformationClass:X}) not implemented.", LogFlags.Syscall);
                     return NTSTATUS.STATUS_INVALID_INFO_CLASS;
             }
         }

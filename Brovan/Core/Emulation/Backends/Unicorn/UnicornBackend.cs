@@ -92,6 +92,11 @@ namespace Brovan.Core.Emulation
         public byte ReadRegisterByte(int register)
             => Inner.ReadRegisterByte(register);
 
+        public bool ReadRegisterBatch(int[] registers, ulong[] values, int count)
+            => Inner.ReadRegisterBatch(registers, values, count);
+        public bool WriteRegisterBatch(int[] registers, ulong[] values, int count)
+            => Inner.WriteRegisterBatch(registers, values, count);
+
         public CPUFlags GetCPUFlags() => Inner.GetCPUFlags();
         public bool SetCPUFlags(CPUFlags flags) => Inner.SetCPUFlags(flags);
 

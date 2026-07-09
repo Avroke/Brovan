@@ -67,7 +67,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 case FILE_INFORMATION_CLASS.FileEndOfFileInformation:
                     return HandleFileSizeInformation(Instance, FileHandle, FileObj, IoStatusBlock, FileInformation, Length, true);
                 default:
-                    Instance.TriggerEventMessage($"[!] NtSetInformationFile: FileInformationClass {InfoClass} (0x{FileInformationClass:X}) not implemented.", LogFlags.Syscall);
+                    if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                        Instance.TriggerEventMessage($"[!] NtSetInformationFile: FileInformationClass {InfoClass} (0x{FileInformationClass:X}) not implemented.", LogFlags.Syscall);
                     Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_INFO_CLASS, 0);
                     return NTSTATUS.STATUS_INVALID_INFO_CLASS;
             }
@@ -191,7 +192,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             UpdateOpenFilePaths(Instance, SourcePath, TargetPath, FileObj.Directory);
 
             Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, Length);
-            Instance.TriggerEventMessage($"[+] NtSetInformationFile: Renamed '{SourcePath}' -> '{TargetPath}'.", LogFlags.Syscall);
+            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                Instance.TriggerEventMessage($"[+] NtSetInformationFile: Renamed '{SourcePath}' -> '{TargetPath}'.", LogFlags.Syscall);
             return NTSTATUS.STATUS_SUCCESS;
         }
 

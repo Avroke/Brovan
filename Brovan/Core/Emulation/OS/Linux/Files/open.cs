@@ -532,29 +532,45 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
                 return false;
 
             Span<byte> Bytes = stackalloc byte[PATH_MAX];
-            Span<byte> CurrentByte = stackalloc byte[1];
             int Count = 0;
-            
-            // the reason we read byte-by-byte is because unicorn will fail if we read from a region beyond what is allocated, so we can't read in a bulk.
-            // it took at maximum 100 microseconds when testing with random samples.
-            for (int i = 0; i < PATH_MAX; i++)
+            ulong Cursor = Address;
+
+            while (Count < PATH_MAX)
             {
-                ulong Current = Address + (ulong)i;
-                if (!Instance.IsRegionMapped(Current, 1) || !Instance.ReadMemory(Current, CurrentByte))
+                if (!Instance.TryFindOverlappingMemoryRegion(Cursor, 1, out MemoryRegion Region))
                     break;
 
-                byte b = CurrentByte[0];
-                if (b == 0)
+                ulong RegionEnd = Region.BaseAddress + Region.Size;
+                // Read as much as fits in (a) the rest of this region and
+                // (b) the rest of our buffer.
+                ulong AvailInRegion = RegionEnd - Cursor;
+                int AvailInBuffer = PATH_MAX - Count;
+                int Want = (int)Math.Min(AvailInRegion, (ulong)AvailInBuffer);
+                if (Want <= 0)
+                    break;
+
+                Span<byte> Slice = Bytes.Slice(Count, Want);
+                if (!Instance.ReadMemory(Cursor, Slice))
+                    break;
+
+                // Scan the chunk for the null terminator.
+                int NullIdx = Slice.IndexOf((byte)0);
+                if (NullIdx >= 0)
                 {
-                    Value = Encoding.ASCII.GetString(Bytes.Slice(0, Count));
-                    return true;
+                    Count += NullIdx;
+                    Cursor += (ulong)NullIdx;
+                    break;
                 }
 
-                Bytes[Count++] = b;
+                Count += Want;
+                Cursor += (ulong)Want;
             }
 
+            if (Count == 0)
+                return false;
+
             Value = Encoding.ASCII.GetString(Bytes.Slice(0, Count));
-            return Count > 0;
+            return true;
         }
 
         internal static string NormalizeLinuxPath(string PathValue, string BaseDirectory = null)

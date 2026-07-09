@@ -78,7 +78,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (WarnWrite(FileObj.Path, out string WarnData))
             {
-                Instance.TriggerEventMessage($"[!] The emulated program tried to write to {WarnData}", LogFlags.Suspicious);
+                if ((Instance.Settings.Flags & LogFlags.Suspicious) != 0)
+                    Instance.TriggerEventMessage($"[!] The emulated program tried to write to {WarnData}", LogFlags.Suspicious);
             }
 
             Span<byte> Incoming = Length == 0 ? Span<byte>.Empty : Instance.WinHelper.ReadMemorySpan(BufferPtr, Length);
@@ -122,7 +123,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, (ulong)Incoming.Length);
 
-            Instance.TriggerEventMessage($"[+] NtWriteFile: File=0x{FileHandle:X}, Offset=0x{Offset:X}, Wrote=0x{Incoming.Length:X}.", LogFlags.Syscall);
+            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                Instance.TriggerEventMessage($"[+] NtWriteFile: File=0x{FileHandle:X}, Offset=0x{Offset:X}, Wrote=0x{Incoming.Length:X}.", LogFlags.Syscall);
 
             return NTSTATUS.STATUS_SUCCESS;
         }

@@ -96,7 +96,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance._emulator.WriteMemory(SectionHandlePtr, (ulong)Handle.Handle))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            Instance.TriggerEventMessage($"[+] NtCreateSection: Handle=0x{Handle.Handle:X}, Size=0x{Size:X}, Attr=0x{AllocationAttributes:X}, Prot=0x{SectionPageProtection:X}, File=0x{FileHandle:X}.", LogFlags.Syscall);
+            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                Instance.TriggerEventMessage($"[+] NtCreateSection: Handle=0x{Handle.Handle:X}, Size=0x{Size:X}, Attr=0x{AllocationAttributes:X}, Prot=0x{SectionPageProtection:X}, File=0x{FileHandle:X}.", LogFlags.Syscall);
 
             return NTSTATUS.STATUS_SUCCESS;
         }

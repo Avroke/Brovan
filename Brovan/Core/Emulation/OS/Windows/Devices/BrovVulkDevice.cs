@@ -72,7 +72,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
                 catch (Exception Ex)
                 {
-                    Instance.TriggerEventMessage($"[!] BrovVulk(gen): {Ex.Message}", LogFlags.Syscall);
+                    if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                        Instance.TriggerEventMessage($"[!] BrovVulk(gen): {Ex.Message}", LogFlags.Syscall);
                     Writer.Reset();
                     Result = VK_ERROR_INITIALIZATION_FAILED;
                 }

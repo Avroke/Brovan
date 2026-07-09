@@ -49,7 +49,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
                             }
                             SetReturnLength(48);
-                            Instance.TriggerEventMessage($"[+] NtQueryInformationProcess: Queried own PROCESS_BASIC_INFORMATION (PEB = 0x{Instance.PEB:X}).", LogFlags.Syscall);
+                            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                                Instance.TriggerEventMessage($"[+] NtQueryInformationProcess: Queried own PROCESS_BASIC_INFORMATION (PEB = 0x{Instance.PEB:X}).", LogFlags.Syscall);
                             return NTSTATUS.STATUS_SUCCESS;
                         }
                         else
@@ -76,7 +77,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
                                 }
                                 SetReturnLength(48);
-                                Instance.TriggerEventMessage($"[+] NtQueryInformationProcess: Queried PROCESS_BASIC_INFORMATION of process \"{Process.Name}\" (PID={Process.PID}).", LogFlags.Syscall);
+                                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                                    Instance.TriggerEventMessage($"[+] NtQueryInformationProcess: Queried PROCESS_BASIC_INFORMATION of process \"{Process.Name}\" (PID={Process.PID}).", LogFlags.Syscall);
                                 return NTSTATUS.STATUS_SUCCESS;
                             }
                             else
@@ -88,7 +90,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                         {
                             NTSTATUS Status = QueryProcessTimes(Instance, ProcessHandle, OutBufferPtr, OutBufferLength, SetReturnLength);
                             if (Status == NTSTATUS.STATUS_SUCCESS)
-                                Instance.TriggerEventMessage($"[+] NtQueryInformationProcess: Queried ProcessTimes.", LogFlags.Syscall);
+                                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                                    Instance.TriggerEventMessage($"[+] NtQueryInformationProcess: Queried ProcessTimes.", LogFlags.Syscall);
                             return Status;
                         }
                     case PROCESSINFOCLASS.ProcessBreakOnTermination:
@@ -105,7 +108,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
                                 }
                                 SetReturnLength(1);
-                                Instance.TriggerEventMessage($"[+] NtQueryInformationProcess: Queried own ProcessBreakOnTermination.", LogFlags.Syscall);
+                                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                                    Instance.TriggerEventMessage($"[+] NtQueryInformationProcess: Queried own ProcessBreakOnTermination.", LogFlags.Syscall);
                                 return NTSTATUS.STATUS_SUCCESS;
                             }
                             else
@@ -123,7 +127,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
                                     }
                                     SetReturnLength(1);
-                                    Instance.TriggerEventMessage($"[+] NtQueryInformationProcess: Queried ProcessBreakOnTermination for \"{Process.Name}\".", LogFlags.Syscall);
+                                    if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                                        Instance.TriggerEventMessage($"[+] NtQueryInformationProcess: Queried ProcessBreakOnTermination for \"{Process.Name}\".", LogFlags.Syscall);
                                     return NTSTATUS.STATUS_SUCCESS;
                                 }
                                 else
@@ -141,7 +146,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 {
                                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
                                 }
-                                Instance.TriggerEventMessage($"[!] NtQueryInformationProcess: Queried own debug port.", LogFlags.Syscall);
+                                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                                    Instance.TriggerEventMessage($"[!] NtQueryInformationProcess: Queried own debug port.", LogFlags.Syscall);
                                 SetReturnLength(8);
                                 return NTSTATUS.STATUS_SUCCESS;
                             }
@@ -160,7 +166,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
                                     }
                                     SetReturnLength(8);
-                                    Instance.TriggerEventMessage($"[!] NtQueryInformationProcess: Queried debug port for process \"{Process.Name}\".", LogFlags.Syscall);
+                                    if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                                        Instance.TriggerEventMessage($"[!] NtQueryInformationProcess: Queried debug port for process \"{Process.Name}\".", LogFlags.Syscall);
                                     return NTSTATUS.STATUS_SUCCESS;
                                 }
                                 else
@@ -180,7 +187,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                             {
                                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
                             }
-                            Instance.TriggerEventMessage($"[!] NtQueryInformationProcess: Queried own debug object handle.", LogFlags.Syscall);
+                            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                                Instance.TriggerEventMessage($"[!] NtQueryInformationProcess: Queried own debug object handle.", LogFlags.Syscall);
                             SetReturnLength(8);
                             return NTSTATUS.STATUS_PORT_NOT_SET;
                         }
@@ -199,7 +207,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
                                 }
                                 SetReturnLength(8);
-                                Instance.TriggerEventMessage($"[!] NtQueryInformationProcess: Queried debug object handle for process \"{Process.Name}\".", LogFlags.Syscall);
+                                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                                    Instance.TriggerEventMessage($"[!] NtQueryInformationProcess: Queried debug object handle for process \"{Process.Name}\".", LogFlags.Syscall);
                                 return NTSTATUS.STATUS_PORT_NOT_SET;
                             }
                             else
@@ -221,7 +230,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 {
                                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
                                 }
-                                Instance.TriggerEventMessage($"[+] NtQueryInformationProcess: Queried own Wow64 status.", LogFlags.Syscall);
+                                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                                    Instance.TriggerEventMessage($"[+] NtQueryInformationProcess: Queried own Wow64 status.", LogFlags.Syscall);
                                 SetReturnLength(8);
                                 return NTSTATUS.STATUS_SUCCESS;
                             }
@@ -240,7 +250,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
                                     }
                                     SetReturnLength(8);
-                                    Instance.TriggerEventMessage($"[+] NtQueryInformationProcess: Queried Wow64 status of process \"{Process.Name}\".", LogFlags.Syscall);
+                                    if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                                        Instance.TriggerEventMessage($"[+] NtQueryInformationProcess: Queried Wow64 status of process \"{Process.Name}\".", LogFlags.Syscall);
                                     return NTSTATUS.STATUS_SUCCESS;
                                 }
                                 else
@@ -277,7 +288,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                             SetReturnLength(16);
-                            Instance.TriggerEventMessage($"[+] NtQueryInformationProcess: Queried own ProcessImageFileName = \"{Path}\".", LogFlags.Syscall);
+                            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                                Instance.TriggerEventMessage($"[+] NtQueryInformationProcess: Queried own ProcessImageFileName = \"{Path}\".", LogFlags.Syscall);
                             return NTSTATUS.STATUS_SUCCESS;
                         }
                         else
@@ -312,7 +324,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                                 SetReturnLength(16);
-                                Instance.TriggerEventMessage($"[+] NtQueryInformationProcess: Queried the process \"{Process.Name}\" ProcessImageFileName = \"{Path}\".", LogFlags.Syscall);
+                                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                                    Instance.TriggerEventMessage($"[+] NtQueryInformationProcess: Queried the process \"{Process.Name}\" ProcessImageFileName = \"{Path}\".", LogFlags.Syscall);
                                 return NTSTATUS.STATUS_SUCCESS;
                             }
                         }
@@ -336,7 +349,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                             SetReturnLength(4);
-                            Instance.TriggerEventMessage($"[+] NtQueryInformationProcess: Queried ProcessCookie = 0x{Instance.ProcessCookie:X}.", LogFlags.Syscall);
+                            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                                Instance.TriggerEventMessage($"[+] NtQueryInformationProcess: Queried ProcessCookie = 0x{Instance.ProcessCookie:X}.", LogFlags.Syscall);
                             return NTSTATUS.STATUS_SUCCESS;
                         }
 
@@ -398,7 +412,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                             if (!Instance.WriteMemory(OutBufferPtr, Buffer))
                                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
                             SetReturnLength(0x40);
-                            Instance.TriggerEventMessage($"[+] NtQueryInformationProcess: Queried ProcessImageInformation (TransferAddress=0x{TransferAddress:X}).", LogFlags.Syscall);
+                            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                                Instance.TriggerEventMessage($"[+] NtQueryInformationProcess: Queried ProcessImageInformation (TransferAddress=0x{TransferAddress:X}).", LogFlags.Syscall);
                             return NTSTATUS.STATUS_SUCCESS;
                         }
                     case PROCESSINFOCLASS.ProcessImageFileNameWin32:
@@ -442,7 +457,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                             SetReturnLength(StructSize);
-                            Instance.TriggerEventMessage($"[+] NtQueryInformationProcess: ProcessMitigationPolicy ({Policy})", LogFlags.Syscall);
+                            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                                Instance.TriggerEventMessage($"[+] NtQueryInformationProcess: ProcessMitigationPolicy ({Policy})", LogFlags.Syscall);
                             return NTSTATUS.STATUS_SUCCESS;
                         }
                     default:
@@ -491,7 +507,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                             {
                                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
                             }
-                            Instance.TriggerEventMessage($"[+] NtQueryInformationProcess (x86): Queried own PROCESS_BASIC_INFORMATION.", LogFlags.Syscall);
+                            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                                Instance.TriggerEventMessage($"[+] NtQueryInformationProcess (x86): Queried own PROCESS_BASIC_INFORMATION.", LogFlags.Syscall);
                             return NTSTATUS.STATUS_SUCCESS;
                         }
                         else
@@ -517,7 +534,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 {
                                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
                                 }
-                                Instance.TriggerEventMessage($"[+] NtQueryInformationProcess (x86): Queried PROCESS_BASIC_INFORMATION of process \"{Process.Name}\".", LogFlags.Syscall);
+                                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                                    Instance.TriggerEventMessage($"[+] NtQueryInformationProcess (x86): Queried PROCESS_BASIC_INFORMATION of process \"{Process.Name}\".", LogFlags.Syscall);
                                 return NTSTATUS.STATUS_SUCCESS;
                             }
                             else
@@ -529,7 +547,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                         {
                             NTSTATUS Status = QueryProcessTimes(Instance, ProcessHandle, OutBufferPtr, OutBufferLength, SetReturnLength);
                             if (Status == NTSTATUS.STATUS_SUCCESS)
-                                Instance.TriggerEventMessage($"[+] NtQueryInformationProcess (x86): Queried ProcessTimes.", LogFlags.Syscall);
+                                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                                    Instance.TriggerEventMessage($"[+] NtQueryInformationProcess (x86): Queried ProcessTimes.", LogFlags.Syscall);
                             return Status;
                         }
                     case PROCESSINFOCLASS.ProcessBreakOnTermination:
@@ -545,7 +564,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 {
                                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
                                 }
-                                Instance.TriggerEventMessage($"[+] NtQueryInformationProcess (x86): Queried own ProcessBreakOnTermination.", LogFlags.Syscall);
+                                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                                    Instance.TriggerEventMessage($"[+] NtQueryInformationProcess (x86): Queried own ProcessBreakOnTermination.", LogFlags.Syscall);
                                 return NTSTATUS.STATUS_SUCCESS;
                             }
                             else
@@ -562,7 +582,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                                     {
                                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
                                     }
-                                    Instance.TriggerEventMessage($"[+] NtQueryInformationProcess (x86): Queried ProcessBreakOnTermination for \"{Process.Name}\".", LogFlags.Syscall);
+                                    if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                                        Instance.TriggerEventMessage($"[+] NtQueryInformationProcess (x86): Queried ProcessBreakOnTermination for \"{Process.Name}\".", LogFlags.Syscall);
                                     return NTSTATUS.STATUS_SUCCESS;
                                 }
                                 else
@@ -580,7 +601,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 {
                                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
                                 }
-                                Instance.TriggerEventMessage($"[!] NtQueryInformationProcess (x86): Queried own debug port.", LogFlags.Syscall);
+                                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                                    Instance.TriggerEventMessage($"[!] NtQueryInformationProcess (x86): Queried own debug port.", LogFlags.Syscall);
                                 return NTSTATUS.STATUS_SUCCESS;
                             }
                             else
@@ -597,7 +619,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                                     {
                                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
                                     }
-                                    Instance.TriggerEventMessage($"[!] NtQueryInformationProcess (x86): Queried debug port of \"{Process.Name}\".", LogFlags.Syscall);
+                                    if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                                        Instance.TriggerEventMessage($"[!] NtQueryInformationProcess (x86): Queried debug port of \"{Process.Name}\".", LogFlags.Syscall);
                                     return NTSTATUS.STATUS_SUCCESS;
                                 }
                                 else
@@ -623,7 +646,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 {
                                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
                                 }
-                                Instance.TriggerEventMessage($"[+] NtQueryInformationProcess (x86): Queried own Wow64 info.", LogFlags.Syscall);
+                                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                                    Instance.TriggerEventMessage($"[+] NtQueryInformationProcess (x86): Queried own Wow64 info.", LogFlags.Syscall);
                                 return NTSTATUS.STATUS_SUCCESS;
                             }
                             else
@@ -640,7 +664,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                                     {
                                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
                                     }
-                                    Instance.TriggerEventMessage($"[+] NtQueryInformationProcess (x86): Queried Wow64 info for \"{Process.Name}\".", LogFlags.Syscall);
+                                    if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                                        Instance.TriggerEventMessage($"[+] NtQueryInformationProcess (x86): Queried Wow64 info for \"{Process.Name}\".", LogFlags.Syscall);
                                     return NTSTATUS.STATUS_SUCCESS;
                                 }
                                 else

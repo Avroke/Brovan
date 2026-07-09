@@ -95,7 +95,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 case THREADINFOCLASS.ThreadHideFromDebugger:
                     {
-                        Instance.TriggerEventMessage($"[{Thread.ThreadId}] Thread Hide From Debugger.", LogFlags.Suspicious);
+                        if ((Instance.Settings.Flags & LogFlags.Suspicious) != 0)
+                            Instance.TriggerEventMessage($"[{Thread.ThreadId}] Thread Hide From Debugger.", LogFlags.Suspicious);
                         return NTSTATUS.STATUS_SUCCESS;
                     }
 
@@ -190,7 +191,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     }
 
                 default:
-                    Instance.TriggerEventMessage($"[!] NtSetInformationThread called with unsupported info class: 0x{InfoClass:X}", LogFlags.Important);
+                    if ((Instance.Settings.Flags & LogFlags.Important) != 0)
+                        Instance.TriggerEventMessage($"[!] NtSetInformationThread called with unsupported info class: 0x{InfoClass:X}", LogFlags.Important);
                     return NTSTATUS.STATUS_INVALID_INFO_CLASS;
             }
         }

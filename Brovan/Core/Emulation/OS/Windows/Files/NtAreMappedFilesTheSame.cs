@@ -34,7 +34,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (View1.ImageSectionId != 0 && View1.ImageSectionId == View2.ImageSectionId)
             {
-                Instance.TriggerEventMessage($"[+] NtAreMappedFilesTheSame: 0x{Address1:X} and 0x{Address2:X} both map ImageSectionId=0x{View1.ImageSectionId:X}.", LogFlags.Syscall);
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[+] NtAreMappedFilesTheSame: 0x{Address1:X} and 0x{Address2:X} both map ImageSectionId=0x{View1.ImageSectionId:X}.", LogFlags.Syscall);
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
@@ -49,11 +50,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!string.IsNullOrEmpty(Path1) && !string.IsNullOrEmpty(Path2) &&
                 string.Equals(Path1, Path2, StringComparison.OrdinalIgnoreCase))
             {
-                Instance.TriggerEventMessage($"[+] NtAreMappedFilesTheSame: 0x{Address1:X} and 0x{Address2:X} both map {Path1}.", LogFlags.Syscall);
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[+] NtAreMappedFilesTheSame: 0x{Address1:X} and 0x{Address2:X} both map {Path1}.", LogFlags.Syscall);
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            Instance.TriggerEventMessage($"[+] NtAreMappedFilesTheSame: 0x{Address1:X} ({Path1}) and 0x{Address2:X} ({Path2}) are different images.", LogFlags.Syscall);
+            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                Instance.TriggerEventMessage($"[+] NtAreMappedFilesTheSame: 0x{Address1:X} ({Path1}) and 0x{Address2:X} ({Path2}) are different images.", LogFlags.Syscall);
             return NTSTATUS.STATUS_NOT_SAME_DEVICE;
         }
 

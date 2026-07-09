@@ -122,7 +122,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (BufferLengthPtr != 0)
                     Instance._emulator.WriteMemory(BufferLengthPtr, WriteLength);
 
-                Instance.TriggerEventMessage($"[+] NtAlpcSendWaitReceivePort: Port=\"{Port.Name}\", Flags=0x{Flags:X}, ReplyLength=0x{WriteLength:X}", LogFlags.Syscall);
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[+] NtAlpcSendWaitReceivePort: Port=\"{Port.Name}\", Flags=0x{Flags:X}, ReplyLength=0x{WriteLength:X}", LogFlags.Syscall);
 
                 return NTSTATUS.STATUS_SUCCESS;
             }
@@ -139,7 +140,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Queue.Enqueue(SendBytes);
                 }
 
-                Instance.TriggerEventMessage($"[+] NtAlpcSendWaitReceivePort: Port=\"{Port.Name}\", Flags=0x{Flags:X}, SentLength=0x{SendBytes.Length:X}", LogFlags.Syscall);
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[+] NtAlpcSendWaitReceivePort: Port=\"{Port.Name}\", Flags=0x{Flags:X}, SentLength=0x{SendBytes.Length:X}", LogFlags.Syscall);
 
                 return NTSTATUS.STATUS_SUCCESS;
             }

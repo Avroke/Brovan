@@ -51,7 +51,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (CurrentProcessInJob)
             {
-                Instance.TriggerEventMessage($"[{(ExitStatus == 0 ? '+' : '!')}] Job asked to be terminated with exit code 0x{ExitStatus:X}", LogFlags.Important);
+                if ((Instance.Settings.Flags & LogFlags.Important) != 0)
+                    Instance.TriggerEventMessage($"[{(ExitStatus == 0 ? '+' : '!')}] Job asked to be terminated with exit code 0x{ExitStatus:X}", LogFlags.Important);
 
                 foreach (EmulatedThread ProcessThread in Instance.Threads.Values)
                 {

@@ -504,7 +504,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return NTSTATUS.STATUS_SUCCESS;
                 }
 
-                Instance.TriggerEventMessage($"[-] NtQueryVirtualMemory was called with an unsupported class: 0x{MemoryInformationClass:X} ({MemoryInformationClass}).", LogFlags.Important);
+                if ((Instance.Settings.Flags & LogFlags.Important) != 0)
+                    Instance.TriggerEventMessage($"[-] NtQueryVirtualMemory was called with an unsupported class: 0x{MemoryInformationClass:X} ({MemoryInformationClass}).", LogFlags.Important);
             }
             else if (Instance._binary.Architecture == BinaryArchitecture.x86)
             {

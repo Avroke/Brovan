@@ -362,7 +362,8 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
                 long Result;
                 if (!Helper.SpecialPathsHandler.TryHandle(Instance, Helper, FileDesc, Vector.Base, Vector.EffectiveLength, true, out Result))
                 {
-                    Instance.TriggerEventMessage($"[!] Special path handler not set for {FileDesc.Path}.", LogFlags.Important);
+                    if ((Instance.Settings.Flags & LogFlags.Important) != 0)
+                        Instance.TriggerEventMessage($"[!] Special path handler not set for {FileDesc.Path}.", LogFlags.Important);
                     Helper.SetReturnValue(Instance, Context, TotalWritten == 0 ? -(long)LinuxErrno.ENODEV : TotalWritten);
                     return;
                 }

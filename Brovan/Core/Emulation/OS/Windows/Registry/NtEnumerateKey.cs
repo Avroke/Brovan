@@ -46,7 +46,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (RegKey == null)
                     return NTSTATUS.STATUS_INVALID_HANDLE;
 
-                Instance.TriggerEventMessage($"[+] NtEnumerateKey Running with the FullPath: {RegKey.FullPath}", LogFlags.Syscall);
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[+] NtEnumerateKey Running with the FullPath: {RegKey.FullPath}", LogFlags.Syscall);
 
                 if (!Instance.WinHelper.TryEnumerateRegistrySubKey(RegKey, (int)Index, out string SubKeyName))
                 {

@@ -158,7 +158,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance._emulator.WriteMemory(ConnectionInfoLengthPtr, Requested, 4);
             }
 
-            Instance.TriggerEventMessage($"[+] NtConnectPort: Port=\"{PortName}\", Handle=0x{Handle.Handle:X}", LogFlags.Syscall);
+            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                Instance.TriggerEventMessage($"[+] NtConnectPort: Port=\"{PortName}\", Handle=0x{Handle.Handle:X}", LogFlags.Syscall);
 
             return NTSTATUS.STATUS_SUCCESS;
         }

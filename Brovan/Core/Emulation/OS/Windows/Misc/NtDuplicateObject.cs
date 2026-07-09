@@ -111,8 +111,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                 CloseSourceHandle(Instance, SourceHandle);
 
             if (NewHandle != null)
-                Instance.TriggerEventMessage($"[+] NtDuplicateObject: Duplicated handle of {SourceObject.ObjectType} 0x{SourceHandle:X} -> 0x{NewHandle.Handle:X}.", LogFlags.Syscall);
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[+] NtDuplicateObject: Duplicated handle of {SourceObject.ObjectType} 0x{SourceHandle:X} -> 0x{NewHandle.Handle:X}.", LogFlags.Syscall);
             else
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                 Instance.TriggerEventMessage($"[+] NtDuplicateObject: Closed source handle 0x{SourceHandle:X}.", LogFlags.Syscall);
 
             return NTSTATUS.STATUS_SUCCESS;

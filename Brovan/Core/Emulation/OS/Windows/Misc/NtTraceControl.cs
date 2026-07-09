@@ -53,7 +53,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 _ => NTSTATUS.STATUS_INVALID_DEVICE_REQUEST
             };
 
-            Instance.TriggerEventMessage($"[+] NtTraceControl: Function=0x{FunctionCode:X}, In=0x{InBuffer:X}/0x{InBufferLength:X}, Out=0x{OutBuffer:X}/0x{OutBufferLength:X}, Status={Status}.", LogFlags.Syscall);
+            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                Instance.TriggerEventMessage($"[+] NtTraceControl: Function=0x{FunctionCode:X}, In=0x{InBuffer:X}/0x{InBufferLength:X}, Out=0x{OutBuffer:X}/0x{OutBufferLength:X}, Status={Status}.", LogFlags.Syscall);
             return Status;
         }
 

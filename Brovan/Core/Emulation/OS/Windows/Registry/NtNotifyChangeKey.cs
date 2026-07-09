@@ -44,7 +44,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (CompletionFilter == 0)
                     return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-                Instance.TriggerEventMessage($"[+] NtNotifyChangeKey Running with the FullPath: {RegKey.FullPath}, Filter: 0x{CompletionFilter:X}, WatchTree: {WatchTree}, Async: {Asynchronous}", LogFlags.Syscall);
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[+] NtNotifyChangeKey Running with the FullPath: {RegKey.FullPath}, Filter: 0x{CompletionFilter:X}, WatchTree: {WatchTree}, Async: {Asynchronous}", LogFlags.Syscall);
 
                 if (!Asynchronous)
                 {

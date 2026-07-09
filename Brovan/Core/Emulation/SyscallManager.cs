@@ -224,7 +224,8 @@ namespace Brovan.Core.Emulation
             var ctx = new SyscallContext { Number = number, Name = name, Args = args, Emulator = _emu };
 
             if (TraceEnabled)
-                _emu.TriggerEventMessage($"[SYSCALL TRACE] {name ?? "sys_" + number.ToString("X")} (0x{number:X}) args: {string.Join(", ", args.Select(a => $"0x{a:X}"))}", LogFlags.General);
+                if ((_emu.Settings.Flags & LogFlags.General) != 0)
+                    _emu.TriggerEventMessage($"[SYSCALL TRACE] {name ?? "sys_" + number.ToString("X")} (0x{number:X}) args: {string.Join(", ", args.Select(a => $"0x{a:X}"))}", LogFlags.General);
 
             if (matched != null)
             {
