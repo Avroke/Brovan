@@ -564,6 +564,33 @@ F3's `sortdefault.nls` re-open storm is now fixed (`b205488`), so the last big
 remaining throughput lever is F1 (scheduler spin detection), not more
 micro-optimisation here.**
 
+**Where the DLL-injection probes' time actually goes (sampling profiler, this
+pass).** To test whether the slow `Walking process memory` probes hide a
+reducible O(N) Brovan hotspot, a sampling profiler (bucket RIP at 64-byte
+granularity every 4096 instructions, dump hottest buckets) was run over the
+probe. The cost is **distributed across genuine guest work, with no single
+Brovan-side hotspot**:
+
+- al-khaser's **own string-comparison loops** (`al-khaser_x64.exe+0xCB00..0xCE00`,
+  a `jne`-chain comparing bytes) — the plurality of samples.
+- kernelbase **`GetStringTypeExW`** (`+0x22D80..0x22E80`, ~1160 samples) —
+  character classification behind case-insensitive comparison. This is the *cost
+  of the F3 fix succeeding*: the injected-library checks now actually run the real
+  NLS collation (they used to error out with `-2`), and al-khaser does many such
+  comparisons (each module path against the loader list).
+- ntdll **`RtlVirtualUnwind`/`RtlLookupFunctionEntry`** (`+0x322C0..0x32FC0`) +
+  **`RtlNtStatusToDosError`** (`+0x50840`) — x64 exception unwinding + status
+  translation, i.e. the sample's `__try/__except`-wrapped probing dispatching real
+  exceptions.
+
+None of these is a Brovan inefficiency to optimise away — they are the guest
+executing a heavy anti-analysis suite (string matching + NLS collation +
+exception dispatch) faithfully, instruction by instruction. So F2 on these probes
+is **irreducible at the per-instruction level**; a real speedup would need a
+coarser execution strategy (block-level JIT / native exception fast-path), which
+is a large architectural change, not a hotspot fix. This confirms the
+near-ceiling conclusion above. All profiler instrumentation was reverted.
+
 ### F3 — Injected-library false positive (NLS collation) — **FIXED (`b205488`)**
 
 Fixed this pass. The root cause was **not** in the guest NLS code — the earlier
