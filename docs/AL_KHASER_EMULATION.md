@@ -33,12 +33,17 @@ al-khaser now loads fully, runs its detection suite, walks the PEB loader lists,
 enumerates its modules, and prints its verdicts. The last four fixes do not move
 the instruction terminus — they close specific behavioural/stealth gaps
 (dropped-file capture, injected-DLL prerequisites, the injected-DLL false
-positive itself) or reclaim throughput. With F3 fixed, the remaining terminus is
-the threading frontier (F1) — a non-deterministic cooperative-scheduler spin
-that (when it hits) stalls the run part-way through the DLL-injection section,
-before the full verdict list prints. F2 (throughput) is understood and largely
-addressed: raw per-instruction speed is healthy, and the two big wall-time sinks
-were F1's spin and F3's NLS re-open storm — the latter is now gone.
+positive itself) or reclaim throughput. With F3 fixed, the run stalls part-way
+through the DLL-injection section (`Walking process memory with
+GetModuleInformation`) before the full verdict list prints. A post-F3
+re-characterization (see **F1**) found this stall is **not** the documented
+cooperative-scheduler `RtlpBackoff` livelock (the main thread is progressing, the
+workers idle-normal) but an **infinite loop inside the ntdll heap manager** over
+Brovan's emulated heap — a heap-structure emulation defect. The `RtlpBackoff`
+livelock (observed pre-F3) and this heap loop are both open frontiers; the heap
+loop is what blocks the current build. F2 (throughput) is understood and largely
+addressed: raw per-instruction speed is healthy, and F3's NLS re-open storm — one
+of the two big wall-time sinks — is now gone.
 
 ## Reproduction
 
@@ -457,6 +462,54 @@ vs parked-waiter-wakeup split for **every** waitable type (`WinEvent`,
 consumable state. Consider a scheduler deadlock/livelock detector: when the only
 runnable thread is spinning in a known ntdll backoff and all others are blocked,
 force a wakeup re-scan or advance virtual time.
+
+**Post-F3 re-characterization (2026-07, corrects the framing above).** After the
+F3 fix (`b205488`) removed the `sortdefault.nls` re-open storm, the instruction
+interleaving changed, and a fresh scheduler-state trace (dump every live
+thread's state / RIP / module / spin-score / wait-objects every 50 slices) shows
+the observed al-khaser x64 stall is **not** the `RtlpBackoff` livelock described
+above. In the runs sampled this pass:
+
+- The **main thread is Running and progressing** (`spin=0`, RIP moves through
+  ntdll/ucrtbase each sample) — it is not pinned in a backoff spin.
+- The two thread-pool workers are parked on `WorkerFactory`
+  (`WorkerFactoryWaitActive=true`, `STATUS_PENDING`) — idle-normal, exactly the
+  doc's "progressing run". **Nothing** sits in the `RtlpBackoff` region
+  (`0x5CDB6`).
+
+So the current blocker is a different terminus: al-khaser prints
+`Walking process memory with GetModuleInformation` and then the **main thread
+grinds ~1.4 billion instructions inside the ntdll heap manager**
+(`RtlAllocateHeap`+internal heap helpers around RVA `0x2B3E2..0x2B426`, plus
+`memset`) without the probe ever completing. Two facts localise it:
+
+- **Not a `VirtualQuery` walk** — `NtQueryVirtualMemory` is **never called**
+  during the stall (instrumented at the syscall's top), so the classic
+  `while(VirtualQuery(addr)) addr += RegionSize;` non-termination is ruled out.
+  (Note: the `MemoryBasicInformation` branch *does* have a latent
+  non-termination bug — above the highest mapped region it returns
+  `STATUS_SUCCESS` + `MEM_FREE` size `0x1000` forever instead of failing past
+  `MmHighestUserAddress` — but that path isn't what al-khaser hits here. Worth
+  fixing opportunistically as a separate correctness item.)
+- **Stuck inside one heap call** — watching `RtlAllocateHeap`'s entry (and its
+  `+0xF` hot address) shows it is **not re-entered** during the grind, while the
+  main thread's RIP stays within the heap-manager region that contains backward
+  branches (`0x2B3F3→0x2B3E2`, `0x2B426→0x2B3F8`). That is the shape of an
+  **infinite free-list / block-walk loop inside a single heap-manager call** over
+  Brovan's emulated heap — i.e. a heap-structure emulation defect (a malformed
+  free-list link / block header / LFH bucket that the real ntdll heap manager
+  walks forever), **not** a scheduler lost-wakeup.
+
+**Implication for the next pass.** The scheduler/lost-wakeup hunt above may not
+be the highest-value F1 work anymore — the reproducible post-F3 stall is a heap
+manager loop. Recommended: diagnose Brovan's heap setup vs. what the real ntdll
+heap manager expects (does `RtlCreateHeap`/the process heap build the
+`_HEAP` + `_HEAP_ENTRY` + free-list / `FreeLists`/LFH structures the manager
+walks?), find which linkage the `0x2B3E2..0x2B426` walk never terminates on, and
+fix the structure. The `RtlpBackoff` livelock remains a real, separate
+non-deterministic hazard (it was observed pre-F3), so both are open; this is
+which one actually blocks the current build. All diagnostic instrumentation for
+this pass was reverted (tree stays clean).
 
 ### F2 — Emulation throughput
 
