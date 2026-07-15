@@ -106,6 +106,16 @@ namespace Brovan.EmulationMenu
             return lookup;
         }
 
+        // Opt-in bound for the cooperative-scheduler livelock watchdog (see
+        // BinaryEmulatorSettings.LivelockEscapeSlices and docs/AL_KHASER_EMULATION.md F1).
+        // Off by default; set BROVAN_LIVELOCK_ESCAPE_SLICES=<n> to make the scheduler bail
+        // cleanly once a thread has spun <n> frozen slices with every peer blocked.
+        private static uint ParseLivelockEscapeSlices()
+        {
+            string value = Environment.GetEnvironmentVariable("BROVAN_LIVELOCK_ESCAPE_SLICES");
+            return uint.TryParse(value, out uint slices) ? slices : 0u;
+        }
+
         private static void ShowHelp(string[] args)
         {
             if (args.Length > 0 && CommandHelpLookup.TryGetValue(args[0], out CommandHelpEntry entry))
@@ -2408,7 +2418,8 @@ namespace Brovan.EmulationMenu
                     RawProgramArguments = RawProgramArguments,
                     ProgramArguments = ProgramArguments ?? Array.Empty<string>(),
                     NoHooks = NoHooks,
-                    BackendKind = BackendKind
+                    BackendKind = BackendKind,
+                    LivelockEscapeSlices = ParseLivelockEscapeSlices()
                 };
 
                 if (UseWindowsBlobGuest)

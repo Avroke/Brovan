@@ -461,22 +461,50 @@ frozen slices with nothing changing, the scheduler returns cleanly so the run
 reaches a bounded, diagnosable terminus instead of hanging to the wall-clock
 timeout. It is off by default and must be set larger than any legitimate
 self-completing tight loop the sample runs (a big `memset` also pins its RIP) —
-it exists for a calibrated hunt with the deterministic F1 repro, not as a
-default behaviour change.
+it exists for a calibrated hunt, not as a default behaviour change. The menu
+wires it from the env var **`BROVAN_LIVELOCK_ESCAPE_SLICES`** (unset / unparseable
+⇒ 0), so it is reachable without a rebuild; the escape is evaluated at the
+256-slice nudge boundaries, so the effective bail count rounds up to the next
+multiple of 256.
 
-**Validation (honest scope).** Compiles clean (`dotnet build -c Release`, net8.0
-via a .NET 9 SDK; the only build error in this environment is the sandboxed
-Unicorn tarball download, which is the post-`Build` native step, not the C#
-compile). The default-on parts are validated by **state-machine reasoning**: the
-discriminator cannot fire on forward-progressing code, and its action is a
-provable no-op for any thread that is not blocked on a peer. It was **not**
-behaviourally re-run against `al-khaser_x64.exe` in this environment — that needs
-the exported Windows dependency set (`WindowsLibs/*.nls`, `WinReg/*`,
-`apisetmap.bin`) and Unicorn 2.1.4, which are not present here (see
-*Reproduction*). The next pass with the full harness should confirm the watchdog
-fires on the documented livelocked interleaving (diagnostic + recovery) and does
-**not** fire on the progressing slow-heap interleaving, then use the emitted
-per-episode chokepoint to drive the source-level lost-wakeup fix.
+**Validation (behavioural — al-khaser + a deterministic repro).** Compiles clean
+(`dotnet build -c Release`, net8.0 via a .NET 9 SDK) and was **run end-to-end**
+against `al-khaser_x64.exe` with the real Windows dependency set + Unicorn 2.1.4:
+
+- *No misfire on the real, progressing sample.* Four independent runs plus a
+  baseline built at the parent commit all reach the same terminus —
+  **~149 M instructions** (one interleaving 105 M; the depth is non-deterministic
+  as documented), `0xC0000005`, 397 injected-library lines — with **zero**
+  watchdog output. The added path is never entered on al-khaser, so the build is
+  byte-for-byte behaviourally identical to baseline there (the discriminator
+  never accumulates 256 pinned full-quantum slices because the sample keeps
+  progressing).
+- *Positive path proven with a deterministic livelock repro.* A minimal x64 PE
+  whose main thread spins (`jmp $`) after spawning a worker that parks on
+  `Sleep(INFINITE)` reproduces the exact "only-runnable spinner + blocked peers"
+  shape. With the watchdog on it emits the precise diagnostic —
+  `Scheduler livelock suspected: thread N spinning at spin2.exe+0x102C … Waiters:
+  tid=… handles=[0x64] tid=… deadline=…` — naming the spinner (module+offset) and
+  both parked peers with their handles/deadlines. With the escape off (default)
+  the run keeps spinning (recovery cannot resolve the effectively-infinite waits);
+  with `BROVAN_LIVELOCK_ESCAPE_SLICES=400` it prints
+  `Scheduler livelock escape: … spun 512 frozen slices … terminating scheduler.`
+  and **exits cleanly (rc=0)** instead of hanging to the timeout.
+
+This upgrades the earlier reasoning-only validation to a behavioural one on both
+the negative (no regression on the real sample) and positive (detect → diagnose
+→ escape) sides. The source-level lost-wakeup fix (F1 steps 1–3) still stands —
+the recovery only recovers the recoverable subclass — but the watchdog now
+demonstrably turns a silent hang into an actionable, bounded terminus.
+
+**Environment note (deps-bundle gap).** The dependency bundle used here (build
+19044) ships the codepage `C_*.NLS` tables but **not**
+`Globalization\Sorting\SortDefault.nls`. Without it the F3 NLS-collation fix has
+no file to open, so the injected-library false positive reappears (al-khaser
+flags all 61 System32 modules). This is a gap in the dependency **export**, not a
+Brovan regression — the F3 code fix (`b205488`) is intact; it just needs the sort
+table shipped. Worth adding `SortDefault.nls` to `Export-BrovanDeps.ps1`'s NLS
+set for a clean-verdict repro.
 
 ### Host-environment fixes (intentionally **not** committed)
 
@@ -544,9 +572,12 @@ interleaving, and an opt-in `LivelockEscapeSlices` (default off) can bound a
 genuinely unrecoverable interleaving to a clean terminus. This does **not**
 replace the source-level fix — steps (1)–(3) still stand for the lost-wakeup
 that the recovery can't recover — but it turns the silent multi-minute hang into
-an actionable signal and recovers the recoverable subclass. The default-on parts
-are validated by state-machine reasoning + a clean compile; behavioural
-confirmation on the sample still needs the full deps/Unicorn harness.
+an actionable signal and recovers the recoverable subclass. Now **behaviourally
+validated** (see *Scheduler livelock watchdog* → *Validation*): four al-khaser
+runs + a parent-commit baseline confirm zero misfire on the progressing sample
+(identical ~149 M-instruction / `0xC0000005` terminus), and a deterministic
+spin-PE repro proves the detect → diagnose → escape path (clean `rc=0` under
+`BROVAN_LIVELOCK_ESCAPE_SLICES`).
 
 **Post-F3 re-characterization (2026-07, corrects the framing above).** After the
 F3 fix (`b205488`) removed the `sortdefault.nls` re-open storm, the instruction
