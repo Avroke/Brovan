@@ -25,6 +25,16 @@ namespace Brovan.Core.Emulation.OS
         public EmulatedInlineAttribute(int Size) => this.Size = Size;
     }
 
+    /// <summary>
+    /// Opts a struct into <see cref="Brovan.Generators.StructSerializerGenerator"/>, which emits
+    /// reflection-free WriteStructDirect_/ParseStructDirect_/GetStructSizeDirect_ methods on
+    /// <see cref="StructSerializer"/> for it.
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Struct)]
+    public sealed class GenerateStructSerializerAttribute : Attribute
+    {
+    }
+
     public enum WriteStructError
     {
         None, NullDestination, DestinationNotMapped, PointerAllocationFailed,
@@ -186,6 +196,31 @@ namespace Brovan.Core.Emulation.OS
             return Cache[T] = new TypeDesc(T);
         }
 
+        // --- Generated-serializer dispatch ---
+
+        internal delegate bool ParseStructAddrDelegate<T>(BinaryEmulator Emulator, ulong Address, out T Value);
+        internal delegate bool ParseStructBytesDelegate<T>(BinaryEmulator Emulator, byte[] Raw, out T Value);
+
+        private static readonly Dictionary<Type, Delegate> DirectWrite = new();
+        private static readonly Dictionary<Type, Delegate> DirectParseAddr = new();
+        private static readonly Dictionary<Type, Delegate> DirectParseBytes = new();
+        private static readonly Dictionary<Type, Delegate> DirectSizeBool = new();
+        private static readonly Dictionary<Type, Delegate> DirectSizeEmulator = new();
+
+        internal static void RegisterDirect<T>(
+            Func<BinaryEmulator, ulong, T, WriteStructResult> Write,
+            ParseStructAddrDelegate<T> ParseAddr,
+            ParseStructBytesDelegate<T> ParseBytes,
+            Func<bool, int> SizeBool,
+            Func<BinaryEmulator, int> SizeEmulator) where T : struct
+        {
+            DirectWrite[typeof(T)] = Write;
+            DirectParseAddr[typeof(T)] = ParseAddr;
+            DirectParseBytes[typeof(T)] = ParseBytes;
+            DirectSizeBool[typeof(T)] = SizeBool;
+            DirectSizeEmulator[typeof(T)] = SizeEmulator;
+        }
+
         // --- Public API ---
 
         /// <summary>
@@ -196,6 +231,9 @@ namespace Brovan.Core.Emulation.OS
         /// <returns>return the size.</returns>
         public static uint GetStructSize<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.NonPublicFields)] T>(BinaryEmulator Emulator) where T : struct
         {
+            if (DirectSizeEmulator.TryGetValue(typeof(T), out Delegate Fast))
+                return (uint)((Func<BinaryEmulator, int>)Fast)(Emulator);
+
             bool Is64 = Emulator._binary.Architecture == BinaryArchitecture.x64;
             return (uint)GetStructSize(typeof(T), Is64);
         }
@@ -208,6 +246,9 @@ namespace Brovan.Core.Emulation.OS
         /// <returns>return the size.</returns>
         public static int GetStructSize<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.NonPublicFields)] T>(bool Is64) where T : struct
         {
+            if (DirectSizeBool.TryGetValue(typeof(T), out Delegate Fast))
+                return ((Func<bool, int>)Fast)(Is64);
+
             return GetStructSize(typeof(T), Is64);
         }
 
@@ -232,6 +273,9 @@ namespace Brovan.Core.Emulation.OS
         /// <returns>Returns <see cref="WriteStructResult.Ok"/> on success, otherwise a failure result describing the error.</returns>
         public static WriteStructResult WriteStruct<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.NonPublicFields)] T>(BinaryEmulator Emulator, ulong Address, T Value) where T : struct
         {
+            if (DirectWrite.TryGetValue(typeof(T), out Delegate Fast))
+                return ((Func<BinaryEmulator, ulong, T, WriteStructResult>)Fast)(Emulator, Address, Value);
+
             if (Address == 0)
                 return WriteStructResult.Fail(WriteStructError.NullDestination, $"Destination address is NULL for {typeof(T).Name}");
 
@@ -293,6 +337,9 @@ namespace Brovan.Core.Emulation.OS
         /// <returns>Returns true if successful, otherwise false.</returns>
         public static bool ParseStruct<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.NonPublicFields)] T>(BinaryEmulator Emulator, ulong Address, out T Value) where T : struct
         {
+            if (DirectParseAddr.TryGetValue(typeof(T), out Delegate Fast))
+                return ((ParseStructAddrDelegate<T>)Fast)(Emulator, Address, out Value);
+
             Value = default;
             if (Address == 0) return false;
 
@@ -342,6 +389,9 @@ namespace Brovan.Core.Emulation.OS
         /// </remarks>
         public static bool ParseStruct<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.NonPublicFields)] T>(BinaryEmulator Emulator, byte[] Data, out T Value) where T : struct
         {
+            if (DirectParseBytes.TryGetValue(typeof(T), out Delegate Fast))
+                return ((ParseStructBytesDelegate<T>)Fast)(Emulator, Data, out Value);
+
             Value = default;
 
             bool Is64 = Emulator._binary.Architecture == BinaryArchitecture.x64;

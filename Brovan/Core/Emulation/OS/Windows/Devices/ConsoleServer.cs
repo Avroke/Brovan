@@ -16,8 +16,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint IoctlConDrvGetDisplayMode = 0x00500027;
         private const uint IoctlConDrvSetDisplayMode = 0x0050002B;
 
+        [GenerateStructSerializer]
         [StructLayout(LayoutKind.Explicit, Size = 0x30)]
-        private struct ConsoleApiMsgHeader
+        internal struct ConsoleApiMsgHeader
         {
             [FieldOffset(0x28)] public uint ApiNumber;
             [FieldOffset(0x2C)] public uint ApiDescriptorSize;
