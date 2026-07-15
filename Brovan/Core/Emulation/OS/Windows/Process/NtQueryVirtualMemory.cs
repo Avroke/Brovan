@@ -18,6 +18,18 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private const ulong PageGuard = 0x00000100UL;
 
+        // x64 user-mode address-space ceiling (MmHighestUserAddress). ntdll returns
+        // STATUS_INVALID_PARAMETER for a MemoryBasicInformation query above this, and the
+        // canonical VirtualQuery region-walk (`while (VirtualQuery(addr)) addr += RegionSize;`)
+        // relies on that failure to terminate.
+        private const ulong MmHighestUserAddress = 0x00007FFFFFFEFFFFUL;
+
+        // Start of the x64 kernel-mode canonical range. Addresses at/above this are left on the
+        // existing lookup path so kernel-mode driver queries are not affected by the user-ceiling
+        // termination gate; only the user-space + non-canonical hole above MmHighestUserAddress
+        // is failed (which is what makes a user-mode walk stop).
+        private const ulong KernelCanonicalBase = 0xFFFF800000000000UL;
+
         private static ulong AlignDownPage(ulong Address)
         {
             return Address & ~0xFFFUL;
@@ -57,6 +69,14 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (MemoryInformationClass == MEMORY_INFORMATION_CLASS.MemoryBasicInformation || MemoryInformationClass == MEMORY_INFORMATION_CLASS.MemoryPrivilegedBasicInformation)
                 {
+                    // Above the user-mode ceiling (but below the kernel canonical range) ntdll fails
+                    // the query; without this a walk that steps past the highest mapped region would
+                    // get an endless run of 0x1000-byte MEM_FREE regions (see the free-region branch
+                    // below) and never terminate. Kernel addresses stay on the normal path so driver
+                    // queries are unaffected.
+                    if (Address > MmHighestUserAddress && Address < KernelCanonicalBase)
+                        return NTSTATUS.STATUS_INVALID_PARAMETER;
+
                     ulong RequiredLength = (ulong)StructSerializer.GetStructSize<MEMORY_BASIC_INFORMATION>(Instance);
 
                     if (ReturnLength != 0)
@@ -159,7 +179,19 @@ namespace Brovan.Core.Emulation.OS.Windows
                             }
 
                             FreeBase = QueryAddress;
-                            FreeSize = (Next == ulong.MaxValue) ? 0x1000UL : (Next - FreeBase);
+                            // No further mapped/freed region above: real ntdll reports the whole free
+                            // span up to the user-mode ceiling as ONE region, so the walk advances past
+                            // the ceiling in a single step and the next query fails — instead of marching
+                            // through the address space in 0x1000-byte chunks forever. Only extend to the
+                            // ceiling for user-space bases; a kernel-address query (driver path) keeps the
+                            // single-page fallback so its size can't underflow.
+                            if (Next != ulong.MaxValue)
+                                FreeSize = Next - FreeBase;
+                            else if (FreeBase <= MmHighestUserAddress)
+                                FreeSize = MmHighestUserAddress - FreeBase + 1;
+                            else
+                                FreeSize = 0x1000UL;
+
                             if (FreeSize == 0)
                                 FreeSize = 0x1000UL;
                         }
