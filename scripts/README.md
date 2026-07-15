@@ -63,18 +63,6 @@ they fail loudly (exit 2) if `WindowsLibs/ntdll.dll` or any of the 5 hives are
 missing, warn (non-fatal) if the `SysWOW64` view or `apisetmap.bin` is absent,
 and refuse to overwrite existing deps without `--force` / `-Force` (exit 1).
 
-### Why no `.bat`?
-
-- **Export** is inherently Windows-side (`reg save`, System32 access, host
-  ApiSet-map dump). PowerShell handles zip creation, elevation detection, and
-  file selection natively; a `.bat` would have to shell out to PowerShell/tar
-  for zipping anyway and detect admin/enumerate DLLs far more awkwardly.
-- **Import** only matters on the *target* host. If that host is Windows you
-  don't need the bundle at all (Brovan reads `C:\Windows\System32` directly), so
-  a Windows-only `.bat` importer would cover the one case that doesn't need it.
-  The useful gap was a **Linux** importer with no PowerShell dependency — that's
-  `Import-BrovanDeps.sh`.
-
 ## Notes / limitations
 
 - The hives produced by `reg save` are real `regf` hives; the wine-generated
