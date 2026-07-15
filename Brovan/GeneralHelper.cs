@@ -1949,13 +1949,13 @@ namespace Brovan
 
                 if (RawWinPath.StartsWith("\\KnownDlls\\", StringComparison.OrdinalIgnoreCase))
                 {
-                    string KnownDllLeaf = Path.GetFileName(RawWinPath);
+                    string KnownDllLeaf = WindowsLeafName(RawWinPath);
                     if (!string.IsNullOrEmpty(KnownDllLeaf))
                         RawWinPath = @"C:\Windows\System32\\" + KnownDllLeaf;
                 }
                 else if (RawWinPath.StartsWith("\\KnownDlls32\\", StringComparison.OrdinalIgnoreCase))
                 {
-                    string KnownDllLeaf = Path.GetFileName(RawWinPath);
+                    string KnownDllLeaf = WindowsLeafName(RawWinPath);
                     if (!string.IsNullOrEmpty(KnownDllLeaf))
                         RawWinPath = @"C:\Windows\SysWOW64\\" + KnownDllLeaf;
                 }
@@ -2903,6 +2903,27 @@ namespace Brovan
             /// </summary>
             /// <param name="WinPath">windows-style path to resolve.</param>
             /// <returns>returns the resolved host path inside WindowsLibs, or null if no mapping applies.</returns>
+            /// <summary>
+            /// Extracts the trailing leaf of a Windows-style path, splitting on '\\' and '/'.
+            /// </summary>
+            /// <remarks>
+            /// <see cref="Path.GetFileName(string)"/> splits on <see cref="Path.DirectorySeparatorChar"/>,
+            /// which is '/' on Linux — so on a backslash-separated Windows guest path it returns the whole
+            /// string instead of the leaf. This helper is separator-agnostic and safe on any host OS.
+            /// </remarks>
+            /// <param name="WinPath">windows-style path.</param>
+            /// <returns>returns the leaf component, or the input unchanged when it has no separator.</returns>
+            private static string WindowsLeafName(string WinPath)
+            {
+                if (string.IsNullOrEmpty(WinPath))
+                    return WinPath;
+
+                int Cut = WinPath.LastIndexOfAny(WindowsPathSeparators);
+                return Cut >= 0 ? WinPath.Substring(Cut + 1) : WinPath;
+            }
+
+            private static readonly char[] WindowsPathSeparators = { '\\', '/' };
+
             private static string TryResolveFromWindowsLibs(string WinPath)
             {
                 if (string.IsNullOrWhiteSpace(WinPath))
@@ -2929,7 +2950,7 @@ namespace Brovan
                 // Some callers pass "\\KnownDlls\\xxx.dll" or similar, which ultimately maps to System32.
                 if (Normalized.StartsWith("\\KnownDlls\\", StringComparison.OrdinalIgnoreCase) || Normalized.StartsWith("\\KnownDlls32\\", StringComparison.OrdinalIgnoreCase))
                 {
-                    string Leaf = Path.GetFileName(Normalized);
+                    string Leaf = WindowsLeafName(Normalized);
                     return TryResolveFromWindowsLibsByLeaf(Leaf);
                 }
 
@@ -2944,7 +2965,11 @@ namespace Brovan
                 const string GlobalizationPrefix = "C:\\Windows\\Globalization\\";
                 if (Normalized.StartsWith(GlobalizationPrefix, StringComparison.OrdinalIgnoreCase))
                 {
-                    string Leaf = Path.GetFileName(Normalized);
+                    // Extract the leaf with WindowsLeafName, NOT Path.GetFileName: the latter splits on
+                    // Path.DirectorySeparatorChar, which is '/' on Linux, so on a backslash Windows path it
+                    // returns the WHOLE string (no leaf) and the WindowsLibs lookup silently misses. That miss
+                    // is exactly why sortdefault.nls could not be opened, collapsing kernelbase's NLS sort init.
+                    string Leaf = WindowsLeafName(Normalized);
                     return TryResolveFromWindowsLibsByLeaf(Leaf);
                 }
 
@@ -2970,8 +2995,9 @@ namespace Brovan
                 if (!string.IsNullOrEmpty(Full) && (File.Exists(Full) || Directory.Exists(Full)))
                     return Full;
 
-                // Fall back to a case-insensitive leaf search.
-                string Leaf = Path.GetFileName(WindowsRelative);
+                // Fall back to a case-insensitive leaf search (WindowsLeafName, not Path.GetFileName,
+                // so a backslash relative path yields its leaf on Linux instead of the whole string).
+                string Leaf = WindowsLeafName(WindowsRelative);
                 return TryResolveFromWindowsLibsByLeaf(Leaf);
             }
 
