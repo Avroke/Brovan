@@ -8,9 +8,16 @@ clean analysis box) it reads three things from its own base directory
 | Path | Purpose | Consumed by |
 |------|---------|-------------|
 | `WindowsLibs\*.dll` | x64 "System32" view of the Windows DLLs | `GeneralHelper.GetWindowsLibPath` (`System32` on Linux) |
+| `WindowsLibs\*.nls` | locale/codepage tables (`locale.nls`, …) | `NtInitializeNlsFiles` — kernelbase init |
 | `WindowsLibs\SysWOW64\*.dll` | x86 "SysWOW64" view (needed for 32-bit samples) | `GeneralHelper.SysWOW64` |
 | `WinReg\{SYSTEM,SECURITY,SOFTWARE,HARDWARE,SAM}` | real regf registry hives | `RegistryManager` / `VerifyRegDump` |
 | `apisetmap.bin` *(optional)* | host ApiSet map; auto-generated on first run if absent | `BinaryEmulator.ApiSetMapPath` |
+
+> **NLS matters.** kernelbase maps `locale.nls` during its init via
+> `NtInitializeNlsFiles`. If the bundle omits it, kernelbase init fails with
+> `STATUS_DLL_INIT_FAILED` (exit `0xC0000142`) and every sample dies before its
+> entry point. The export script ships all `System32\*.nls` (a few MB) for this
+> reason; the importers warn if `locale.nls` is absent.
 
 On Windows, Brovan reads the live `C:\Windows\System32` / `SysWOW64` and dumps
 the hives + ApiSet map itself, so these scripts are only needed to **carry those

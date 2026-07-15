@@ -9,11 +9,15 @@
     'ntdll.dll', and resolves every other imported DLL on demand from a shipped
     'WindowsLibs\' directory (see GeneralHelper.GetWindowsLibPath). On Linux it
     reads:
-        - WindowsLibs\            -> the x64 "System32" view
-        - WindowsLibs\SysWOW64\   -> the x86 "SysWOW64" view
+        - WindowsLibs\            -> the x64 "System32" view (*.dll + *.nls)
+        - WindowsLibs\SysWOW64\   -> the x86 "SysWOW64" view (*.dll + *.nls)
         - WinReg\{SYSTEM,SECURITY,SOFTWARE,HARDWARE,SAM}  -> real regf hives
         - apisetmap.bin           -> the host ApiSet map (optional; Brovan
                                      auto-generates one on first run if absent)
+
+    The *.nls tables (locale.nls / sortdefault.nls / codepages) matter: kernelbase
+    maps locale.nls during init, and without it kernelbase init fails and every
+    sample dies before reaching its entry point.
 
     This script must run on a real Windows machine (ideally elevated, so the
     SECURITY and SAM hives can be saved). It stages those three pieces and
@@ -167,13 +171,30 @@ function Copy-DllSet {
     return $copied
 }
 
+# NLS (National Language Support) tables live in System32 as *.nls, NOT *.dll, so
+# the DLL copy skips them. kernelbase.dll's init calls NtInitializeNlsFiles and
+# maps locale.nls; without it kernelbase init FAILS (STATUS_DLL_INIT_FAILED) and
+# every sample dies before main. Always ship them (small: a few MB total).
+function Copy-NlsSet {
+    param([string]$SourceDir, [string]$DestDir, [string]$Label)
+    if (-not (Test-Path $SourceDir)) { return 0 }
+    Copy-Item -Path (Join-Path $SourceDir '*.nls') -Destination $DestDir -Force -ErrorAction SilentlyContinue
+    $cnt = (Get-ChildItem $DestDir -Filter *.nls -File -ErrorAction SilentlyContinue).Count
+    if (-not (Test-Path (Join-Path $DestDir 'locale.nls'))) {
+        Write-Warn2 "${Label}: locale.nls not found - kernelbase init will fail on the target."
+    }
+    return $cnt
+}
+
 Write-Step "Staging x64 DLLs (System32 view -> WindowsLibs\)"
 $n64 = Copy-DllSet -SourceDir $sys32 -DestDir $libDir -Label 'System32 (x64)'
-Write-Ok  "x64: $n64 DLL(s) staged."
+$nls64 = Copy-NlsSet -SourceDir $sys32 -DestDir $libDir -Label 'System32 (x64)'
+Write-Ok  "x64: $n64 DLL(s) + $nls64 NLS file(s) staged."
 
 Write-Step "Staging x86 DLLs (SysWOW64 view -> WindowsLibs\SysWOW64\)"
 $n86 = Copy-DllSet -SourceDir $syswow -DestDir $wow64Dir -Label 'SysWOW64 (x86)'
-Write-Ok  "x86: $n86 DLL(s) staged."
+$nls86 = Copy-NlsSet -SourceDir $syswow -DestDir $wow64Dir -Label 'SysWOW64 (x86)'
+Write-Ok  "x86: $n86 DLL(s) + $nls86 NLS file(s) staged."
 
 # --- Registry hives -------------------------------------------------------------
 $hivesSaved = @()
@@ -269,11 +290,13 @@ $manifest = @(
     ('Source  : {0}' -f $srcDesc)
     ('Mode    : {0}' -f ($(if ($IncludeAllSystem32) { 'ALL System32/SysWOW64' } else { 'curated DLL set' })))
     ('DLLs    : x64={0}  x86={1}' -f $n64, $n86)
+    ('NLS     : x64={0}  x86={1}' -f $nls64, $nls86)
     ('Hives   : {0}' -f ($(if ($hivesSaved) { $hivesSaved -join ', ' } else { '(none)' })))
     ('ApiSet  : {0}' -f ($(if ($apiSetIncluded) { 'apisetmap.bin included' } else { 'not included (Brovan will generate)' })))
     ''
     'Layout expected next to Brovan.exe/Brovan.dll:'
     '  WindowsLibs\*.dll             (x64 System32 view)'
+    '  WindowsLibs\*.nls             (locale/codepage tables; kernelbase init)'
     '  WindowsLibs\SysWOW64\*.dll    (x86 view)'
     '  WinReg\{SYSTEM,SECURITY,SOFTWARE,HARDWARE,SAM}'
     '  apisetmap.bin                 (optional)'

@@ -107,6 +107,16 @@ if (Test-Path $ntdll) {
     $ok = $false
 }
 
+# locale.nls is mapped by kernelbase during init; without it kernelbase init
+# fails (STATUS_DLL_INIT_FAILED) and samples die before their entry point.
+$localeNls = Join-Path $libDir 'locale.nls'
+if ((Test-Path $localeNls) -and (Get-Item $localeNls).Length -gt 0) {
+    $ncnt = (Get-ChildItem $libDir -Filter *.nls -File -ErrorAction SilentlyContinue).Count
+    Write-Ok "WindowsLibs\ NLS tables present ($ncnt *.nls, locale.nls OK)."
+} else {
+    Write-Warn2 'WindowsLibs\locale.nls missing - kernelbase init will fail; re-export with an NLS-aware bundle.'
+}
+
 $wow = Join-Path $libDir 'SysWOW64'
 if (Test-Path (Join-Path $wow 'ntdll.dll')) {
     $cnt = (Get-ChildItem $wow -Filter *.dll -File -ErrorAction SilentlyContinue).Count

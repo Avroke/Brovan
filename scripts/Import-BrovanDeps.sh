@@ -140,6 +140,15 @@ else
     status_ok=0
 fi
 
+# locale.nls is mapped by kernelbase during init; without it kernelbase init
+# fails (STATUS_DLL_INIT_FAILED) and samples die before their entry point.
+if [ -s "$lib_dir/locale.nls" ]; then
+    ncnt=$(find "$lib_dir" -maxdepth 1 -type f -iname '*.nls' 2>/dev/null | wc -l | tr -d ' ')
+    ok "WindowsLibs/ NLS tables present ($ncnt *.nls, locale.nls OK)."
+else
+    warn "WindowsLibs/locale.nls missing - kernelbase init will fail; re-export with an NLS-aware bundle."
+fi
+
 wow_dir="$lib_dir/SysWOW64"
 if [ -f "$wow_dir/ntdll.dll" ]; then
     cnt=$(find "$wow_dir" -maxdepth 1 -type f -iname '*.dll' 2>/dev/null | wc -l | tr -d ' ')
