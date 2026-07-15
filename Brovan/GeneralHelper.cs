@@ -2933,6 +2933,21 @@ namespace Brovan
                     return TryResolveFromWindowsLibsByLeaf(Leaf);
                 }
 
+                // NLS data outside System32: the linguistic sorting table lives at
+                // C:\Windows\Globalization\Sorting\SortDefault.nls. kernelbase's CompareString /
+                // LCMapString (reached by StrCmpNIW / StrCmpIW / lstrcmpi and the CRT collation)
+                // maps that file to build its comparison tables; if it cannot be opened the
+                // comparison returns an error, so case-insensitive equality silently fails (this
+                // was the al-khaser injected-DLL false-positive: every System32 module compared
+                // "not equal" to the System32 prefix). The .nls files are shipped flat in
+                // WindowsLibs, so resolve any C:\Windows\Globalization\... file by leaf.
+                const string GlobalizationPrefix = "C:\\Windows\\Globalization\\";
+                if (Normalized.StartsWith(GlobalizationPrefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    string Leaf = Path.GetFileName(Normalized);
+                    return TryResolveFromWindowsLibsByLeaf(Leaf);
+                }
+
                 return null;
             }
 

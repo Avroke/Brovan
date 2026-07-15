@@ -28,8 +28,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (!Instance.WinHelper.TryGetKnownObjectDirectoryHandle(FullName, out ulong OutHandle))
             {
-                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
-                    Instance.TriggerEventMessage($"[!] NtOpenDirectoryObject object name not found: Name=\"{ObjectName}\", DesiredAccess=0x{((ulong)DesiredAccess):X}", LogFlags.Syscall);
+                if ((Instance.Settings.Flags & LogFlags.Important) != 0)
+                    Instance.TriggerEventMessage($"[!] NtOpenDirectoryObject: unsupported object directory \"{FullName}\" (Name=\"{ObjectName}\", DesiredAccess=0x{((ulong)DesiredAccess):X}).", LogFlags.Important);
                 return NTSTATUS.STATUS_NOT_SUPPORTED;
             }
 

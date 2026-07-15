@@ -685,6 +685,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (RootDirectory == HandleManager.RPC_CONTROL_DIRECTORY)
                 return "\\RPC Control";
 
+            if (RootDirectory == HandleManager.DOS_DEVICES_DIRECTORY)
+                return "\\??";
+
             return null;
         }
 
@@ -722,6 +725,19 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Normalized.Equals("\\RPC Control", StringComparison.OrdinalIgnoreCase))
             {
                 Handle = HandleManager.RPC_CONTROL_DIRECTORY;
+                return true;
+            }
+
+            // DOS-devices object directory, opened by QueryDosDevice / GetLogicalDriveStrings /
+            // GetVolumePathName to resolve drive-letter symbolic links (\??\C: -> \Device\...).
+            // The per-session (\??), global (\GLOBAL??), legacy (\DosDevices) and explicit
+            // session (\Sessions\0\DosDevices) aliases all name the same directory.
+            if (Normalized.Equals("\\??", StringComparison.OrdinalIgnoreCase) ||
+                Normalized.Equals("\\GLOBAL??", StringComparison.OrdinalIgnoreCase) ||
+                Normalized.Equals("\\DosDevices", StringComparison.OrdinalIgnoreCase) ||
+                Normalized.Equals("\\Sessions\\0\\DosDevices", StringComparison.OrdinalIgnoreCase))
+            {
+                Handle = HandleManager.DOS_DEVICES_DIRECTORY;
                 return true;
             }
 
@@ -1936,6 +1952,33 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return "syswow64\\" + Lower.Substring(SysWow64Index + "\\windows\\syswow64\\".Length);
 
             return Lower;
+        }
+
+        /// <summary>
+        /// Converts a DOS-style guest path (<c>C:\dir\file</c>) into its NT device form
+        /// (<c>\Device\HarddiskVolume1\dir\file</c>), the shape returned by
+        /// NtQueryInformationProcess(ProcessImageFileName) and GetProcessImageFileNameW /
+        /// GetMappedFileName. The volume matches what QueryDosDevice("C:") resolves the C:
+        /// symbolic link to, so a caller that normalises via the device map stays coherent.
+        /// Paths already in device form (or unrooted) are returned unchanged.
+        /// </summary>
+        public string DosPathToNtDevicePath(string Path)
+        {
+            if (string.IsNullOrWhiteSpace(Path))
+                return string.Empty;
+
+            string Value = Path.Replace('/', '\\').TrimEnd('\0');
+
+            if (Value.StartsWith("\\Device\\", StringComparison.OrdinalIgnoreCase))
+                return Value;
+
+            if (Value.StartsWith("\\??\\", StringComparison.OrdinalIgnoreCase))
+                Value = Value.Substring(4);
+
+            if (Value.Length >= 2 && char.IsLetter(Value[0]) && Value[1] == ':')
+                return "\\Device\\HarddiskVolume1" + Value.Substring(2);
+
+            return Value;
         }
 
         public string NormalizeWindowsImagePath(string Path)
