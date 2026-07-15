@@ -664,6 +664,26 @@ before running. Brovan's `\Globalization\...`-by-leaf resolver (commit `2f6e5ae`
 already maps the file wherever it lands in `WindowsLibs\`, so no runtime change
 is needed.
 
+**Complete missing-file inventory (resolver-instrumented, this pass).** To settle
+"what else is the bundle short of", the read-path resolver was instrumented to log
+every `*.nls` / `*.dll` guest open that falls through to a non-existent VirtualFS
+path. Across a full run al-khaser touches exactly three unshipped files, all now
+covered by the curated-set / NLS fixes:
+
+- `Globalization\Sorting\SortDefault.nls` — the F3 collation table (requested
+  **once** per run now, confirming the F3 code fix ended the pre-`b205488`
+  re-open storm — the residual is purely the missing file).
+- `WUDFPlatform.dll` — al-khaser resolves `WudfIs{Any,Kernel,User}DebuggerPresent`
+  from it for its WUDF debugger checks.
+- `faultrep.dll` — al-khaser's Windows-Error-Reporting-based probe.
+
+The two DLLs are now in the `Export-BrovanDeps.ps1` curated set. Their absence is
+**low-severity** (the `GetProcAddress` calls return NULL, so those specific probes
+silently no-op rather than exercising the real detection path — they do not fault
+or change the terminus), but shipping them closes the last fidelity gaps the
+al-khaser workload exposes in the dependency bundle. No other `*.nls` / `*.dll`
+is requested-but-missing.
+
 **Bonus finding surfaced by getting further — a second injected-library FP.** The
 `Walking process memory for hidden modules` probe reported every System32 module
 (`KERNEL32.DLL`, `KERNELBASE.dll`, `win32u.dll`, …) as injected. Root cause:

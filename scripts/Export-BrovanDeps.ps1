@@ -122,6 +122,11 @@ $CuratedDlls = @(
     'crypt32','cryptbase','cryptsp','bcrypt','bcryptprimitives','ncrypt','ncryptsslp',
     'wintrust','msasn1','amsi',
     'comctl32','comdlg32','setupapi','cfgmgr32','devobj',
+    # WUDFPlatform: al-khaser resolves WudfIs{Any,Kernel,User}DebuggerPresent from it
+    # for its WUDF debugger checks; faultrep: al-khaser's WER-based probe. Without them
+    # the GetProcAddress calls return NULL, those probes silently no-op instead of
+    # exercising the real detection path. Both live in a standard System32.
+    'WUDFPlatform','faultrep',
     'powrprof','umpdc','wmiclnt','psapi','version','profapi','userenv',
     'netapi32','netutils','samcli','srvcli','wkscli','logoncli',
     'secur32','sspicli','dbghelp','dbgcore','imagehlp',
