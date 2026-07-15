@@ -1,4 +1,5 @@
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
@@ -938,6 +939,7 @@ namespace Brovan
                     Directory.CreateDirectory(VirtualFileSystemRoot);
                     Directory.CreateDirectory(LinuxVirtualFileSystemRoot);
                     EnsureLinuxBaseFilesystem(LinuxVirtualFileSystemRoot);
+                    EnsureWindowsBaseFilesystem(Path.Combine(VirtualFileSystemRoot, "C"));
                 }
                 catch (Exception ex)
                 {
@@ -1109,6 +1111,135 @@ namespace Brovan
                     Directory.CreateDirectory(Parent);
 
                 File.WriteAllText(HostPath, Content, new UTF8Encoding(false));
+            }
+
+            /// <summary>
+            /// Seeds the virtual C: drive with the always-present Windows system images the
+            /// emulator advertises in its synthetic process table (explorer.exe, the System32
+            /// core services, ...). On a real Windows install these files always exist, so a
+            /// sample that resolves a process image path and then opens / stats / compares it
+            /// (e.g. std::filesystem::equivalent against C:\Windows\explorer.exe, which throws
+            /// std::filesystem_error when the file is missing) must find a real, PE-parseable
+            /// file there instead of STATUS_OBJECT_NAME_NOT_FOUND. The mirror of
+            /// <see cref="EnsureLinuxBaseFilesystem"/>. Existing files are left untouched.
+            /// </summary>
+            /// <param name="CRoot">host directory mapped to the emulated C: drive.</param>
+            private static void EnsureWindowsBaseFilesystem(string CRoot)
+            {
+                if (string.IsNullOrWhiteSpace(CRoot))
+                    return;
+
+                Directory.CreateDirectory(CombineWindowsRelativePath(CRoot, "Windows"));
+                Directory.CreateDirectory(CombineWindowsRelativePath(CRoot, "Windows\\System32"));
+
+                byte[] Stub = BuildMinimalWindowsPeStub();
+
+                // explorer.exe lives directly under C:\Windows and is what the synthetic parent
+                // process advertises as its image path.
+                WriteWindowsFileIfMissing(CRoot, "Windows\\explorer.exe", Stub);
+
+                // System32 executables a Windows 10 install always has running, mirroring the
+                // synthetic process table in WinSyscallsHelper so any advertised image is openable.
+                string[] System32Executables =
+                {
+                    "smss.exe", "csrss.exe", "wininit.exe", "services.exe", "winlogon.exe",
+                    "lsass.exe", "svchost.exe", "dwm.exe", "fontdrvhost.exe", "ntoskrnl.exe",
+                    "conhost.exe", "taskhostw.exe", "RuntimeBroker.exe", "sihost.exe",
+                    "spoolsv.exe", "ctfmon.exe", "userinit.exe", "dllhost.exe",
+                    "cmd.exe", "rundll32.exe", "regsvr32.exe", "SearchIndexer.exe",
+                };
+
+                foreach (string Executable in System32Executables)
+                    WriteWindowsFileIfMissing(CRoot, "Windows\\System32\\" + Executable, Stub);
+            }
+
+            private static void WriteWindowsFileIfMissing(string Root, string RelativePath, byte[] Content)
+            {
+                string HostPath = CombineWindowsRelativePath(Root, RelativePath);
+                if (string.IsNullOrWhiteSpace(HostPath) || File.Exists(HostPath) || Directory.Exists(HostPath))
+                    return;
+
+                string Parent = Path.GetDirectoryName(HostPath);
+                if (!string.IsNullOrWhiteSpace(Parent))
+                    Directory.CreateDirectory(Parent);
+
+                File.WriteAllBytes(HostPath, Content);
+            }
+
+            /// <summary>
+            /// Builds a minimal but valid PE32+ (x64) image used to back the always-present
+            /// Windows system executables in the virtual filesystem. It only needs to open,
+            /// stat and parse as a real PE — content is never executed — so the image is a
+            /// single .text section containing "xor eax,eax; ret".
+            /// </summary>
+            private static byte[] BuildMinimalWindowsPeStub()
+            {
+                const int HeadersSize = 0x200;
+                const int TextRaw = 0x200;
+                const uint TextRva = 0x1000;
+                const int OptSize = 0xF0;
+
+                byte[] Image = new byte[HeadersSize + 0x200];
+                Span<byte> Buffer = Image;
+
+                // DOS header.
+                Buffer[0] = (byte)'M';
+                Buffer[1] = (byte)'Z';
+                BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x3C), 0x40); // e_lfanew
+
+                int PeOff = 0x40;
+                Buffer[PeOff] = (byte)'P';
+                Buffer[PeOff + 1] = (byte)'E';
+
+                // COFF file header.
+                int CoffOff = PeOff + 4;
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(CoffOff + 0x00), 0x8664);  // Machine x64
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(CoffOff + 0x02), 1);       // NumberOfSections
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(CoffOff + 0x10), OptSize); // SizeOfOptionalHeader
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(CoffOff + 0x12), 0x22);    // EXECUTABLE_IMAGE | LARGE_ADDRESS_AWARE
+
+                // Optional header (PE32+).
+                int OptOff = CoffOff + 0x14;
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(OptOff + 0x00), 0x20B);        // Magic PE32+
+                Buffer[OptOff + 0x02] = 14;                                                          // MajorLinkerVersion
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x04), 0x200);        // SizeOfCode
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x10), TextRva);      // AddressOfEntryPoint
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x14), TextRva);      // BaseOfCode
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(OptOff + 0x18), 0x140000000);  // ImageBase
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x20), 0x1000);       // SectionAlignment
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x24), 0x200);        // FileAlignment
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(OptOff + 0x28), 10);           // MajorOperatingSystemVersion
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(OptOff + 0x2C), 10);           // MajorImageVersion
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(OptOff + 0x30), 6);            // MajorSubsystemVersion
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x38), TextRva + 0x1000); // SizeOfImage
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x3C), HeadersSize);  // SizeOfHeaders
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(OptOff + 0x44), 2);            // Subsystem WINDOWS_GUI
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(OptOff + 0x46), 0x8160);       // DllCharacteristics
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(OptOff + 0x48), 0x100000);     // SizeOfStackReserve
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(OptOff + 0x50), 0x1000);       // SizeOfStackCommit
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(OptOff + 0x58), 0x100000);     // SizeOfHeapReserve
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(OptOff + 0x60), 0x1000);       // SizeOfHeapCommit
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x6C), 16);           // NumberOfRvaAndSizes
+
+                // Single .text section header.
+                int SecOff = OptOff + OptSize;
+                Buffer[SecOff + 0] = (byte)'.';
+                Buffer[SecOff + 1] = (byte)'t';
+                Buffer[SecOff + 2] = (byte)'e';
+                Buffer[SecOff + 3] = (byte)'x';
+                Buffer[SecOff + 4] = (byte)'t';
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(SecOff + 0x08), 0x200);        // VirtualSize
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(SecOff + 0x0C), TextRva);      // VirtualAddress
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(SecOff + 0x10), 0x200);        // SizeOfRawData
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(SecOff + 0x14), TextRaw);      // PointerToRawData
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(SecOff + 0x24), 0x60000020);   // CODE | EXECUTE | READ
+
+                // Entry code: xor eax,eax ; ret.
+                Image[TextRaw + 0] = 0x31;
+                Image[TextRaw + 1] = 0xC0;
+                Image[TextRaw + 2] = 0xC3;
+
+                return Image;
             }
 
             private sealed class UbuntuRootfsPendingLink
