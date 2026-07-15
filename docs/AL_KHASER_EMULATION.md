@@ -684,6 +684,48 @@ or change the terminus), but shipping them closes the last fidelity gaps the
 al-khaser workload exposes in the dependency bundle. No other `*.nls` / `*.dll`
 is requested-but-missing.
 
+**Unimplemented ntdll syscalls the run exercises.** Separately from missing files,
+al-khaser reaches a handful of ntdll syscalls Brovan answered with
+`STATUS_NOT_SUPPORTED`. The SSN→name map is authoritative (extracted from the
+shipped 19044 ntdll stubs): `0x19E NtSetInformationVirtualMemory` (31×),
+`0xFB NtGetWriteWatch` (5×), `0x162 NtQueryTimerResolution`, `0xA5
+NtCreateDebugObject`, `0x1BD NtSystemDebugControl`, `0x179 NtResetWriteWatch`,
+`0x147 NtQueryInformationAtom` (the `0x1037` / `0x105D` ones are `win32u` GUI
+syscalls — a different subsystem). Four are now implemented (each auto-registers
+via the `IWinSyscall` generator; the SSN is read from the shipped ntdll, so it
+tracks the build):
+
+- **`NtSetInformationVirtualMemory` (0x19E)** — advisory VM operations (prefetch /
+  page-priority / CFG call-target / working-set / hot-patch / contiguity /
+  prepopulate) the MSVC loader/CRT drive; validates the class + `MEMORY_RANGE_ENTRY`
+  array + payload and returns success (none observably mutates emulated memory).
+- **`NtQueryTimerResolution` (0x162)** — coarsest/finest/current interrupt period,
+  kept coherent with the `156250` (15.625 ms) increment `NtQuerySystemInformation`
+  already reports.
+- **`NtSystemDebugControl` (0x1BD)** — **a real fidelity fix, not just a warning
+  removal.** al-khaser's `NtSystemDebugControl` kernel-debugger probe got
+  `STATUS_NOT_SUPPORTED` and flagged it **BAD** (detected). Returning the correct
+  "no kernel debugger" `STATUS_DEBUGGER_INACTIVE` (the same answer
+  `NtQueryDebugFilterState` already gives) flips that probe to **GOOD**: the run
+  verdict improved **38 GOOD / 10 BAD → 39 GOOD / 9 BAD**, stable across a full
+  149 M-instruction interleaving, terminus unchanged.
+- **`NtCreateDebugObject` (0xA5)** — reached lazily via ntdll's `DbgUiConnectToDbg`;
+  creating a debug object is not itself a debugger-presence signal (that answer is
+  `NtQueryInformationProcess(ProcessDebugObjectHandle)` → `STATUS_PORT_NOT_SET`), so
+  it allocates a real handle (new `HandleType.DebugObjectHandle`) and returns it.
+
+**Deferred (need a feature, not a stub).** `NtGetWriteWatch` / `NtResetWriteWatch`
+back al-khaser's write-watch technique, which detects an emulator when
+`GetWriteWatch` *wrongly succeeds* ("succeeded when it should've failed"). A
+faithful implementation needs per-region write tracking — a `MEM_WRITE_WATCH`
+allocation flag plus a global memory-write hook to record dirty pages — which has a
+per-write throughput cost (the F2 concern) and is a real feature, not a stub. The
+current `STATUS_NOT_SUPPORTED` does **not** trip al-khaser's detection (it only
+flags on wrong success), so this is a fidelity-only gap, deferred deliberately
+rather than papered over with an always-fail stub. `NtQueryInformationAtom` (0x147,
+1×) similarly needs atom-table modeling; the `win32u` GUI syscalls are out of scope
+for the ntdll pass.
+
 **Bonus finding surfaced by getting further — a second injected-library FP.** The
 `Walking process memory for hidden modules` probe reported every System32 module
 (`KERNEL32.DLL`, `KERNELBASE.dll`, `win32u.dll`, …) as injected. Root cause:
