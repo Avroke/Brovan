@@ -40,19 +40,40 @@ Windows dependencies to another machine** (e.g. a Linux analysis host).
   reused; otherwise the script runs Brovan once to dump the host map. If neither
   works, Brovan regenerates a custom map on first run.
 
-## Import (run on the analysis host — Linux `pwsh` or Windows)
+## Import (run on the analysis host)
 
-```powershell
-pwsh ./Import-BrovanDeps.ps1 -Archive ./BrovanDeps.zip \
-     -Destination ./Brovan/bin/Release/net8.0/linux-x64
+Two equivalent importers are provided — pick by what's installed on the host:
+
+```bash
+# Linux / macOS, no PowerShell needed (uses unzip / 7z / bsdtar):
+./Import-BrovanDeps.sh -a ./BrovanDeps.zip \
+    -d ./Brovan/bin/Release/net8.0/linux-x64            # --force to overwrite
 ```
 
-`-Destination` must be the directory that contains `Brovan.dll` (Brovan reads
-these paths relative to its own base directory). The script unpacks
-`WindowsLibs\`, `WinReg\`, and `apisetmap.bin` into place and verifies the
-layout: it fails loudly if `WindowsLibs\ntdll.dll` or any of the 5 hives are
-missing, and warns (non-fatal) if the `SysWOW64` view or `apisetmap.bin` is
-absent.
+```powershell
+# Anywhere PowerShell 7+ (pwsh) or Windows PowerShell is available:
+pwsh ./Import-BrovanDeps.ps1 -Archive ./BrovanDeps.zip `
+     -Destination ./Brovan/bin/Release/net8.0/linux-x64   # -Force to overwrite
+```
+
+`-Destination` / `-d` must be the directory that contains `Brovan.dll` (Brovan
+reads these paths relative to its own base directory). Both scripts unpack
+`WindowsLibs/`, `WinReg/`, and `apisetmap.bin` into place and verify the layout:
+they fail loudly (exit 2) if `WindowsLibs/ntdll.dll` or any of the 5 hives are
+missing, warn (non-fatal) if the `SysWOW64` view or `apisetmap.bin` is absent,
+and refuse to overwrite existing deps without `--force` / `-Force` (exit 1).
+
+### Why no `.bat`?
+
+- **Export** is inherently Windows-side (`reg save`, System32 access, host
+  ApiSet-map dump). PowerShell handles zip creation, elevation detection, and
+  file selection natively; a `.bat` would have to shell out to PowerShell/tar
+  for zipping anyway and detect admin/enumerate DLLs far more awkwardly.
+- **Import** only matters on the *target* host. If that host is Windows you
+  don't need the bundle at all (Brovan reads `C:\Windows\System32` directly), so
+  a Windows-only `.bat` importer would cover the one case that doesn't need it.
+  The useful gap was a **Linux** importer with no PowerShell dependency — that's
+  `Import-BrovanDeps.sh`.
 
 ## Notes / limitations
 
