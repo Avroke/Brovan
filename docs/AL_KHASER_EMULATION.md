@@ -26,13 +26,16 @@ Each landed fix unblocked the next layer. Instruction counts are for
 | **`4b9540f`** NtReadVirtualMemory by-value | 22.8 M+ (module enum completes) | injected-library AV cleared |
 | **`ed5b1ab`** guest image path | 22.8 M+ | `log.txt` create + own-image / `equivalent` host-path leak cleared |
 | **`2f6e5ae`** QueryDosDevice / PIFN / NLS path | 22.8 M+ | anti-injection prerequisites fixed (FP residual = NLS collation, F3) |
+| **`bc151f0`** IRETQ probe memo | 24.1 M (throughput; terminus unchanged) | ~11 % of CPU-bound run time reclaimed on the per-instruction hot path |
 
 al-khaser now loads fully, runs its detection suite, walks the PEB loader lists,
-enumerates its modules, and prints its verdicts. The later two fixes do not move
+enumerates its modules, and prints its verdicts. The last three fixes do not move
 the instruction terminus — they close specific behavioural/stealth gaps
-(dropped-file capture, injected-DLL prerequisites). The remaining termini are a
-threading frontier (F1), raw emulation throughput (F2), and the NLS-collation
-residual behind the injected-DLL false positive (F3).
+(dropped-file capture, injected-DLL prerequisites) or reclaim throughput. The
+remaining termini are a threading frontier (F1), the NLS-collation residual
+behind the injected-DLL false positive (F3), and — measured this pass — a
+throughput picture (F2) where raw per-instruction speed is already healthy so
+the wall-time is instead dominated by F1's spin and F3's NLS re-open storm.
 
 ## Reproduction
 
@@ -50,10 +53,25 @@ printf 'start\nexit\n' | dotnet Brovan.dll /path/to/al-khaser_x64.exe
 
 Harness gotchas learned the hard way:
 
+- Build with the **.NET 9 SDK** (`/opt/dotnet/dotnet`, 9.0.x), not the distro
+  `/usr/bin/dotnet` (8.0.x). `which dotnet` may resolve to the 8.0 one, which
+  loads the `Brovan.Generators` Vulkan source generator against Roslyn 4.8 and
+  silently emits nothing — the build then fails with ~23 `CS0103 'BvkMK' /
+  'BrovVulkStructMeta' does not exist` errors that look like broken source but
+  are just the wrong SDK. `export PATH=/opt/dotnet:$PATH` first. The target
+  framework stays net8.0.
 - `dotnet build` writes to `bin/Release/net8.0/`, **not** `bin/Release/net8.0/linux-x64/`
   (the deps live in the latter). After building, copy `Brovan.dll` across, or
   run from `net8.0/` with the deps beside it. Running the stale `linux-x64`
   binary silently masks code changes.
+- To measure throughput deterministically, `RunMlfqScheduler(MaxTotalInstructions:)`
+  bounds a run cleanly (the scheduler returns once the quantum-estimated `Total`
+  crosses the bound). `WindowsGuest.Start` calls it with no bound; a temporary
+  env-gated override plus a stopwatch around it gives reproducible insn/s.
+  Silent (`-s`) redirects stdout **and** stderr, so route any measurement print
+  to a file, and note that `-s` runs call `Emulator.Start()` directly (bypassing
+  the `case "start"` dispatcher), so instrument inside `Start`/the guest, not the
+  menu.
 - `-c run` executes `ExecuteCommand("run")`; if the emulator was not `start`ed
   first the call throws and is swallowed, dropping to the REPL prompt with no
   emulation. Use the `start` command (it runs the full guest to termination).
@@ -275,6 +293,32 @@ downstream consumption of it (section-map + `CompareString` collation) does not
 yet produce a correct result, so the compare still errs. This is a deeper
 NLS-emulation item, tracked as **F3**.
 
+### `bc151f0` — memoize the per-instruction IRETQ probe (throughput)
+
+**Symptom:** the per-instruction code hook (`InstructionHandler`) issued a
+`uc_mem_read` on **every 2-byte instruction** to test for the 64-bit `IRETQ`
+opcode (`48 CF`). A clean in-binary A/B on the CPU-bound phase (5M-instruction
+bound, 6 interleaved runs, silent) measured that read at **~11 %** of run time
+(median 1437 ms → 1284 ms with the memo).
+
+**Why the read exists (and can't just be deleted):** Brovan emulates `IRETQ`
+manually (pop RIP/RFLAGS/RSP from the trap frame) because Unicorn's own `IRETQ`
+diverges in the flat long-mode setup. Proven: with the manual path disabled,
+al-khaser_x64 bails **14M instructions early** (10.2M vs 24.1M) — it is
+load-bearing, so the fix must preserve the exact detection, not remove it.
+
+**Fix:** memoize the probe in a direct-mapped table keyed by code address
+(`BinaryEmulator.WindowsBridge.cs`). Mapped code bytes are immutable for the
+life of a mapping, so a slot hit reuses the prior result; a miss (address
+mismatch, incl. eviction by collision) always re-reads and stays correct. The
+only unmodelled case is self-modifying code that rewrites an already-cached
+address into/out of `48 CF`, which no real code produces.
+
+**Validation:** the memoized build reaches the same **~24.07M-instruction**
+terminus as before (vs the 10.2M divergence when the `IRETQ` path is removed),
+with **0 new faults** across al-khaser's load of 34 modules. This is a
+throughput fix — it does not move the terminus.
+
 ### Host-environment fixes (intentionally **not** committed)
 
 These are specific to the Linux build/run host and must not be pushed into
@@ -331,13 +375,40 @@ force a wakeup re-scan or advance virtual time.
 
 ### F2 — Emulation throughput
 
-**Symptom:** even the progressing run needs well over 240 s to finish al-khaser's
-full suite (it enumerates 96 modules in ~2 min).
+**Measured, not assumed (this pass).** Bounding the scheduler and timing it
+(silent, so no trace I/O) shows Brovan's **raw per-instruction throughput is
+healthy**: ~4.3M insn/s early, ~6.3M insn/s steady-state; a full detection pass
+(~24M instructions) that lands on the scheduler's clean-bail path completes in
+**~4 s**. Traced (no `-s`) is ~2.9M insn/s — a ~1.6× penalty from the
+per-instruction CFT/ENTRY module/section lookups, **not** console I/O (only ~300
+lines print per 2.4M instructions). So "raw speed" is not the problem.
 
-**Note:** this is performance, not a correctness bug — al-khaser genuinely
-executes a large amount of code. It only *looks* like a hang because the run
-budget is too short. Relevant if the goal is a clean end-to-end verdict rather
-than partial coverage.
+**Where the wall-time actually goes.** The >240 s "hang" is not slow
+instructions — it is a very large *number* of instructions, from two sources,
+both outside pure throughput:
+
+- **F1 spin.** On the livelocked interleaving a thread free-runs `RtlpBackoff`
+  (`rdtsc`+`pause`) forever; at ~5M insn/s a 2-minute run is ~500M no-progress
+  instructions. The biggest wall-time lever is a scheduler spin/livelock
+  detector (see F1), not per-instruction micro-optimisation.
+- **F3 NLS storm.** `kernelbase` re-opens `sortdefault.nls` ≈4684×/run (+ ~40
+  section ops) to drive the case-insensitive compares in the injected-DLL check.
+  Caching that mapping so the re-opens are cheap is a genuine throughput win, but
+  it belongs with the F3 NLS pass (same file, same pipeline).
+
+**Per-instruction ceiling (for reference).** Disabling both always-on
+`UC_HOOK_CODE(1,0)` hooks raised the CPU-bound phase from 4.3M→7.2M insn/s
+(~32 %): `InstructionHandler` ~24 % (of which the `IRETQ` `uc_mem_read` was
+~11 %, now fixed in `bc151f0`), the `PebLdrTracker.OnBlock` LDR-sync poll ~4 %,
+the rest being the irreducible callout. The `IRETQ` read was the one clean,
+safe, semantics-preserving slice and is landed. The remaining per-instruction
+cost is hard to reclaim without risk: the hook must stay per-instruction for the
+TSC counter (anti-timing realism — `_timestampCounter += 3` per instruction,
+consumed by tight `rdtsc`-delta probes), and `OnBlock`'s 4 % would need a new
+`UC_HOOK_BLOCK` path plumbed through the backend abstraction (Unicorn + KVM) for
+little gain. **Conclusion: per-instruction throughput is near its safe ceiling;
+the next real throughput wins are F1 (spin detection) and F3 (NLS mapping
+cache), not more micro-optimisation here.**
 
 ### F3 — Injected-library false positive (residual: NLS collation)
 
