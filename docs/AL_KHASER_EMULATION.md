@@ -63,13 +63,13 @@ printf 'start\nexit\n' | dotnet Brovan.dll /path/to/al-khaser_x64.exe
 
 Harness gotchas learned the hard way:
 
-- Build with the **.NET 9 SDK** (`/opt/dotnet/dotnet`, 9.0.x), not the distro
-  `/usr/bin/dotnet` (8.0.x). `which dotnet` may resolve to the 8.0 one, which
-  loads the `Brovan.Generators` Vulkan source generator against Roslyn 4.8 and
-  silently emits nothing — the build then fails with ~23 `CS0103 'BvkMK' /
+- Build with a **.NET 9 SDK** (9.0.x), not a .NET 8 SDK — even though the target
+  framework stays net8.0. The `Brovan.Generators` Vulkan source generator needs
+  Roslyn 4.10; an 8.0.1xx SDK loads it against Roslyn 4.8, silently emits
+  nothing, and the build then fails with ~23 `CS0103 'BvkMK' /
   'BrovVulkStructMeta' does not exist` errors that look like broken source but
-  are just the wrong SDK. `export PATH=/opt/dotnet:$PATH` first. The target
-  framework stays net8.0.
+  are just the wrong SDK. If `which dotnet` resolves to a .NET 8 SDK, put the
+  9.0 SDK ahead of it on `PATH` first.
 - `dotnet build` writes to `bin/Release/net8.0/`, **not** `bin/Release/net8.0/linux-x64/`
   (the deps live in the latter). After building, copy `Brovan.dll` across, or
   run from `net8.0/` with the deps beside it. Running the stale `linux-x64`

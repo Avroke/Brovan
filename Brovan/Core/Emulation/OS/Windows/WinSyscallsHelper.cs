@@ -1975,6 +1975,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Value.StartsWith("\\??\\", StringComparison.OrdinalIgnoreCase))
                 Value = Value.Substring(4);
 
+            // The emulated guest is single-volume: C: is the only drive and it resolves to
+            // HarddiskVolume1 everywhere in the tree (NtOpenSymbolicLinkObject, NtCreateFile,
+            // the storage-device model, ...). Any other drive letter therefore maps to the same
+            // volume — correct for the single-volume model, and unreachable today since no other
+            // drive exists. Revisit if a multi-volume guest is ever modelled.
             if (Value.Length >= 2 && char.IsLetter(Value[0]) && Value[1] == ':')
                 return "\\Device\\HarddiskVolume1" + Value.Substring(2);
 

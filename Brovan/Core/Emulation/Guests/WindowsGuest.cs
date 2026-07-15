@@ -166,8 +166,7 @@ namespace Brovan.Core.Emulation.Guests
             string GuestImagePath = ResolveGuestImagePath(Binary);
             if (!string.IsNullOrWhiteSpace(GuestImagePath))
             {
-                int LeafCut = GuestImagePath.LastIndexOfAny(new[] { '/', '\\' });
-                Module.Name = LeafCut >= 0 ? GuestImagePath.Substring(LeafCut + 1) : GuestImagePath;
+                Module.Name = GeneralHelper.IO.WindowsLeafName(GuestImagePath);
                 Module.Path = GuestImagePath;
 
                 // Back the sample bytes in the virtual C: drive so the guest can open, stat and
@@ -1101,16 +1100,12 @@ namespace Brovan.Core.Emulation.Guests
                 }
             }
 
-            // Extract the leaf with explicit separator handling — Path.GetFileName is
+            // Extract the leaf with GeneralHelper.IO.WindowsLeafName — Path.GetFileName is
             // host-relative and does not treat '\\' as a separator on a Linux analysis host,
             // so it would return the whole backslashed host path as the "file name".
             string Leaf = null;
             if (!string.IsNullOrWhiteSpace(Location))
-            {
-                int Cut = Location.LastIndexOfAny(new[] { '/', '\\' });
-                Leaf = Cut >= 0 ? Location.Substring(Cut + 1) : Location;
-                Leaf = Leaf.Trim().TrimEnd('\0');
-            }
+                Leaf = GeneralHelper.IO.WindowsLeafName(Location).Trim().TrimEnd('\0');
             if (string.IsNullOrWhiteSpace(Leaf))
                 Leaf = Binary?.FileFormat == BinaryFormat.PE ? "sample.exe" : "blob.bin";
 

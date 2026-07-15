@@ -2899,21 +2899,17 @@ namespace Brovan
             }
 
             /// <summary>
-            /// Attempts to translate a Windows System32/SysWOW64/KnownDlls path into the shipped WindowsLibs directory.
-            /// </summary>
-            /// <param name="WinPath">windows-style path to resolve.</param>
-            /// <returns>returns the resolved host path inside WindowsLibs, or null if no mapping applies.</returns>
-            /// <summary>
             /// Extracts the trailing leaf of a Windows-style path, splitting on '\\' and '/'.
             /// </summary>
             /// <remarks>
             /// <see cref="Path.GetFileName(string)"/> splits on <see cref="Path.DirectorySeparatorChar"/>,
             /// which is '/' on Linux — so on a backslash-separated Windows guest path it returns the whole
-            /// string instead of the leaf. This helper is separator-agnostic and safe on any host OS.
+            /// string instead of the leaf. This helper is separator-agnostic and safe on any host OS, so
+            /// consumers that hold a guest path (e.g. WindowsGuest) share it instead of re-inlining the split.
             /// </remarks>
             /// <param name="WinPath">windows-style path.</param>
             /// <returns>returns the leaf component, or the input unchanged when it has no separator.</returns>
-            private static string WindowsLeafName(string WinPath)
+            public static string WindowsLeafName(string WinPath)
             {
                 if (string.IsNullOrEmpty(WinPath))
                     return WinPath;
@@ -2924,6 +2920,11 @@ namespace Brovan
 
             private static readonly char[] WindowsPathSeparators = { '\\', '/' };
 
+            /// <summary>
+            /// Attempts to translate a Windows System32/SysWOW64/KnownDlls path into the shipped WindowsLibs directory.
+            /// </summary>
+            /// <param name="WinPath">windows-style path to resolve.</param>
+            /// <returns>returns the resolved host path inside WindowsLibs, or null if no mapping applies.</returns>
             private static string TryResolveFromWindowsLibs(string WinPath)
             {
                 if (string.IsNullOrWhiteSpace(WinPath))

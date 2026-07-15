@@ -64,8 +64,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (!Instance.WriteMemory(Buffer, value))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                    // NtReadVirtualMemory writes the number of bytes actually read to the
-                    // optional out-parameter (arg4) when supplied.
+                    // NtReadVirtualMemory writes the number of bytes actually read to its
+                    // optional 5th argument (NumberOfBytesRead — GetArg64 index 4, 0-based) when supplied.
                     ulong NumberOfBytesReadPtr = Instance.WinHelper.GetArg64(4);
                     if (NumberOfBytesReadPtr != 0 && Instance.IsRegionMapped(NumberOfBytesReadPtr, sizeof(ulong)))
                         Instance.WriteMemory(NumberOfBytesReadPtr, BitConverter.GetBytes((ulong)value.Length));
