@@ -61,6 +61,17 @@ namespace Brovan.Core.Emulation
         public string LastFunc = string.Empty;
         public ulong Instruction = 0;
 
+        // Direct-mapped memo for the per-instruction IRETQ (48 CF) probe. See InstructionHandler.
+        private const int IretqMemoMask = (1 << 14) - 1;
+        private readonly ulong[] _iretqMemoAddr = CreateIretqMemo();
+        private readonly bool[] _iretqMemoResult = new bool[IretqMemoMask + 1];
+        private static ulong[] CreateIretqMemo()
+        {
+            ulong[] Memo = new ulong[IretqMemoMask + 1];
+            Array.Fill(Memo, ulong.MaxValue); // ulong.MaxValue is never a code address, so slot 0 does not false-hit
+            return Memo;
+        }
+
         /// <summary>
         /// An indicator to start disassembling instructions. mostly used when debugging something.
         /// </summary>
@@ -1964,10 +1975,30 @@ namespace Brovan.Core.Emulation
         private void InstructionHandler(ulong Address, uint Size)
         {
             Instruction++;
+            // 64-bit IRETQ (48 CF) is emulated here because Unicorn's own IRETQ diverges
+            // in the flat long-mode setup (proven: with this path disabled al-khaser bails
+            // 14M instructions early). Only a 2-byte instruction can be `48 CF`, and it is
+            // rare, yet this fires on every 2-byte instruction — a uc_mem_read per hit was a
+            // measurable ~11% of run time. Memoize the probe in a direct-mapped table keyed
+            // by code address: mapped code bytes are immutable for the life of a mapping, so
+            // a hit reuses the prior result and a miss (slot address mismatch, incl. eviction
+            // by collision) always re-reads and stays correct. The only unmodelled case is
+            // self-modifying code that rewrites an already-cached address into or out of the
+            // `48 CF` pattern, which no real code produces.
             if (Size == 2)
             {
-                Span<byte> Data = stackalloc byte[2];
-                if (ReadMemory(Address, Data, 2) && Data[0] == 0x48 && Data[1] == 0xCF)
+                int Slot = (int)((Address ^ (Address >> 14)) & (IretqMemoMask));
+                bool IsIretq;
+                if (_iretqMemoAddr[Slot] == Address)
+                    IsIretq = _iretqMemoResult[Slot];
+                else
+                {
+                    Span<byte> Data = stackalloc byte[2];
+                    IsIretq = ReadMemory(Address, Data, 2) && Data[0] == 0x48 && Data[1] == 0xCF;
+                    _iretqMemoAddr[Slot] = Address;
+                    _iretqMemoResult[Slot] = IsIretq;
+                }
+                if (IsIretq)
                 {
                     ulong RSP = _emulator.ReadRegister(Registers.UC_X86_REG_RSP);
                     ulong NewRIP = ReadMemoryULong(RSP + 0x0);
