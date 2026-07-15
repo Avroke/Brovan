@@ -394,9 +394,9 @@ both outside pure throughput:
 - **F3 NLS storm.** `kernelbase` re-opens `sortdefault.nls` ≈4684×/run (+ ~40
   section ops). This pass showed the re-opens are a **symptom** of the F3 bug,
   not an independent cost: kernelbase's per-locale sort load fails every compare
-  (the sort registry never populates because `en-US` won't resolve — see F3), so
-  it re-attempts the whole open→map→parse each time. Fixing F3 makes the load
-  succeed **once** and the storm disappears — better than caching the mapping.
+  (the sort registry never populates because the sort-handle build returns 0 —
+  see F3), so it re-attempts the whole open→map→parse each time. Fixing F3 makes
+  the load succeed **once** and the storm disappears — better than caching it.
 
 **Per-instruction ceiling (for reference).** Disabling both always-on
 `UC_HOOK_CODE(1,0)` hooks raised the CPU-bound phase from 4.3M→7.2M insn/s
@@ -422,7 +422,7 @@ table now opens. The false positive itself remains.
 **Symptom:** al-khaser's DLL-injection check still flags **every** legitimate
 module + the sample's own exe as "injected".
 
-**Root cause — traced 8 layers into real `kernelbase` (this pass, corrects the
+**Root cause — traced ~10 layers into real `kernelbase` (this pass, corrects the
 earlier "collation returns wrong order" guess).** The earlier note said the
 collation "errs and the `-2` becomes non-zero". That is wrong: instrumentation
 (capture `StrCmpNIW`/`StrCmpIW` entry args + the return at the caller's return
@@ -448,38 +448,53 @@ StrCmpIW  cnt=0  rax=-2 eqBytes=False s1="\Device\HarddiskVolume1"  s2="C:\Users
   On a miss it lazily loads the locale's sort data via `0x400401f8` and inserts
   it — this lazy load is what re-opens `sortdefault.nls` every compare (the
   ≈4684×/run storm). The registry is observed **empty** (`0/128` buckets).
-- The per-locale loader `0x400401f8` fails because its very first step, the
-  **locale-name resolver `0x1b4f0("en-US", 0)`, returns NULL**. That NULL is
-  passed as `rcx` into the collation builder `[0x1c0af0]`, which returns 0 →
-  loader returns 0 → registry stays empty → `CompareStringW` = 0 → `StrCmpNIW`
-  = `-2`.
-- The resolver `0x1b4f0` hashes the name (`0x1cbe0`, a simple deterministic
-  ASCII-fold hash `&0x7f`) and indexes kernelbase's **locale table**
-  (`[0x28e1f0]`). The table is **populated** (base `0x100163bb0`, ~hundreds of
-  entries), yet `en-US`'s bucket is empty — so `en-US` is not findable, even
-  though other names (`ar-SA`) are looked up. The bug is therefore in
-  kernelbase's **locale-table population** (which entries land where), not in
-  the sort table or the collation math.
+- On the registry miss, FUNC C calls the per-locale sort loader `0x400401f8`.
+  Its first step resolves the locale name via `0x1b4f0("en-US")`, which
+  **succeeds** — `en-US` **is** in kernelbase's locale table (`[0x28e1f0]`, a
+  128-bucket chained hash, `next`@`+0x58`, name@`+0x18`); `en-US` sits at its
+  correct bucket (hash `0x1cbe0("en-US") = 0`), and the resolver's ASCII
+  case-fold compare of the two byte-identical `en-US` strings reaches the FOUND
+  path `0x1b5de`. (NB: an earlier revision of this note claimed the resolver
+  "returns NULL for en-US" — that was a **diagnostic bug**, not real: the
+  per-instruction hook fires *before* the watched instruction executes, so
+  reading `rdi` at `mov rdi, rax` (loader `0x40223`) captured the pre-assignment
+  value `0`. Reading the source `rax`, or `rdi` one instruction later, shows the
+  resolver returns the real `en-US` entry. The locale table holds only ~4
+  lazily-inserted entries, not "hundreds" — that count was over-reading past the
+  128-bucket array.)
+- The loader fails **one step below** name resolution: it calls a function
+  pointer through kernelbase's CFG-dispatch thunk (`0x929f0` = `jmp rax`,
+  imported via the `[0x1c0af0]` apiset self-thunk), and **that call returns 0**.
+  The runtime target resolves (through the sort-init function-pointer table) to
+  `kernel32!SortGetHandle` (RVA `0xa190`). So the failing step is the per-locale
+  **sort-data build / sort-handle acquisition**, not the locale-name lookup and
+  not the collation arithmetic. `SortGetHandle` returning 0 → the loader returns
+  0 → the sort registry never populates → FUNC C returns 0 → `CompareStringW`
+  = 0 → `StrCmpNIW`/`StrCmpIW` = `-2` for every input.
 
-So the FP is one link deep: **`en-US` is not resolvable in kernelbase's
-locale table under Brovan**, which cascades into every case-insensitive
-`CompareStringW`/`StrCmpI*`/`lstrcmpi`/CRT compare returning error.
+So the FP bottoms out in kernelbase's **sort-versioning / sort-handle build**
+(the `SortGetHandle`-family called from the per-locale loader returns 0), which
+cascades into every case-insensitive `CompareStringW`/`StrCmpI*`/`lstrcmpi`/CRT
+compare returning error.
 
-**Recommended approach (next pass).** The remaining unknown is the **locale-table
-population**: which init routine fills `[0x28e1f0]`, what NLS data it reads
-(likely `locale.nls`, mapped by `NtInitializeNlsFiles` — verify the returned
-`BaseAddress`/`DefaultLcid`/`CasingSize` triple, especially that `CasingSize`
-= `[locale.nls+0x10]` is the field kernelbase actually expects), and why `en-US`
-lands in a bucket the resolver's hash does not probe (population/hash offset,
-version-table mismatch, or a mis-read count). Trace it with a memory-write watch
-on `[kbBase+0x28e1f0]`'s table region to find the writer, then diff the inserted
-entries against the resolver's `0x1cbe0` hash of `en-US`. Alternatively, since
-Brovan runs real `kernelbase` with interception only at the **syscall** boundary
-(no user-mode export hook exists), a "short-circuit `CompareStringW`" fix would
-require building an export-interception mechanism first — larger than fixing the
-data path. This is broad (all case-insensitive kernelbase collation is affected)
-and wants its own pass with regression coverage. The 8-layer trace above is the
-map; the diagnostic instrumentation was reverted (tree stays clean).
+**Recommended approach (next pass).** Continue one layer down from
+`kernel32!SortGetHandle` (RVA `0xa190`, likely forwarding to the kernelbase
+sort-versioning worker): trace *its* return-0 branch — it reads the sort
+version/handle table that is seeded from `sortdefault.nls`, so verify the
+version fields kernelbase validates against the shipped `sortdefault.nls`
+header (build mismatch: the shipped `kernelbase.dll` is a 2021 build while
+`ntdll`/`kernel32` are 19041.x — a sort-version constant baked into one but not
+the other would make the handle build reject). **Method note that cost this
+pass:** the per-instruction hook fires *before* the instruction runs, so to
+read a call's result, watch the return address and read `rax` (or the
+destination one instruction later) — never read the destination register *at*
+the `mov dst, rax`. Alternatively, since Brovan runs real `kernelbase` with
+interception only at the **syscall** boundary (no user-mode export hook exists),
+a "short-circuit `CompareStringW`/`SortGetHandle`" fix would require building an
+export-interception mechanism first — larger than fixing the data path. This is
+broad (all case-insensitive kernelbase collation is affected) and wants its own
+pass with regression coverage. The ~10-layer trace above is the map; all
+diagnostic instrumentation was reverted (tree stays clean).
 
 ### F5 — x86 / WOW64 unsupported
 
