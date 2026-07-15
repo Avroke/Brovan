@@ -411,6 +411,73 @@ trace bottoms out, check whether the failure is actually in an emulator-side
 syscall/resolver (here, `NtCreateFile` path resolution) before theorising about
 the guest's deeper logic.
 
+### Scheduler livelock watchdog (F1 mitigation — safe recovery + diagnostic + opt-in escape)
+
+**Motivation.** The pre-F3 `RtlpBackoff` livelock (F1) is a non-deterministic
+cooperative-scheduler hazard: one ntdll thread free-runs the `rdtsc`+`pause`
+SRW/critsec backoff spin forever while its peers are parked in
+`NtWaitForSingleObject` on handles that never get signalled in that particular
+interleaving. Because the spinner stays *runnable*, the scheduler happily feeds
+it full quanta and the run burns hundreds of millions of no-progress
+instructions to the wall-clock timeout with no diagnostic. The full source-level
+fix (find the exact signal/wait pairing whose release never propagates and make
+signal-before-wait always leave consumable state) needs a deterministic repro to
+do safely — see F1. This change adds the generic, low-risk scheduler-level net
+the F1 note recommends ("force a wakeup re-scan or advance virtual time … a
+scheduler deadlock/livelock detector").
+
+**Discriminator (why it does not fire on the healthy slow-heap path).** A slice
+is classified as a *frozen spin* only when the running thread completes a
+**full quantum** yet ends within `LivelockSpinRipWindow` (0x40) of where it
+started, **is the only runnable thread**, and **≥1 peer is parked in `Waiting`**.
+Forward-progressing code breaks this every slice: over a full 200k-instruction
+quantum a real code path moves its RIP far (the F2 heap probe traverses
+`RtlAllocateHeap` + helpers + `memset` and returns to callers), or it yields via
+a syscall (which truncates the slice, so it never completes a full quantum in
+place). Only a genuine userland spin ends a full quantum essentially where it
+began. The episode counter resets the instant the RIP moves, a peer becomes
+runnable, or the thread yields, so it climbs unboundedly **only** for a true
+infinite spin.
+
+**Action (escalating, always-safe first).** After `LivelockNudgeSlices` (256)
+consecutive frozen slices, and every 256 thereafter, the scheduler:
+1. emits **one** `LogFlags.General` diagnostic per episode naming the spinning
+   thread (`module+offset` when resolvable) and every parked peer with its
+   resume RIP, wait handles and deadline — the exact chokepoint the next F1 pass
+   would otherwise have to re-instrument by hand;
+2. runs the **safe recovery**: a full `UpdateMlfqWakeups` re-scan (recovers a
+   missed/late wakeup — F1's primary hypothesis) plus a virtual-time advance to
+   the nearest finite deadline. Neither can perturb a thread that needs no peer
+   to progress (the re-scan only touches genuinely-blocked waiters; the
+   time-advance only moves *finite* deadlines, and the idle thread-pool workers
+   wait on `WorkerFactory` with no deadline), so a false-positive spin
+   classification is a harmless no-op. If the recovery wakes a peer,
+   `HasOtherRunnableThread` flips next slice and the episode self-clears.
+
+**Opt-in bounded escape.** `BinaryEmulatorSettings.LivelockEscapeSlices`
+(default **0 = disabled**) lets the operator/harness cap a genuinely
+unrecoverable interleaving: when non-zero, once the spin persists that many
+frozen slices with nothing changing, the scheduler returns cleanly so the run
+reaches a bounded, diagnosable terminus instead of hanging to the wall-clock
+timeout. It is off by default and must be set larger than any legitimate
+self-completing tight loop the sample runs (a big `memset` also pins its RIP) —
+it exists for a calibrated hunt with the deterministic F1 repro, not as a
+default behaviour change.
+
+**Validation (honest scope).** Compiles clean (`dotnet build -c Release`, net8.0
+via a .NET 9 SDK; the only build error in this environment is the sandboxed
+Unicorn tarball download, which is the post-`Build` native step, not the C#
+compile). The default-on parts are validated by **state-machine reasoning**: the
+discriminator cannot fire on forward-progressing code, and its action is a
+provable no-op for any thread that is not blocked on a peer. It was **not**
+behaviourally re-run against `al-khaser_x64.exe` in this environment — that needs
+the exported Windows dependency set (`WindowsLibs/*.nls`, `WinReg/*`,
+`apisetmap.bin`) and Unicorn 2.1.4, which are not present here (see
+*Reproduction*). The next pass with the full harness should confirm the watchdog
+fires on the documented livelocked interleaving (diagnostic + recovery) and does
+**not** fire on the progressing slow-heap interleaving, then use the emitted
+per-episode chokepoint to drive the source-level lost-wakeup fix.
+
 ### Host-environment fixes (intentionally **not** committed)
 
 These are specific to the Linux build/run host and must not be pushed into
@@ -464,6 +531,22 @@ vs parked-waiter-wakeup split for **every** waitable type (`WinEvent`,
 consumable state. Consider a scheduler deadlock/livelock detector: when the only
 runnable thread is spinning in a known ntdll backoff and all others are blocked,
 force a wakeup re-scan or advance virtual time.
+
+**Landed mitigation (the detector half of step 3's last sentence).** The
+scheduler now carries a generic **livelock watchdog** (see *Past corrections* →
+*Scheduler livelock watchdog*): it recognises the "only runnable thread completes
+full quanta at a pinned RIP while ≥1 peer is parked" shape, emits a per-episode
+diagnostic naming the spinner + every stuck waiter's handles (the exact input
+step (2) asks for, now produced automatically), and performs the safe recovery
+(full wakeup re-scan + finite-deadline time advance). A discriminator keyed on
+*full-quantum + RIP-pinned* keeps it from firing on the progressing slow-heap
+interleaving, and an opt-in `LivelockEscapeSlices` (default off) can bound a
+genuinely unrecoverable interleaving to a clean terminus. This does **not**
+replace the source-level fix — steps (1)–(3) still stand for the lost-wakeup
+that the recovery can't recover — but it turns the silent multi-minute hang into
+an actionable signal and recovers the recoverable subclass. The default-on parts
+are validated by state-machine reasoning + a clean compile; behavioural
+confirmation on the sample still needs the full deps/Unicorn harness.
 
 **Post-F3 re-characterization (2026-07, corrects the framing above).** After the
 F3 fix (`b205488`) removed the `sortdefault.nls` re-open storm, the instruction
