@@ -480,12 +480,15 @@ compare returning error.
 **Recommended approach (next pass).** Continue one layer down from
 `kernel32!SortGetHandle` (RVA `0xa190`, likely forwarding to the kernelbase
 sort-versioning worker): trace *its* return-0 branch — it reads the sort
-version/handle table that is seeded from `sortdefault.nls`, so verify the
-version fields kernelbase validates against the shipped `sortdefault.nls`
-header (build mismatch: the shipped `kernelbase.dll` is a 2021 build while
-`ntdll`/`kernel32` are 19041.x — a sort-version constant baked into one but not
-the other would make the handle build reject). **Method note that cost this
-pass:** the per-instruction hook fires *before* the instruction runs, so to
+version/handle table seeded from `sortdefault.nls`, so verify the version
+fields kernelbase validates against the shipped `sortdefault.nls` header. Note
+the **DLL set is version-consistent** (all `10.0.19041.x`: kernelbase .1202,
+kernel32 .1202, ntdll .1288, shlwapi .1023 — the "2021" date on kernelbase is
+just a 19041 servicing build, not a different base), so a DLL cross-version
+mismatch is **ruled out**; the only unverified version is the shipped
+`sortdefault.nls` itself vs what this 19041 kernelbase expects. **Method note
+that cost this pass:** the per-instruction hook fires *before* the instruction
+runs, so to
 read a call's result, watch the return address and read `rax` (or the
 destination one instruction later) — never read the destination register *at*
 the `mov dst, rax`. Alternatively, since Brovan runs real `kernelbase` with
