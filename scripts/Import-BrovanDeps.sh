@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Import-BrovanDeps.sh — unpack a Brovan dependency bundle next to
+# Import-BrovanDeps.sh - unpack a Brovan dependency bundle next to
 # Brovan.dll / Brovan.exe on a Linux/macOS analysis host, WITHOUT needing
 # PowerShell 7. POSIX-friendly bash mirror of Import-BrovanDeps.ps1.
 #
@@ -131,7 +131,7 @@ if [ -f "$lib_dir/ntdll.dll" ]; then
     cnt=$(find "$lib_dir" -maxdepth 1 -type f -iname '*.dll' 2>/dev/null | wc -l | tr -d ' ')
     ok "WindowsLibs/ present ($cnt x64 DLLs, ntdll.dll OK)."
 else
-    err "WindowsLibs/ntdll.dll missing — Brovan cannot bootstrap the guest."
+    err "WindowsLibs/ntdll.dll missing - Brovan cannot bootstrap the guest."
     status_ok=0
 fi
 
@@ -140,7 +140,7 @@ if [ -f "$wow_dir/ntdll.dll" ]; then
     cnt=$(find "$wow_dir" -maxdepth 1 -type f -iname '*.dll' 2>/dev/null | wc -l | tr -d ' ')
     ok "WindowsLibs/SysWOW64/ present ($cnt x86 DLLs)."
 else
-    warn "WindowsLibs/SysWOW64/ntdll.dll missing — x86 (WOW64) samples will not load."
+    warn "WindowsLibs/SysWOW64/ntdll.dll missing - x86 (WOW64) samples will not load."
 fi
 
 reg_dir="$DEST/WinReg"
@@ -153,14 +153,14 @@ done
 if [ -z "$missing_hives" ]; then
     ok "WinReg/ complete (all 5 hives present and non-empty)."
 else
-    err "WinReg incomplete — missing/empty:$missing_hives. Brovan VerifyRegDump will fail."
+    err "WinReg incomplete - missing/empty:$missing_hives. Brovan VerifyRegDump will fail."
     status_ok=0
 fi
 
 if [ -s "$DEST/apisetmap.bin" ]; then
     ok "apisetmap.bin present."
 else
-    warn "apisetmap.bin absent — Brovan will auto-generate a custom one on first run."
+    warn "apisetmap.bin absent - Brovan will auto-generate a custom one on first run."
 fi
 
 echo

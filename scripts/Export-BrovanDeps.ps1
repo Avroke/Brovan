@@ -197,7 +197,7 @@ if (-not $SkipRegistry) {
             $hivesSaved += $name
             Write-Ok "Saved hive $name"
         } else {
-            Write-Warn2 "Failed to save hive $name ($key) — need elevation for SECURITY/SAM."
+            Write-Warn2 "Failed to save hive $name ($key) - need elevation for SECURITY/SAM."
         }
     }
 } else {
@@ -218,8 +218,11 @@ function Include-ApiSetMap {
 }
 
 if ($ApiSetMap) {
-    if (Include-ApiSetMap $ApiSetMap) { $apiSetIncluded = $true; Write-Ok "Included apisetmap.bin from -ApiSetMap." }
-    else { Write-Warn2 "-ApiSetMap path invalid or empty: $ApiSetMap" }
+    if (Include-ApiSetMap $ApiSetMap) {
+        $apiSetIncluded = $true; Write-Ok "Included apisetmap.bin from -ApiSetMap."
+    } else {
+        Write-Warn2 "-ApiSetMap path invalid or empty: $ApiSetMap"
+    }
 }
 
 if (-not $apiSetIncluded -and $BrovanDir) {
@@ -255,8 +258,11 @@ if (-not $apiSetIncluded) {
 # --- Manifest -------------------------------------------------------------------
 $os = $null
 try { $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop } catch { }
-$srcDesc = if ($os) { '{0} (build {1}, {2})' -f $os.Caption, $os.BuildNumber, $os.OSArchitecture }
-          else { [Environment]::OSVersion.VersionString }
+if ($os) {
+    $srcDesc = '{0} (build {1}, {2})' -f $os.Caption, $os.BuildNumber, $os.OSArchitecture
+} else {
+    $srcDesc = [Environment]::OSVersion.VersionString
+}
 $manifest = @(
     'Brovan dependency bundle'
     ('Created : {0:yyyy-MM-dd HH:mm:ss} UTC' -f (Get-Date).ToUniversalTime())

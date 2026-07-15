@@ -103,7 +103,7 @@ if (Test-Path $ntdll) {
     $cnt = (Get-ChildItem $libDir -Filter *.dll -File -ErrorAction SilentlyContinue).Count
     Write-Ok "WindowsLibs\ present ($cnt x64 DLLs, ntdll.dll OK)."
 } else {
-    Write-Err2 'WindowsLibs\ntdll.dll missing — Brovan cannot bootstrap the guest.'
+    Write-Err2 'WindowsLibs\ntdll.dll missing - Brovan cannot bootstrap the guest.'
     $ok = $false
 }
 
@@ -112,7 +112,7 @@ if (Test-Path (Join-Path $wow 'ntdll.dll')) {
     $cnt = (Get-ChildItem $wow -Filter *.dll -File -ErrorAction SilentlyContinue).Count
     Write-Ok "WindowsLibs\SysWOW64\ present ($cnt x86 DLLs)."
 } else {
-    Write-Warn2 'WindowsLibs\SysWOW64\ntdll.dll missing — x86 (WOW64) samples will not load.'
+    Write-Warn2 'WindowsLibs\SysWOW64\ntdll.dll missing - x86 (WOW64) samples will not load.'
 }
 
 $regDir = Join-Path $Destination 'WinReg'
@@ -125,14 +125,14 @@ foreach ($h in $requiredHives) {
 if ($missingHives.Count -eq 0) {
     Write-Ok 'WinReg\ complete (all 5 hives present and non-empty).'
 } else {
-    Write-Err2 "WinReg incomplete — missing/empty: $($missingHives -join ', '). Brovan VerifyRegDump will fail."
+    Write-Err2 "WinReg incomplete - missing/empty: $($missingHives -join ', '). Brovan VerifyRegDump will fail."
     $ok = $false
 }
 
 if (Test-Path (Join-Path $Destination 'apisetmap.bin')) {
     Write-Ok 'apisetmap.bin present.'
 } else {
-    Write-Warn2 'apisetmap.bin absent — Brovan will auto-generate a custom one on first run.'
+    Write-Warn2 'apisetmap.bin absent - Brovan will auto-generate a custom one on first run.'
 }
 
 Write-Host ''
