@@ -241,8 +241,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (string.IsNullOrEmpty(Path))
                         return NTSTATUS.STATUS_INVALID_ADDRESS;
 
-                    if (!Path.StartsWith("\\", StringComparison.Ordinal))
-                        Path = "\\??\\" + Path;
+                    // GetMappedFileName / NtQueryVirtualMemory(MemoryMappedFilenameInformation) returns
+                    // the NT device path (\Device\HarddiskVolumeN\...), NOT a \??\C: DOS-device path.
+                    // al-khaser's "hidden modules" walk gets this name per mapped image and converts it
+                    // back to a drive letter via the device map to match the loader list; the \??\C:
+                    // form doesn't convert, so every System32 module was reported as an injected library.
+                    Path = Instance.WinHelper.DosPathToNtDevicePath(Path);
 
                     int StringByteCount = Encoding.Unicode.GetByteCount(Path) + 2;
                     Span<byte> StringData = Instance.WinHelper.Shared.GetSpan((uint)StringByteCount);

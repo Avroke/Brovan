@@ -33,17 +33,19 @@ al-khaser now loads fully, runs its detection suite, walks the PEB loader lists,
 enumerates its modules, and prints its verdicts. The last four fixes do not move
 the instruction terminus — they close specific behavioural/stealth gaps
 (dropped-file capture, injected-DLL prerequisites, the injected-DLL false
-positive itself) or reclaim throughput. With F3 fixed, the run stalls part-way
-through the DLL-injection section (`Walking process memory with
-GetModuleInformation`) before the full verdict list prints. A post-F3
-re-characterization (see **F1**) found this stall is **not** the documented
-cooperative-scheduler `RtlpBackoff` livelock (the main thread is progressing, the
-workers idle-normal) but an **infinite loop inside the ntdll heap manager** over
-Brovan's emulated heap — a heap-structure emulation defect. The `RtlpBackoff`
-livelock (observed pre-F3) and this heap loop are both open frontiers; the heap
-loop is what blocks the current build. F2 (throughput) is understood and largely
-addressed: raw per-instruction speed is healthy, and F3's NLS re-open storm — one
-of the two big wall-time sinks — is now gone.
+positive itself) or reclaim throughput. With F3 fixed, how far a run gets in a
+fixed wall-clock budget through the DLL-injection section is non-deterministic. A
+post-F3 re-characterization (see **F1**) found the slow probe (`Walking process
+memory with GetModuleInformation`) is **not** the documented cooperative-scheduler
+`RtlpBackoff` livelock, and — correcting a wrong intermediate conclusion — **not**
+a cyclic-free-list heap loop either: the main thread progresses (one traced run
+ran past that probe to the later `.NET module structures` probe), it is just
+**slow** grinding real ntdll heap code under emulation. So the residual x64
+terminus is **F2 throughput** on the heap-heavy probes, plus the still-open pre-F3
+`RtlpBackoff` livelock. Getting further also surfaced a **second injected-library
+FP** in the `hidden modules` probe (mapped-file path returned as `\??\C:\…`
+instead of `\Device\…`), fixed this pass. F2 raw per-instruction speed is healthy
+and F3's NLS re-open storm — one of the two big wall-time sinks — is now gone.
 
 ## Reproduction
 
@@ -477,49 +479,49 @@ above. In the runs sampled this pass:
   doc's "progressing run". **Nothing** sits in the `RtlpBackoff` region
   (`0x5CDB6`).
 
-So the current blocker is a different terminus: al-khaser prints
-`Walking process memory with GetModuleInformation` and then the **main thread
-grinds ~1.4 billion instructions inside the ntdll heap manager**
-(`RtlAllocateHeap`+internal heap helpers around RVA `0x2B3E2..0x2B426`, plus
-`memset`) without the probe ever completing. Two facts localise it:
+The current terminus, and the correction of a wrong intermediate conclusion:
+al-khaser reaches `Walking process memory with GetModuleInformation` and the main
+thread spends a long time in the ntdll heap manager (`RtlAllocateHeap` + helpers
+around RVA `0x2B3E2..0x2B426`, plus `memset`).
 
-- **Not a `VirtualQuery` walk** — `NtQueryVirtualMemory` is **never called**
-  during the stall (instrumented at the syscall's top), so the classic
+- **Not a `VirtualQuery` walk** — `NtQueryVirtualMemory` is **never called** while
+  the run sits on that probe (instrumented at the syscall's top), so the classic
   `while(VirtualQuery(addr)) addr += RegionSize;` non-termination is ruled out.
-  (The `MemoryBasicInformation` branch *did* also have a latent non-termination
-  bug — above the highest mapped region it returned `STATUS_SUCCESS` + `MEM_FREE`
-  size `0x1000` forever instead of failing past `MmHighestUserAddress` — **fixed
-  separately in `d1f5d3a`**; it is not what al-khaser hits here.)
-- **A cyclic heap free-list — root cause proven.** The stall is an infinite walk
-  inside a single ntdll heap-manager call: the free-block search at ntdll
-  `0x2B3E2` walks a linked structure via `[node]` (offset 0), comparing a 32-bit
-  size at `[node+8]` against the request size, and exits only when `[node]`
-  reaches null. Instrumenting that loop (record each visited node address, flag a
-  repeat) caught the walk **revisiting the same node**:
+  (The `MemoryBasicInformation` branch *did* have a latent non-termination bug —
+  above the highest mapped region it returned `STATUS_SUCCESS` + `MEM_FREE` size
+  `0x1000` forever instead of failing past `MmHighestUserAddress` — **fixed
+  separately in `d1f5d3a`**; not what al-khaser hits here.)
+- **NOT a cyclic free-list (a prior revision of this note, `4fc943a`, was
+  wrong).** That revision claimed the free-block search at `0x2B3E2` was stuck in
+  a cyclic walk. A raw sequence trace of that loop disproved it: `0x2B3E2` fires
+  only ~72× across the whole probe, with **13 distinct `rsp` values and varying
+  request sizes** — i.e. the search runs *finitely* and is re-invoked per
+  allocation, not one infinite walk. The earlier "cycle" was a detector artefact:
+  it flagged the free-list **head** node recurring as the start of *separate*
+  finite searches as if it were a revisit within one walk. The request sizes grow
+  briefly (`0x167→0x218→0x323→0x4B2`, ×1.5) then **plateau at `0x4B2`** — no
+  unbounded growth either.
+- **It is slowness, not a loop.** With the trace on, one run **progressed past**
+  `GetModuleInformation` (→ `GOOD`) and on to the later `Walking process memory
+  for hidden modules` / `.NET module structures` probes — the earlier "stuck at
+  line 65" runs were simply slow (real ntdll heap code, per-alloc cost in the
+  hundreds-of-thousands to ~1M emulated instructions, ×many allocations). How far
+  a run gets in a fixed wall-clock budget is non-deterministic. So the residual
+  al-khaser x64 terminus is **F2 throughput** on the heap-heavy probes, plus the
+  pre-F3 `RtlpBackoff` livelock which is still a real (separate, non-deterministic)
+  hazard — not a heap-corruption bug.
 
-  ```
-  CYCLE at node 0x1002202E8; rbx(reqSize)=0x121
-    node 0x1002202E8  link([+0])=0x1002275A0  size([+8])=0x80
-  ```
-
-  Both are real heap addresses with plausible sizes, so this is a genuine
-  **cyclic linkage in the emulated heap's free-list**, not a decode-of-garbage.
-  `RtlAllocateHeap`'s entry is not re-entered during the grind, confirming the
-  thread is stuck inside this one search, not doing many allocations.
-
-**Implication for the next pass.** This is a heap-**corruption** hunt, not a
-scheduler hunt. Because Brovan runs the *real* ntdll heap manager (only
-`NtAllocateVirtualMemory` etc. are intercepted), ntdll's own insert/remove never
-makes a cycle — so something **external** clobbers a free node's `[+0]` link: a
-double-free routed through the free path, a stub that writes past a returned
-buffer into an adjacent free block, or a misemulated store. Recommended: add a
-free-list integrity check (walk `[node]` from the list head after each heap op /
-each stub that writes guest memory, assert acyclic) and bisect to the operation
-that first introduces the cycle at `0x1002202E8`; then fix that writer. The
-`RtlpBackoff` livelock remains a real, separate non-deterministic hazard
-(observed pre-F3), so both are open; the cyclic free-list is what blocks the
-current build. All diagnostic instrumentation for this pass was reverted (tree
-stays clean).
+**Bonus finding surfaced by getting further — a second injected-library FP.** The
+`Walking process memory for hidden modules` probe reported every System32 module
+(`KERNEL32.DLL`, `KERNELBASE.dll`, `win32u.dll`, …) as injected. Root cause:
+`NtQueryVirtualMemory(MemoryMappedFilenameInformation)` returned a `\??\C:\…`
+DOS-device path instead of the NT device path `\Device\HarddiskVolumeN\…` that
+`GetMappedFileName` actually returns; al-khaser converts the mapped name back to a
+drive letter via the device map to match the loader list, and `\??\C:` doesn't
+convert. Fixed by routing through `DosPathToNtDevicePath` (the same
+`\Device\HarddiskVolume1` formatter the F4 `ProcessImageFileName`/`QueryDosDevice`
+work uses). All diagnostic instrumentation for this pass was reverted (tree stays
+clean).
 
 ### F2 — Emulation throughput
 
