@@ -729,6 +729,27 @@ rather than papered over with an always-fail stub. `NtQueryInformationAtom` (0x1
 1×) similarly needs atom-table modeling; the `win32u` GUI syscalls are out of scope
 for the ntdll pass.
 
+**Verified with a corrected bundle (SortDefault.nls + WUDFPlatform.dll + faultrep.dll
+shipped).** Re-exporting with the fixed `Export-BrovanDeps.ps1` and re-running
+confirms the deps analysis end-to-end:
+
+- **Injected-library FP eliminated** — with `SortDefault.nls` present the collation
+  works, and the 397 `[!] Injected library` lines / the whole class of System32-module
+  false positives drop to **0**. `WUDFPlatform.dll` now loads and al-khaser's
+  `WudfIs{Any,Kernel,User}DebuggerPresent` resolve and execute (were NULL before).
+- **Verdict 44 GOOD / 4 BAD** (from 38/10 at the start of this work). The **only**
+  remaining `BAD` is `Thread Hide From Debugger` (flagged for its variants) — a real,
+  stable detection, not a false positive; a separate frontier from the deps/collation
+  work.
+- **New terminus surfaced, non-deterministic.** With the FP-storm gone the flow is
+  shorter and different; one interleaving reaches MSVC's `__report_gsfailure`
+  (`__fastfail(FAST_FAIL_STACK_COOKIE_CHECK_FAILURE)` / `int 0x29`, `0xC0000409`) at
+  ~47 M inside the now-correct module-scan path, another runs past it to ~73 M. That
+  GS-cookie mismatch is a **stack-imbalance emulation bug in a path only reachable once
+  collation is correct** — not caused by the deps/syscall work, newly exposed by it.
+  It joins the non-deterministic `0xC0000005` SEH terminus as an open F2/coherence
+  frontier; the livelock watchdog stays silent throughout.
+
 **Bonus finding surfaced by getting further — a second injected-library FP.** The
 `Walking process memory for hidden modules` probe reported every System32 module
 (`KERNEL32.DLL`, `KERNELBASE.dll`, `win32u.dll`, …) as injected. Root cause:
