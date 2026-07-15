@@ -24,10 +24,15 @@ Each landed fix unblocked the next layer. Instruction counts are for
 | **`e70c2b5`** apiset heap-obsolete | 13 513 868 | `0xC0000139` cleared; entry point + CRT run |
 | **`b15fab0`** seed VFS system images | 22 850 816 | `std::filesystem::equivalent` throw cleared |
 | **`4b9540f`** NtReadVirtualMemory by-value | 22.8 M+ (module enum completes) | injected-library AV cleared |
+| **`ed5b1ab`** guest image path | 22.8 M+ | `log.txt` create + own-image / `equivalent` host-path leak cleared |
+| **`2f6e5ae`** QueryDosDevice / PIFN / NLS path | 22.8 M+ | anti-injection prerequisites fixed (FP residual = NLS collation, F3) |
 
 al-khaser now loads fully, runs its detection suite, walks the PEB loader lists,
-enumerates its modules, and prints its verdicts. The remaining terminus is a
-threading frontier (F1) plus raw emulation throughput (F2).
+enumerates its modules, and prints its verdicts. The later two fixes do not move
+the instruction terminus — they close specific behavioural/stealth gaps
+(dropped-file capture, injected-DLL prerequisites). The remaining termini are a
+threading frontier (F1), raw emulation throughput (F2), and the NLS-collation
+residual behind the injected-DLL false positive (F3).
 
 ## Reproduction
 
@@ -65,7 +70,19 @@ Harness gotchas learned the hard way:
   is swallowed). Route diagnostics through `Instance.TriggerEventMessage(...,
   LogFlags.General)` to stdout instead.
 - Never leave orphaned `dotnet` runs: a stuck emulation pins CPU and skews the
-  timing of later runs. `pkill -9 -f Brovan.dll` between runs.
+  timing of later runs. Clean orphans, but **do not** `pkill -9 -f Brovan.dll`
+  from a shell whose own command line contains `Brovan.dll` — `pkill -f` matches
+  the running shell's argv and SIGKILLs itself before `dotnet` even starts (this
+  silently swallowed several runs). Kill only real processes, e.g.
+  `for p in $(ps -eo pid,comm | awk '$2=="dotnet"{print $1}'); do kill -9 $p; done`.
+- Bound each run with `timeout -s KILL <sec>` (plain `timeout` sends SIGTERM,
+  which dotnet+Unicorn ignore, so it hangs past the wrapper's own timeout and the
+  run is killed with no output). Keep the inner `timeout` under the harness call
+  budget, or run the emulation as a background task and poll its log.
+- Full `LogFlags.All` still omits the per-syscall `[+] Nt…:` detail lines (those
+  are gated on `LogFlags.Syscall`, which is not in the flag set the trace uses);
+  the visible `[ntdll] Syscall … executed` and `[ENTRY]` lines are `LogFlags.General`.
+  Add temporary diagnostics at `General` level to be sure they are captured.
 
 ## Past corrections (landed)
 
@@ -177,6 +194,87 @@ the optional `NumberOfBytesRead` out-parameter (arg4). Benefits **all**
 **Validation:** module enumeration completes (96 entries = 3 PEB lists ×
 32 modules); the AV is gone.
 
+### `ed5b1ab` — present the sample under a realistic guest image path
+
+**Symptom:** two facets of one root cause. (a) al-khaser creates its `log.txt`
+next to the executable (`NtCreateFile` disposition 5 = `FILE_OVERWRITE_IF`) and
+got `STATUS_OBJECT_NAME_NOT_FOUND`; observed path `\??\\tmp\...\alkhaser\x64\log.txt`.
+(b) `GetModuleFileName(NULL)` / the main-module NT path / `std::filesystem::equivalent`
+on the own image all read back a non-Windows path.
+
+**Root cause:** a sample is loaded from an arbitrary *host* location
+(`/tmp/.../al-khaser_x64.exe` on the Linux analysis host), and that host path
+leaked straight into the guest — the PEB `ProcessParameters` `ImagePathName` /
+`CommandLine` / `CurrentDirectory` (`WindowsGuest.PrepareWinEnvironment`) and the
+main module's `Path` (`WindowsGuest.InitializePE`) were all set from
+`BinaryFile.Location`. `\tmp\...` resolves to no drive, so any create/open relative
+to the sample's own directory failed.
+
+**Fix:** `WindowsGuest` resolves the main image to a synthetic guest path
+`C:\Users\<user>\Desktop\<leaf>` (stable per-run username shared with the
+environment block, so `USERNAME`/`USERPROFILE`/`TEMP` and the image path agree),
+backs the sample bytes in the virtual `C:` drive
+(`GeneralHelper.IO.SeedGuestImageFile`) so the guest can open/stat/read its own
+image and drop siblings, and computes the current directory with Windows-path
+semantics (`Path.GetDirectoryName` does not treat `\` as a separator on Linux).
+A host-absolute Windows path (a real `C:\` sample on Windows) is kept verbatim.
+`EmulationMenu` now finds the main module via `WindowsGuest.MainModuleBase`
+instead of matching on `BinaryFile.Location` (which no longer equals `Module.Path`).
+
+**Validation:** image path is `C:\Users\<user>\Desktop\al-khaser_x64.exe`, the
+`log.txt` create succeeds in the VFS, the own image is backed, and the run
+reaches full depth with no "Couldn't determine the main module" regression.
+
+### `2f6e5ae` — QueryDosDevice / ProcessImageFileName / NLS-path prerequisites for the anti-injection check
+
+**Symptom:** al-khaser's DLL-injection check (`ScanForModules::IsBadLibrary`)
+flags **every** legitimately-loaded module — and the sample's own exe — as
+"injected".
+
+**Root cause (fully traced).** `IsBadLibrary(path)` returns *legit* only if the
+module path matches the System32 device path, the System32 drive path, or the
+process's own image path. It normalises device↔drive with `QueryDosDevice` and
+reads the own image with `GetProcessImageFileName`. Three prerequisites were
+broken:
+
+1. `QueryDosDevice("C:")` returned **0**. Its kernelbase implementation opens the
+   `\??` DOS-devices object directory via `NtOpenDirectoryObject`, then the `C:`
+   symlink relative to it. `NtOpenDirectoryObject` only knew `\KnownDlls*` /
+   `\BaseNamedObjects` / `\RPC Control`, so it returned `STATUS_NOT_SUPPORTED` and
+   the whole `if (QueryDosDevice(...) > 0)` block was skipped → *everything*
+   flagged. **Fixed** by registering a `DOS_DEVICES_DIRECTORY` handle for the
+   `\??` / `\GLOBAL??` / `\DosDevices` / `\Sessions\0\DosDevices` aliases; the
+   relative `\??\C:` symlink already resolves to `\Device\HarddiskVolume1`.
+2. `NtQueryInformationProcess(ProcessImageFileName)` returned `BinaryFile.Location`
+   (the host path) instead of the NT device form of the guest image. **Fixed** via
+   `DosPathToNtDevicePath` → `\Device\HarddiskVolume1\Users\<user>\Desktop\<leaf>`,
+   coherent with what `QueryDosDevice("C:")` resolves the C: link to.
+3. `C:\Windows\Globalization\Sorting\SortDefault.nls` (the linguistic sort table
+   that kernelbase's `CompareString` — reached by `StrCmpNIW`/`StrCmpIW` — maps to
+   build its collation) returned `STATUS_OBJECT_NAME_NOT_FOUND`; the WindowsLibs
+   resolver only mapped System32 / SysWOW64 / KnownDlls. **Fixed** by resolving any
+   `C:\Windows\Globalization\...` file by leaf to the shipped flat `.nls` set.
+
+**How it was traced:** temporary `[ENTRY]`-hook instrumentation dumped the exact
+SHLWAPI `StrCmpNIW`/`StrCmpIW` arguments + count, showing e.g.
+`StrCmpNIW("C:\Windows\System32\", "C:\Windows\System32\KERNEL32.DLL", n=20)` —
+a byte-identical 20-char prefix that must compare equal — yet the module was
+flagged. `GetSystemDirectory` (`C:\Windows\System32\`), `QueryDosDevice`
+(`\Device\HarddiskVolume1`) and `GetProcessImageFileName`
+(`\Device\HarddiskVolume1\Users\<user>\Desktop\al-khaser_x64.exe`) all read back
+correct after the fixes, and the sort file now resolves. All diagnostics were
+reverted before commit.
+
+**Residual (see F3 below).** With the prerequisites correct the false positive
+still stands: the case-insensitive comparison returns "not equal" for equal
+strings. `StrCmpNIW`/`StrCmpIW` are thunks → apiset
+`api-ms-win-core-shlwapi-obsolete` → `kernelbase!StrCmpNIW`, whose real code
+routes the compare through the NLS sort-table dispatch and returns
+`CompareString - 2`. The sort file now *opens* (4684×/run) but kernelbase's
+downstream consumption of it (section-map + `CompareString` collation) does not
+yet produce a correct result, so the compare still errs. This is a deeper
+NLS-emulation item, tracked as **F3**.
+
 ### Host-environment fixes (intentionally **not** committed)
 
 These are specific to the Linux build/run host and must not be pushed into
@@ -241,40 +339,41 @@ executes a large amount of code. It only *looks* like a hang because the run
 budget is too short. Relevant if the goal is a clean end-to-end verdict rather
 than partial coverage.
 
-### F3 — Injected-library false positive
+### F3 — Injected-library false positive (residual: NLS collation)
 
-**Symptom:** al-khaser's injected-library check now runs (good) but flags
-**every** legitimate system DLL (`sechost.dll`, `RPCRT4.dll`, `ole32.dll`, …) as
-"injected".
+**Status:** the environment/API prerequisites are fixed (`2f6e5ae`, above) —
+`QueryDosDevice` resolves, `GetProcessImageFileName` is coherent, and the sort
+table now opens. The false positive itself remains.
 
-**Root-cause hypothesis:** the per-module "is this legitimate" predicate
-(al-khaser `0x14000c0c0`) fails for Brovan's modules — most likely because they
-are not backed by a mapped-file section the way real loaded modules are (e.g.
-`NtQueryVirtualMemory(MemorySectionName / MemoryMappedFilenameInformation)` does
-not return the on-disk path for a module's address range). A real anti-analysis
-sample keying on this would mis-classify, so it is a stealth/realism gap.
+**Symptom:** al-khaser's DLL-injection check still flags **every** legitimate
+module + the sample's own exe as "injected".
 
-**Recommended approach:** make each loaded guest module's address range answer
-`NtQueryVirtualMemory` section-name queries with its `\Device\HarddiskVolumeN\...`
-image path, so the module reads back as file-backed.
+**Root cause (traced to the NLS layer).** `IsBadLibrary` compares module paths
+with the case-insensitive `StrCmpNIW`/`StrCmpIW`. Instrumentation proved these
+return "not equal" for **byte-identical** inputs (e.g.
+`StrCmpNIW("C:\Windows\System32\", "C:\Windows\System32\KERNEL32.DLL", 20)` and
+`StrCmpIW("\Device\HarddiskVolume1", "\Device\HarddiskVolume1")` — the latter
+makes al-khaser's own `NormalizeNTPath` fail to convert the device path, so the
+own-exe comparison also fails). The chain is:
+`shlwapi!StrCmpNIW` (a `jmp [IAT]` thunk) → apiset
+`api-ms-win-core-shlwapi-obsolete-l1-1-0` → `kernelbase!StrCmpNIW`
+(`0x180024CA0`), which loads a sort-table structure, calls a collation function
+pointer from it (`[struct+0xF0]`) with flags `0x18000001` (NORM_IGNORECASE +
+linguistic), and returns `CompareString-2`. With a broken table the collation
+errs and the `-2` becomes non-zero. kernelbase re-opens
+`C:\Windows\Globalization\Sorting\sortdefault.nls` on every compare (≈4684×/run)
+plus ~40 section ops, so the table is consumed via file-open → `NtCreateSection`
+→ `NtMapViewOfSection` → parse.
 
-### F4 — `FILE_OVERWRITE_IF` create of a file in the sample's own directory
-
-**Symptom:** al-khaser repeatedly tries to create its `log.txt` next to the
-executable (`NtCreateFile` disposition 5 = `FILE_OVERWRITE_IF`) and gets
-`STATUS_OBJECT_NAME_NOT_FOUND` instead of a created handle. Observed path:
-`\??\\tmp\...\alkhaser\x64\log.txt` (note the doubled separator after `\??\`).
-
-**Root-cause hypothesis:** the sample's working-directory NT path (built from the
-host path where the `.exe` lives) does not round-trip through
-`ResolveWindowsFilePath` / `CreateOrTruncateFile`, so the create fails. Non-fatal
-today (al-khaser continues without its log) but it means dropped-file behaviour
-in the sample's own directory is not captured.
-
-**Recommended approach:** verify NT-path normalisation for a working directory
-that is an arbitrary host path with `\??\` prefix and doubled separators; ensure
-`FILE_OVERWRITE_IF` / `FILE_OPEN_IF` for a non-existent file creates it in the
-virtual FS.
+**Recommended approach:** audit the NLS sort-table pipeline kernelbase drives:
+confirm the `sortdefault.nls` open now returns a real handle, that
+`NtCreateSection`/`NtMapViewOfSection` of it yield the correct bytes, and that
+the `CompareString`/`LCMapString` emulation builds a usable collation from them
+(or short-circuit the ordinal/ignore-case path). This is broad — any
+case-insensitive comparison routed through kernelbase collation is affected, not
+just al-khaser — so it wants its own pass and regression coverage. Because
+`StrCmpNIW`/`StrCmpIW`/`lstrcmpi` and the CRT all reach it, a correct fix
+resolves the injected-DLL FP and improves realism across samples.
 
 ### F5 — x86 / WOW64 unsupported
 
