@@ -73,10 +73,15 @@ for item in WindowsLibs WinReg apisetmap.bin; do
 done
 
 # --- pick an extractor (bundle is a .zip from Compress-Archive) ------------------
+# Windows Compress-Archive writes entries with backslash separators; Info-ZIP
+# unzip extracts them correctly (real dirs) but returns exit code 1 (warning),
+# which must NOT be treated as a failure. unzip: 0 = ok, 1 = ok+warnings,
+# >=2 = real error.
 extract_zip() {
-    local zip="$1" out="$2"
+    local zip="$1" out="$2" rc=0
     if command -v unzip >/dev/null 2>&1; then
-        unzip -q -o "$zip" -d "$out"
+        unzip -q -o "$zip" -d "$out" || rc=$?   # || keeps set -e from firing on rc=1 (warning)
+        [ "$rc" -le 1 ] && return 0 || return "$rc"
     elif command -v 7z >/dev/null 2>&1; then
         7z x -y -o"$out" "$zip" >/dev/null
     elif command -v 7za >/dev/null 2>&1; then
