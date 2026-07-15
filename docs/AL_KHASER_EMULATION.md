@@ -27,15 +27,18 @@ Each landed fix unblocked the next layer. Instruction counts are for
 | **`ed5b1ab`** guest image path | 22.8 M+ | `log.txt` create + own-image / `equivalent` host-path leak cleared |
 | **`2f6e5ae`** QueryDosDevice / PIFN / NLS path | 22.8 M+ | anti-injection prerequisites fixed (FP residual = NLS collation, F3) |
 | **`bc151f0`** IRETQ probe memo | 24.1 M (throughput; terminus unchanged) | ~11 % of CPU-bound run time reclaimed on the per-instruction hot path |
+| **`b205488`** NLS sort-table open (leaf-extraction) | 24.1 M+ | injected-library **false positive fixed** (case-insensitive collation now correct) + NLS re-open storm ended |
 
 al-khaser now loads fully, runs its detection suite, walks the PEB loader lists,
-enumerates its modules, and prints its verdicts. The last three fixes do not move
+enumerates its modules, and prints its verdicts. The last four fixes do not move
 the instruction terminus — they close specific behavioural/stealth gaps
-(dropped-file capture, injected-DLL prerequisites) or reclaim throughput. The
-remaining termini are a threading frontier (F1), the NLS-collation residual
-behind the injected-DLL false positive (F3), and — measured this pass — a
-throughput picture (F2) where raw per-instruction speed is already healthy so
-the wall-time is instead dominated by F1's spin and F3's NLS re-open storm.
+(dropped-file capture, injected-DLL prerequisites, the injected-DLL false
+positive itself) or reclaim throughput. With F3 fixed, the remaining terminus is
+the threading frontier (F1) — a non-deterministic cooperative-scheduler spin
+that (when it hits) stalls the run part-way through the DLL-injection section,
+before the full verdict list prints. F2 (throughput) is understood and largely
+addressed: raw per-instruction speed is healthy, and the two big wall-time sinks
+were F1's spin and F3's NLS re-open storm — the latter is now gone.
 
 ## Reproduction
 
@@ -283,15 +286,16 @@ flagged. `GetSystemDirectory` (`C:\Windows\System32\`), `QueryDosDevice`
 correct after the fixes, and the sort file now resolves. All diagnostics were
 reverted before commit.
 
-**Residual (see F3 below).** With the prerequisites correct the false positive
-still stands: the case-insensitive comparison returns "not equal" for equal
-strings. `StrCmpNIW`/`StrCmpIW` are thunks → apiset
-`api-ms-win-core-shlwapi-obsolete` → `kernelbase!StrCmpNIW`, whose real code
-routes the compare through the NLS sort-table dispatch and returns
-`CompareString - 2`. The sort file now *opens* (4684×/run) but kernelbase's
-downstream consumption of it (section-map + `CompareString` collation) does not
-yet produce a correct result, so the compare still errs. This is a deeper
-NLS-emulation item, tracked as **F3**.
+**Residual at the time (now fixed by `b205488`, above).** With these
+prerequisites correct the false positive still stood: the case-insensitive
+comparison returned "not equal" for equal strings. `StrCmpNIW`/`StrCmpIW` are
+thunks → apiset `api-ms-win-core-shlwapi-obsolete` → `kernelbase!StrCmpNIW`,
+whose real code routes the compare through the NLS sort-table dispatch and
+returns `CompareString - 2`. The failure was one layer lower than this note
+assumed: the sort file did **not** actually open — the ≈4684×/run "opens" were
+kernelbase *re-attempting* a failing `CreateFileW` on `sortdefault.nls` every
+compare (a Linux `Path.GetFileName` leaf-extraction bug in Brovan's resolver, see
+`b205488`). Fixing the open fixes the collation; F3 is closed.
 
 ### `bc151f0` — memoize the per-instruction IRETQ probe (throughput)
 
@@ -318,6 +322,87 @@ address into/out of `48 CF`, which no real code produces.
 terminus as before (vs the 10.2M divergence when the `IRETQ` path is removed),
 with **0 new faults** across al-khaser's load of 34 modules. This is a
 throughput fix — it does not move the terminus.
+
+### `b205488` — NLS sort-table open on Linux (`Path.GetFileName` on a backslash path)
+
+**Symptom (the F3 false positive).** al-khaser's DLL-injection check flagged
+**every** legitimate System32 module (ntdll / kernel32 / kernelbase) *and* the
+sample's own exe as "injected", because kernelbase's case-insensitive
+`CompareStringW` / `StrCmpNIW` / `StrCmpIW` returned a **constant error** for
+every input — equal and unequal alike.
+
+**Actual root cause — and a correction to the earlier ~10-layer chase.** The
+prior investigation traced the failure down to `kernel32!SortGetHandle`'s worker
+`0xa238` and recommended tracing *its* return-0 branch and verifying the sort
+**GUID/version** fields against the shipped `sortdefault.nls` header. That was a
+**red herring**: this pass instrumented `SortGetHandle`'s internals directly and
+found the worker never reaches the version/validator logic at all — it fails at
+the very first step, the **file open**. `SortGetHandle`'s init (`kernel32`
+`0xb49c`) builds the path `C:\Windows\Globalization\Sorting\sortdefault.nls` and
+opens it via `CreateFileW → CreateFileMappingW → MapViewOfFile` (`0xb820`);
+**`CreateFileW` returned `INVALID_HANDLE_VALUE`**, so the sort load returned 0,
+the per-locale sort registry never populated, and every collation errored. (The
+version gate was never the problem — arithmetically it *passes*: the worker's
+`(loadedVer ^ reqVer) & 0xffffff00` check on `0x00060305 ^ 0x000603ff` is 0. So
+swapping in a "more genuine" `sortdefault.nls` would **not** have fixed it; the
+shipped Wine-generated table is format- and version-compatible with this 19041
+kernelbase, and its validator (`0xb714`) accepts it once it can be opened.)
+
+The open failed inside **Brovan's own** read-path resolver, not the guest NLS
+code. `GeneralHelper.ResolveHostPath`'s WindowsLibs fallback extracted the file
+leaf with `Path.GetFileName`, which splits on `Path.DirectorySeparatorChar`. On
+Linux that is `/`, so on the backslash guest path
+`C:\Windows\Globalization\Sorting\sortdefault.nls` it returned the **whole
+string** as the "leaf"; the case-insensitive WindowsLibs leaf index then missed,
+resolution fell through to a non-existent `VirtualFS/…` path, and the open
+failed. The `.nls` files ship flat in `WindowsLibs` and resolve correctly once
+the leaf is extracted with the right separator. (System32 DLL loads were
+unaffected because they resolve via `TryResolveFromWindowsLibsRelative` /
+`CombineWindowsRelativePath`, which converts separators, and never needed the
+buggy leaf path.)
+
+**Fix.** Add a separator-agnostic `WindowsLeafName` helper (splits on both `\`
+and `/`) and use it for every Windows-style leaf extraction in the resolver: the
+`Globalization\` branch (the `sortdefault.nls` path — the F3 fix), the two
+`\KnownDlls\` branches in `ResolveHostPath`, the `\KnownDlls\` branch in
+`TryResolveFromWindowsLibs`, and the relative-path leaf fallback in
+`TryResolveFromWindowsLibsRelative` (all the same latent cross-platform bug).
+`Path.GetFileName` is kept only where the input is a real host path (the
+WindowsLibs index build over `Directory.EnumerateFiles`).
+
+**Validation — traced at the syscall/library level (all diagnostics reverted).**
+- Resolution now maps the guest path to `WindowsLibs/sortdefault.nls`,
+  `NtCreateFile` reports `FileExists=True`, `CreateFileW → 0x418` (valid handle),
+  `CreateFileMappingW` / `MapViewOfFile` succeed, the validator (`0xb714`)
+  returns 1, and `kernel32!SortGetHandle` reaches its success tail (fills the
+  sort object vtable). It runs **once** — the ≈4684×/run re-open storm is gone.
+- Watching kernelbase's compare exports at runtime (base resolved lazily — note
+  kernelbase maps *after* the initial ntdll/kernel32 bootstrap, so it is absent
+  from `WinModules` early), the returns are now correct instead of the constant
+  error:
+
+  | call | before | after |
+  |------|--------|-------|
+  | `StrCmpIW` byte-identical | `-2` | **`0`** (equal) |
+  | `StrCmpIW` different | `-2` | **`-1`** (less) |
+  | `CompareStringW` | `0` (error) | **`1`/`2`/`3`** (`CSTR_LESS/EQUAL/GREATER`) |
+  | `StrCmpNIW("C:\Windows\System32\", "C:\Windows\SYSTEM32\ntdll.dll", n)` | `-2` | **`0`** (prefix equal, case-insensitive) |
+
+  That last row is the FP itself: al-khaser tests each loaded module's path
+  against the System32 prefix; with the compare fixed, ntdll / kernel32 /
+  kernelbase now match `System32\` and are correctly recognised as legitimate
+  rather than reported as injected.
+
+**Method note (cost this pass, and the earlier one).** Brovan's per-instruction
+hook fires *before* the watched instruction executes, so to read a call's result
+you must watch the **return address** and read `rax` there — never read a
+destination register *at* a `mov dst, rax`. The earlier pass's wrong "resolver
+returns NULL for en-US" claim came from violating this; the earlier "trace the
+sort version" recommendation came from stopping the trace at `SortGetHandle`
+without instrumenting the file open one layer in. When a multi-layer guest-code
+trace bottoms out, check whether the failure is actually in an emulator-side
+syscall/resolver (here, `NtCreateFile` path resolution) before theorising about
+the guest's deeper logic.
 
 ### Host-environment fixes (intentionally **not** committed)
 
@@ -391,12 +476,13 @@ both outside pure throughput:
   (`rdtsc`+`pause`) forever; at ~5M insn/s a 2-minute run is ~500M no-progress
   instructions. The biggest wall-time lever is a scheduler spin/livelock
   detector (see F1), not per-instruction micro-optimisation.
-- **F3 NLS storm.** `kernelbase` re-opens `sortdefault.nls` ≈4684×/run (+ ~40
-  section ops). This pass showed the re-opens are a **symptom** of the F3 bug,
-  not an independent cost: kernelbase's per-locale sort load fails every compare
-  (the sort registry never populates because the sort-handle build returns 0 —
-  see F3), so it re-attempts the whole open→map→parse each time. Fixing F3 makes
-  the load succeed **once** and the storm disappears — better than caching it.
+- **F3 NLS storm (now fixed, `b205488`).** `kernelbase` re-opened
+  `sortdefault.nls` ≈4684×/run (+ ~40 section ops). The re-opens were a
+  **symptom** of the F3 bug, not an independent cost: kernelbase's per-locale
+  sort load failed every compare (the sort registry never populated because the
+  `sortdefault.nls` open returned `INVALID_HANDLE_VALUE` — see F3), so it
+  re-attempted the whole open→map→parse each time. `b205488` makes the open (and
+  thus the load) succeed **once**; the storm is gone — better than caching it.
 
 **Per-instruction ceiling (for reference).** Disabling both always-on
 `UC_HOOK_CODE(1,0)` hooks raised the CPU-bound phase from 4.3M→7.2M insn/s
@@ -409,107 +495,25 @@ TSC counter (anti-timing realism — `_timestampCounter += 3` per instruction,
 consumed by tight `rdtsc`-delta probes), and `OnBlock`'s 4 % would need a new
 `UC_HOOK_BLOCK` path plumbed through the backend abstraction (Unicorn + KVM) for
 little gain. **Conclusion: per-instruction throughput is near its safe ceiling;
-the next real throughput wins are F1 (spin detection) and F3 (fixing the
-locale-resolution failure, which also ends the `sortdefault.nls` re-open storm),
-not more micro-optimisation here.**
+F3's `sortdefault.nls` re-open storm is now fixed (`b205488`), so the last big
+remaining throughput lever is F1 (scheduler spin detection), not more
+micro-optimisation here.**
 
-### F3 — Injected-library false positive (residual: NLS collation)
+### F3 — Injected-library false positive (NLS collation) — **FIXED (`b205488`)**
 
-**Status:** the environment/API prerequisites are fixed (`2f6e5ae`, above) —
-`QueryDosDevice` resolves, `GetProcessImageFileName` is coherent, and the sort
-table now opens. The false positive itself remains.
-
-**Symptom:** al-khaser's DLL-injection check still flags **every** legitimate
-module + the sample's own exe as "injected".
-
-**Root cause — traced ~10 layers into real `kernelbase` (this pass, corrects the
-earlier "collation returns wrong order" guess).** The earlier note said the
-collation "errs and the `-2` becomes non-zero". That is wrong: instrumentation
-(capture `StrCmpNIW`/`StrCmpIW` entry args + the return at the caller's return
-address, file-based so it survives `-s`) shows the return is a **constant**
-`0xFFFFFFFE` (`-2`) for **every** call — equal *and* unequal inputs alike:
-
-```
-StrCmpIW  cnt=0  rax=-2 eqBytes=True  s1="\Device\HarddiskVolume1"  s2="\Device\HarddiskVolume1"
-StrCmpNIW cnt=20 rax=-2 eqBytes=True  s1="C:\Windows\System32\"     s2="C:\Windows\System32\"
-StrCmpIW  cnt=0  rax=-2 eqBytes=False s1="\Device\HarddiskVolume1"  s2="C:\Users"
-```
-
-`kernelbase!StrCmpNIW` is `CompareStringW(...) - 2` — a constant `-2` means
-**`CompareStringW` returns `0` (its error return) on every call**. Watching
-`kernelbase` RVAs at runtime (against the shipped `kernelbase.dll`, imagebase
-`0x180000000`) pins the failure precisely:
-
-- `StrCmpNIW` (RVA `0x24ca0`): FUNC A `0x22f90` (sort-handle getter) **succeeds**
-  (returns a handle), but FUNC C `0x21fa0` **returns 0** → the error path
-  `0x24d4d` runs `SetLastError(ERROR_INVALID_PARAMETER 0x57)` and returns `-2`.
-- FUNC C `0x21fa0` hashes the locale name and looks it up in kernelbase's
-  per-locale **sort registry** (128-bucket hash table at `.data` `0x28d2a0`).
-  On a miss it lazily loads the locale's sort data via `0x400401f8` and inserts
-  it — this lazy load is what re-opens `sortdefault.nls` every compare (the
-  ≈4684×/run storm). The registry is observed **empty** (`0/128` buckets).
-- On the registry miss, FUNC C calls the per-locale sort loader `0x400401f8`.
-  Its first step resolves the locale name via `0x1b4f0("en-US")`, which
-  **succeeds** — `en-US` **is** in kernelbase's locale table (`[0x28e1f0]`, a
-  128-bucket chained hash, `next`@`+0x58`, name@`+0x18`); `en-US` sits at its
-  correct bucket (hash `0x1cbe0("en-US") = 0`), and the resolver's ASCII
-  case-fold compare of the two byte-identical `en-US` strings reaches the FOUND
-  path `0x1b5de`. (NB: an earlier revision of this note claimed the resolver
-  "returns NULL for en-US" — that was a **diagnostic bug**, not real: the
-  per-instruction hook fires *before* the watched instruction executes, so
-  reading `rdi` at `mov rdi, rax` (loader `0x40223`) captured the pre-assignment
-  value `0`. Reading the source `rax`, or `rdi` one instruction later, shows the
-  resolver returns the real `en-US` entry. The locale table holds only ~4
-  lazily-inserted entries, not "hundreds" — that count was over-reading past the
-  128-bucket array.)
-- The loader fails **one step below** name resolution: it calls a function
-  pointer through kernelbase's CFG-dispatch thunk (`0x929f0` = `jmp rax`,
-  imported via the `[0x1c0af0]` apiset self-thunk), and **that call returns 0**.
-  The runtime target resolves (through the sort-init function-pointer table) to
-  `kernel32!SortGetHandle` (RVA `0xa190`). So the failing step is the per-locale
-  **sort-data build / sort-handle acquisition**, not the locale-name lookup and
-  not the collation arithmetic. `SortGetHandle` returning 0 → the loader returns
-  0 → the sort registry never populates → FUNC C returns 0 → `CompareStringW`
-  = 0 → `StrCmpNIW`/`StrCmpIW` = `-2` for every input.
-
-So the FP bottoms out in kernelbase's **sort-versioning / sort-handle build**
-(the `SortGetHandle`-family called from the per-locale loader returns 0), which
-cascades into every case-insensitive `CompareStringW`/`StrCmpI*`/`lstrcmpi`/CRT
-compare returning error.
-
-**Deepest reliable point (this pass).** `kernel32!SortGetHandle` (`0xa190`) is a
-thin wrapper: it calls inner worker `0xa238` and returns 0 iff that returns 0;
-on success it fills the sort object's vtable (`[obj+0xe0..0x108]`, incl. the
-collation fn `[obj+0xf0] = 0x3310`). Worker `0xa238` gets `(rcx=global
-0xb3b60, rdx="en-US", r8=versioning-struct, arg3=0)`. Its first gates — `r8!=0`,
-`[r8+4]!=0`, `[r8]>=0x20` — all **pass** (the versioning struct is the valid
-`&[kb.28be88]` with `[+0]=0x20`, `[+4]=0x603ff`), then it loads the 16-byte
-sort GUID from `[r8+0x10]` and continues. So the return-0 is **deeper inside
-`0xa238`**, past version validation — that is the exact spot for the next pass
-to resume (watch `0xa238`'s internal calls/branches, reading results at the
-*return address* per the method note below, never at the `mov dst,rax`).
-
-**Recommended approach (next pass).** Continue inside `kernel32!SortGetHandle`'s
-worker `0xa238` (past the version gates, which pass): trace *its* return-0
-branch — it reads the sort version/handle table seeded from `sortdefault.nls`,
-so verify the sort GUID/version fields it consumes against the shipped
-`sortdefault.nls` header. Note
-the **DLL set is version-consistent** (all `10.0.19041.x`: kernelbase .1202,
-kernel32 .1202, ntdll .1288, shlwapi .1023 — the "2021" date on kernelbase is
-just a 19041 servicing build, not a different base), so a DLL cross-version
-mismatch is **ruled out**; the only unverified version is the shipped
-`sortdefault.nls` itself vs what this 19041 kernelbase expects. **Method note
-that cost this pass:** the per-instruction hook fires *before* the instruction
-runs, so to
-read a call's result, watch the return address and read `rax` (or the
-destination one instruction later) — never read the destination register *at*
-the `mov dst, rax`. Alternatively, since Brovan runs real `kernelbase` with
-interception only at the **syscall** boundary (no user-mode export hook exists),
-a "short-circuit `CompareStringW`/`SortGetHandle`" fix would require building an
-export-interception mechanism first — larger than fixing the data path. This is
-broad (all case-insensitive kernelbase collation is affected) and wants its own
-pass with regression coverage. The ~10-layer trace above is the map; all
-diagnostic instrumentation was reverted (tree stays clean).
+Fixed this pass. The root cause was **not** in the guest NLS code — the earlier
+"trace the sort version inside `SortGetHandle`" recommendation was a red
+herring. kernelbase's `CompareStringW` / `StrCmpNIW` / `StrCmpIW` returned a
+constant error because `kernel32!SortGetHandle` could not **open**
+`C:\Windows\Globalization\Sorting\sortdefault.nls`. That open failed in
+Brovan's own read-path resolver, which extracted the file leaf with
+`Path.GetFileName` — which splits on `/` on Linux, so on a backslash guest path
+it returned the whole string as the "leaf" and missed the WindowsLibs index.
+Fixed with a separator-agnostic `WindowsLeafName` helper. The full write-up —
+including the version-gate arithmetic that rules out the file-swap theory and
+the before/after compare-return evidence (constant `-2`/`0` error → correct
+`0`/`-1`/`CSTR_*` results) — is in the landed **`b205488`** entry under *Past
+corrections* above.
 
 ### F5 — x86 / WOW64 unsupported
 
