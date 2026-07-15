@@ -153,6 +153,9 @@ New-Item -ItemType Directory -Force -Path $libDir,$wow64Dir,$regDir | Out-Null
 
 $sys32  = Join-Path $env:WINDIR 'System32'
 $syswow = Join-Path $env:WINDIR 'SysWOW64'   # x86 view on x64 OS; absent on 32-bit OS
+# SortDefault.nls lives under %WINDIR%\Globalization\Sorting, NOT System32; one file,
+# shared by both the x64 and x86 views.
+$sortNls = Join-Path $env:WINDIR 'Globalization\Sorting\SortDefault.nls'
 
 # --- Copy DLLs ------------------------------------------------------------------
 function Copy-DllSet {
@@ -187,25 +190,25 @@ function Copy-DllSet {
 # maps locale.nls; without it kernelbase init FAILS (STATUS_DLL_INIT_FAILED) and
 # every sample dies before main. Always ship them (small: a few MB total).
 #
-# System32\Globalization\Sorting\SortDefault.nls is also required: kernel32!SortGetHandle
-# loads it lazily on the first case-insensitive comparison (CompareStringW, StrCmpNIW,
-# lstrcmpi ...). Without it the sort registry never populates, every collation returns a
-# constant error, and al-khaser's DLL-injection check (which case-insensitively compares
-# each loaded module's path against the System32 prefix) flags every legitimate System32
-# module as "injected library" -- a fully-covered fix (see F3 / commit b205488) that
-# depends on the file being shipped. The System32 *.nls glob is shallow and misses the
-# Globalization\Sorting\ subtree, so pull it explicitly. Brovan's WindowsLibs resolver
-# maps any C:\Windows\Globalization\... open by leaf into the flat WindowsLibs\ set (see
-# commit 2f6e5ae), so the file only needs to land next to the other *.nls, not under a
-# Globalization\Sorting\ subdirectory.
+# SortDefault.nls is also required: kernel32!SortGetHandle loads it lazily on the first
+# case-insensitive comparison (CompareStringW, StrCmpNIW, lstrcmpi ...). Without it the
+# sort registry never populates, every collation returns a constant error, and
+# al-khaser's DLL-injection check (which case-insensitively compares each loaded module's
+# path against the System32 prefix) flags every legitimate System32 module as "injected
+# library" -- a fully-covered fix (see F3 / commit b205488) that depends on the file being
+# shipped. Unlike locale.nls / codepages it does NOT live in System32: it sits at
+# %WINDIR%\Globalization\Sorting\SortDefault.nls (one architecture-independent file, shared
+# by the x64 and x86 views), so it is copied separately from $SortSource. Brovan's
+# WindowsLibs resolver maps any C:\Windows\Globalization\... open by leaf into the flat
+# WindowsLibs\ set (see commit 2f6e5ae), so the file only needs to land next to the other
+# *.nls, not under a Globalization\Sorting\ subdirectory.
 function Copy-NlsSet {
-    param([string]$SourceDir, [string]$DestDir, [string]$Label)
+    param([string]$SourceDir, [string]$DestDir, [string]$Label, [string]$SortSource)
     if (-not (Test-Path $SourceDir)) { return 0 }
     Copy-Item -Path (Join-Path $SourceDir '*.nls') -Destination $DestDir -Force -ErrorAction SilentlyContinue
 
-    $sortSrc = Join-Path $SourceDir 'Globalization\Sorting\SortDefault.nls'
-    if (Test-Path $sortSrc) {
-        Copy-Item -Path $sortSrc -Destination $DestDir -Force -ErrorAction SilentlyContinue
+    if ($SortSource -and (Test-Path $SortSource)) {
+        Copy-Item -Path $SortSource -Destination (Join-Path $DestDir 'SortDefault.nls') -Force -ErrorAction SilentlyContinue
     }
 
     $cnt = (Get-ChildItem $DestDir -Filter *.nls -File -ErrorAction SilentlyContinue).Count
@@ -213,19 +216,19 @@ function Copy-NlsSet {
         Write-Warn2 "${Label}: locale.nls not found - kernelbase init will fail on the target."
     }
     if (-not (Test-Path (Join-Path $DestDir 'SortDefault.nls'))) {
-        Write-Warn2 "${Label}: SortDefault.nls not found - case-insensitive comparison will fail; al-khaser will flag every System32 module as injected."
+        Write-Warn2 "${Label}: SortDefault.nls not found (looked for '$SortSource') - case-insensitive comparison will fail; al-khaser will flag every System32 module as injected."
     }
     return $cnt
 }
 
 Write-Step "Staging x64 DLLs (System32 view -> WindowsLibs\)"
 $n64 = Copy-DllSet -SourceDir $sys32 -DestDir $libDir -Label 'System32 (x64)'
-$nls64 = Copy-NlsSet -SourceDir $sys32 -DestDir $libDir -Label 'System32 (x64)'
+$nls64 = Copy-NlsSet -SourceDir $sys32 -DestDir $libDir -Label 'System32 (x64)' -SortSource $sortNls
 Write-Ok  "x64: $n64 DLL(s) + $nls64 NLS file(s) staged."
 
 Write-Step "Staging x86 DLLs (SysWOW64 view -> WindowsLibs\SysWOW64\)"
 $n86 = Copy-DllSet -SourceDir $syswow -DestDir $wow64Dir -Label 'SysWOW64 (x86)'
-$nls86 = Copy-NlsSet -SourceDir $syswow -DestDir $wow64Dir -Label 'SysWOW64 (x86)'
+$nls86 = Copy-NlsSet -SourceDir $syswow -DestDir $wow64Dir -Label 'SysWOW64 (x86)' -SortSource $sortNls
 Write-Ok  "x86: $n86 DLL(s) + $nls86 NLS file(s) staged."
 
 # --- Registry hives -------------------------------------------------------------

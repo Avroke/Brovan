@@ -652,13 +652,16 @@ top table records**:
   livelock watchdog is silent throughout every one.
 
 **Deps-bundle fix landing with this note** (`scripts/Export-BrovanDeps.ps1` +
-importer validators). The export script's NLS copy globs `System32\*.nls`
-shallowly, so it misses `System32\Globalization\Sorting\SortDefault.nls` — the
-sort table the F3 fix (`b205488`) needs to open for `CompareStringW`/`StrCmpNIW`
-to work. Bundles exported from that older script (including the one used for the
-runs above) trip the F3 injected-library FP on every re-import, even though the
-code fix is intact. The export script now pulls `SortDefault.nls` explicitly
-alongside the flat `*.nls` set, and both importers (`Import-BrovanDeps.ps1` /
+importer validators). The export script's NLS copy globs `System32\*.nls`, but
+the sort table the F3 fix (`b205488`) needs to open for `CompareStringW` /
+`StrCmpNIW` — `SortDefault.nls` — is **not in System32 at all**: it lives at
+`%WINDIR%\Globalization\Sorting\SortDefault.nls` (one architecture-independent
+file, shared by the x64 and x86 views), so the System32 glob never picks it up.
+Bundles exported from the older script (including the one used for the runs
+above) trip the F3 injected-library FP on every re-import, even though the code
+fix is intact. The export script now copies `SortDefault.nls` from
+`%WINDIR%\Globalization\Sorting` into both the x64 (`WindowsLibs\`) and x86
+(`WindowsLibs\SysWOW64\`) views, and both importers (`Import-BrovanDeps.ps1` /
 `.sh`) warn when it is absent so operators reconciling an older bundle notice
 before running. Brovan's `\Globalization\...`-by-leaf resolver (commit `2f6e5ae`)
 already maps the file wherever it lands in `WindowsLibs\`, so no runtime change
