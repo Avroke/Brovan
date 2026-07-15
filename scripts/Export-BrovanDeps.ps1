@@ -181,13 +181,34 @@ function Copy-DllSet {
 # the DLL copy skips them. kernelbase.dll's init calls NtInitializeNlsFiles and
 # maps locale.nls; without it kernelbase init FAILS (STATUS_DLL_INIT_FAILED) and
 # every sample dies before main. Always ship them (small: a few MB total).
+#
+# System32\Globalization\Sorting\SortDefault.nls is also required: kernel32!SortGetHandle
+# loads it lazily on the first case-insensitive comparison (CompareStringW, StrCmpNIW,
+# lstrcmpi ...). Without it the sort registry never populates, every collation returns a
+# constant error, and al-khaser's DLL-injection check (which case-insensitively compares
+# each loaded module's path against the System32 prefix) flags every legitimate System32
+# module as "injected library" -- a fully-covered fix (see F3 / commit b205488) that
+# depends on the file being shipped. The System32 *.nls glob is shallow and misses the
+# Globalization\Sorting\ subtree, so pull it explicitly. Brovan's WindowsLibs resolver
+# maps any C:\Windows\Globalization\... open by leaf into the flat WindowsLibs\ set (see
+# commit 2f6e5ae), so the file only needs to land next to the other *.nls, not under a
+# Globalization\Sorting\ subdirectory.
 function Copy-NlsSet {
     param([string]$SourceDir, [string]$DestDir, [string]$Label)
     if (-not (Test-Path $SourceDir)) { return 0 }
     Copy-Item -Path (Join-Path $SourceDir '*.nls') -Destination $DestDir -Force -ErrorAction SilentlyContinue
+
+    $sortSrc = Join-Path $SourceDir 'Globalization\Sorting\SortDefault.nls'
+    if (Test-Path $sortSrc) {
+        Copy-Item -Path $sortSrc -Destination $DestDir -Force -ErrorAction SilentlyContinue
+    }
+
     $cnt = (Get-ChildItem $DestDir -Filter *.nls -File -ErrorAction SilentlyContinue).Count
     if (-not (Test-Path (Join-Path $DestDir 'locale.nls'))) {
         Write-Warn2 "${Label}: locale.nls not found - kernelbase init will fail on the target."
+    }
+    if (-not (Test-Path (Join-Path $DestDir 'SortDefault.nls'))) {
+        Write-Warn2 "${Label}: SortDefault.nls not found - case-insensitive comparison will fail; al-khaser will flag every System32 module as injected."
     }
     return $cnt
 }

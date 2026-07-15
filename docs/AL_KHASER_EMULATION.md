@@ -625,6 +625,45 @@ around RVA `0x2B3E2..0x2B426`, plus `memset`).
   pre-F3 `RtlpBackoff` livelock which is still a real (separate, non-deterministic)
   hazard — not a heap-corruption bug.
 
+**End-to-end terminus (2026-07, real harness).** With the exported deps + Unicorn
+2.1.4 harness now available, four al-khaser_x64 runs + a parent-commit baseline
+consistently reach a **much deeper endpoint than the 22.8 M-instruction line the
+top table records**:
+
+- **~149 M instructions** (105 M in one interleaving; depth is non-deterministic
+  as documented) — **6.6× beyond** the doc's `4b9540f`-era ceiling.
+- **48 al-khaser probe verdicts printed** every run (38 `GOOD` / 10 `BAD`), with
+  the `BAD` set stable across runs and identical to baseline. All 10 `BAD` are
+  the injected-library FP: `cfgmgr32.dll`, `bcrypt.dll`, `POWRPROF.dll`,
+  `UMPDC.dll`, `cfgmgr32.dll` again (× 2 each × 5 modules = 10 flags) — the F3
+  collation gap reappears purely because the shipped deps bundle is missing
+  `SortDefault.nls` (see script fix below), **not** a Brovan regression: the F3
+  code fix (`b205488`) is intact and re-verified.
+- **Termination pattern is consistent**: a fault deep in the DLL-injection /
+  hidden-modules memory-walk probe → `ntdll!KiUserExceptionDispatcher` →
+  `VCRUNTIME140!__C_specific_handler` → `ucrtbase!_seh_filter_exe` →
+  `NtTerminateProcess(0xC0000005)`. rc = 0 (the process exits cleanly through the
+  guest's own SEH machinery — a natural terminus at "al-khaser catches a fault
+  and terminates itself", not a Brovan crash).
+- The exact faulting page is run-specific (`0x100209000` / `0x1002A9000` /
+  a null-read in one interleaving), all inside the same `0x100120000`-based
+  allocation family — a memory-model coherence question worth its own pass but
+  not chased here: the runs all reach the same terminus category, and the
+  livelock watchdog is silent throughout every one.
+
+**Deps-bundle fix landing with this note** (`scripts/Export-BrovanDeps.ps1` +
+importer validators). The export script's NLS copy globs `System32\*.nls`
+shallowly, so it misses `System32\Globalization\Sorting\SortDefault.nls` — the
+sort table the F3 fix (`b205488`) needs to open for `CompareStringW`/`StrCmpNIW`
+to work. Bundles exported from that older script (including the one used for the
+runs above) trip the F3 injected-library FP on every re-import, even though the
+code fix is intact. The export script now pulls `SortDefault.nls` explicitly
+alongside the flat `*.nls` set, and both importers (`Import-BrovanDeps.ps1` /
+`.sh`) warn when it is absent so operators reconciling an older bundle notice
+before running. Brovan's `\Globalization\...`-by-leaf resolver (commit `2f6e5ae`)
+already maps the file wherever it lands in `WindowsLibs\`, so no runtime change
+is needed.
+
 **Bonus finding surfaced by getting further — a second injected-library FP.** The
 `Walking process memory for hidden modules` probe reported every System32 module
 (`KERNEL32.DLL`, `KERNELBASE.dll`, `win32u.dll`, …) as injected. Root cause:

@@ -117,6 +117,16 @@ if ((Test-Path $localeNls) -and (Get-Item $localeNls).Length -gt 0) {
     Write-Warn2 'WindowsLibs\locale.nls missing - kernelbase init will fail; re-export with an NLS-aware bundle.'
 }
 
+# SortDefault.nls: needed by kernel32!SortGetHandle for case-insensitive collation.
+# Without it CompareStringW / StrCmpNIW return a constant error and al-khaser's
+# DLL-injection check flags every legitimate System32 module (see F3).
+$sortNls = Join-Path $libDir 'SortDefault.nls'
+if ((Test-Path $sortNls) -and (Get-Item $sortNls).Length -gt 0) {
+    Write-Ok 'WindowsLibs\SortDefault.nls present.'
+} else {
+    Write-Warn2 'WindowsLibs\SortDefault.nls missing - case-insensitive comparison will fail; re-export with an NLS-aware bundle.'
+}
+
 $wow = Join-Path $libDir 'SysWOW64'
 if (Test-Path (Join-Path $wow 'ntdll.dll')) {
     $cnt = (Get-ChildItem $wow -Filter *.dll -File -ErrorAction SilentlyContinue).Count

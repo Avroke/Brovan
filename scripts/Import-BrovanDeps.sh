@@ -149,6 +149,15 @@ else
     warn "WindowsLibs/locale.nls missing - kernelbase init will fail; re-export with an NLS-aware bundle."
 fi
 
+# SortDefault.nls: needed by kernel32!SortGetHandle for case-insensitive collation.
+# Without it CompareStringW / StrCmpNIW return a constant error and al-khaser's
+# DLL-injection check flags every legitimate System32 module (see F3).
+if [ -s "$lib_dir/SortDefault.nls" ]; then
+    ok "WindowsLibs/SortDefault.nls present."
+else
+    warn "WindowsLibs/SortDefault.nls missing - case-insensitive comparison will fail; re-export with an NLS-aware bundle."
+fi
+
 wow_dir="$lib_dir/SysWOW64"
 if [ -f "$wow_dir/ntdll.dll" ]; then
     cnt=$(find "$wow_dir" -maxdepth 1 -type f -iname '*.dll' 2>/dev/null | wc -l | tr -d ' ')
