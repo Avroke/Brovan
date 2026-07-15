@@ -980,7 +980,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         Window = 13,
         EtwRegistrationHandle = 14,
         SemaphoreHandle = 15,
-        JobHandle = 16
+        JobHandle = 16,
+        DebugObjectHandle = 17
     }
 
     public sealed class WinToken : IHandleObject
@@ -1421,6 +1422,16 @@ namespace Brovan.Core.Emulation.OS.Windows
         public string ObjectId => Name;
 
         public HandleType ObjectType => HandleType.IoCompletionHandle;
+    }
+
+    public sealed class WinDebugObject : IHandleObject
+    {
+        public string Name;
+        public bool KillOnClose;
+
+        public string ObjectId => Name;
+
+        public HandleType ObjectType => HandleType.DebugObjectHandle;
     }
 
     public sealed class WinWorkerFactory : IHandleObject
