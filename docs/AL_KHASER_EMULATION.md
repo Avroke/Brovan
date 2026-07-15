@@ -486,30 +486,40 @@ grinds ~1.4 billion instructions inside the ntdll heap manager**
 - **Not a `VirtualQuery` walk** — `NtQueryVirtualMemory` is **never called**
   during the stall (instrumented at the syscall's top), so the classic
   `while(VirtualQuery(addr)) addr += RegionSize;` non-termination is ruled out.
-  (Note: the `MemoryBasicInformation` branch *does* have a latent
-  non-termination bug — above the highest mapped region it returns
-  `STATUS_SUCCESS` + `MEM_FREE` size `0x1000` forever instead of failing past
-  `MmHighestUserAddress` — but that path isn't what al-khaser hits here. Worth
-  fixing opportunistically as a separate correctness item.)
-- **Stuck inside one heap call** — watching `RtlAllocateHeap`'s entry (and its
-  `+0xF` hot address) shows it is **not re-entered** during the grind, while the
-  main thread's RIP stays within the heap-manager region that contains backward
-  branches (`0x2B3F3→0x2B3E2`, `0x2B426→0x2B3F8`). That is the shape of an
-  **infinite free-list / block-walk loop inside a single heap-manager call** over
-  Brovan's emulated heap — i.e. a heap-structure emulation defect (a malformed
-  free-list link / block header / LFH bucket that the real ntdll heap manager
-  walks forever), **not** a scheduler lost-wakeup.
+  (The `MemoryBasicInformation` branch *did* also have a latent non-termination
+  bug — above the highest mapped region it returned `STATUS_SUCCESS` + `MEM_FREE`
+  size `0x1000` forever instead of failing past `MmHighestUserAddress` — **fixed
+  separately in `d1f5d3a`**; it is not what al-khaser hits here.)
+- **A cyclic heap free-list — root cause proven.** The stall is an infinite walk
+  inside a single ntdll heap-manager call: the free-block search at ntdll
+  `0x2B3E2` walks a linked structure via `[node]` (offset 0), comparing a 32-bit
+  size at `[node+8]` against the request size, and exits only when `[node]`
+  reaches null. Instrumenting that loop (record each visited node address, flag a
+  repeat) caught the walk **revisiting the same node**:
 
-**Implication for the next pass.** The scheduler/lost-wakeup hunt above may not
-be the highest-value F1 work anymore — the reproducible post-F3 stall is a heap
-manager loop. Recommended: diagnose Brovan's heap setup vs. what the real ntdll
-heap manager expects (does `RtlCreateHeap`/the process heap build the
-`_HEAP` + `_HEAP_ENTRY` + free-list / `FreeLists`/LFH structures the manager
-walks?), find which linkage the `0x2B3E2..0x2B426` walk never terminates on, and
-fix the structure. The `RtlpBackoff` livelock remains a real, separate
-non-deterministic hazard (it was observed pre-F3), so both are open; this is
-which one actually blocks the current build. All diagnostic instrumentation for
-this pass was reverted (tree stays clean).
+  ```
+  CYCLE at node 0x1002202E8; rbx(reqSize)=0x121
+    node 0x1002202E8  link([+0])=0x1002275A0  size([+8])=0x80
+  ```
+
+  Both are real heap addresses with plausible sizes, so this is a genuine
+  **cyclic linkage in the emulated heap's free-list**, not a decode-of-garbage.
+  `RtlAllocateHeap`'s entry is not re-entered during the grind, confirming the
+  thread is stuck inside this one search, not doing many allocations.
+
+**Implication for the next pass.** This is a heap-**corruption** hunt, not a
+scheduler hunt. Because Brovan runs the *real* ntdll heap manager (only
+`NtAllocateVirtualMemory` etc. are intercepted), ntdll's own insert/remove never
+makes a cycle — so something **external** clobbers a free node's `[+0]` link: a
+double-free routed through the free path, a stub that writes past a returned
+buffer into an adjacent free block, or a misemulated store. Recommended: add a
+free-list integrity check (walk `[node]` from the list head after each heap op /
+each stub that writes guest memory, assert acyclic) and bisect to the operation
+that first introduces the cycle at `0x1002202E8`; then fix that writer. The
+`RtlpBackoff` livelock remains a real, separate non-deterministic hazard
+(observed pre-F3), so both are open; the cyclic free-list is what blocks the
+current build. All diagnostic instrumentation for this pass was reverted (tree
+stays clean).
 
 ### F2 — Emulation throughput
 
