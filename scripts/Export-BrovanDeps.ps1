@@ -117,15 +117,21 @@ $CuratedDlls = @(
     'advapi32','sechost','rpcrt4','msvcrt','msvcp_win','ucrtbase',
     'combase','ole32','oleaut32','clbcatq',
     'shell32','shlwapi','shcore','SHDocVw','windows.storage',
-    'ws2_32','wsock32','mswsock','dnsapi','iphlpapi','nsi',
+    'ws2_32','wsock32','mswsock','dnsapi','iphlpapi','nsi','mpr',
     'wininet','winhttp','urlmon','wldp',
     'crypt32','cryptbase','cryptsp','bcrypt','bcryptprimitives','ncrypt','ncryptsslp',
     'wintrust','msasn1','amsi',
     'comctl32','comdlg32','setupapi','cfgmgr32','devobj',
-    'powrprof','umpdc','psapi','version','profapi','userenv',
+    'powrprof','umpdc','wmiclnt','psapi','version','profapi','userenv',
     'netapi32','netutils','samcli','srvcli','wkscli','logoncli',
     'secur32','sspicli','dbghelp','dbgcore','imagehlp',
-    'wtsapi32','winmm','normaliz','bcp47mrm','windows.globalization'
+    'wtsapi32','winmm','normaliz','bcp47mrm','windows.globalization',
+    # Visual C++ 2015-2022 runtime (System32 when the VC++ redist is installed).
+    # MSVC-compiled samples - al-khaser included - import these directly; without
+    # them the loader raises STATUS_ENTRYPOINT_NOT_FOUND (0xC0000139) binding the
+    # target's imports. Warned-but-skipped if the redist isn't present on the host.
+    'msvcp140','msvcp140_1','msvcp140_2','vcruntime140','vcruntime140_1',
+    'concrt140','vccorlib140'
 )
 
 # --- Staging --------------------------------------------------------------------
