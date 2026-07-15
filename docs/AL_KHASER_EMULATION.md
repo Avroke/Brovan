@@ -477,11 +477,23 @@ So the FP bottoms out in kernelbase's **sort-versioning / sort-handle build**
 cascades into every case-insensitive `CompareStringW`/`StrCmpI*`/`lstrcmpi`/CRT
 compare returning error.
 
-**Recommended approach (next pass).** Continue one layer down from
-`kernel32!SortGetHandle` (RVA `0xa190`, likely forwarding to the kernelbase
-sort-versioning worker): trace *its* return-0 branch — it reads the sort
-version/handle table seeded from `sortdefault.nls`, so verify the version
-fields kernelbase validates against the shipped `sortdefault.nls` header. Note
+**Deepest reliable point (this pass).** `kernel32!SortGetHandle` (`0xa190`) is a
+thin wrapper: it calls inner worker `0xa238` and returns 0 iff that returns 0;
+on success it fills the sort object's vtable (`[obj+0xe0..0x108]`, incl. the
+collation fn `[obj+0xf0] = 0x3310`). Worker `0xa238` gets `(rcx=global
+0xb3b60, rdx="en-US", r8=versioning-struct, arg3=0)`. Its first gates — `r8!=0`,
+`[r8+4]!=0`, `[r8]>=0x20` — all **pass** (the versioning struct is the valid
+`&[kb.28be88]` with `[+0]=0x20`, `[+4]=0x603ff`), then it loads the 16-byte
+sort GUID from `[r8+0x10]` and continues. So the return-0 is **deeper inside
+`0xa238`**, past version validation — that is the exact spot for the next pass
+to resume (watch `0xa238`'s internal calls/branches, reading results at the
+*return address* per the method note below, never at the `mov dst,rax`).
+
+**Recommended approach (next pass).** Continue inside `kernel32!SortGetHandle`'s
+worker `0xa238` (past the version gates, which pass): trace *its* return-0
+branch — it reads the sort version/handle table seeded from `sortdefault.nls`,
+so verify the sort GUID/version fields it consumes against the shipped
+`sortdefault.nls` header. Note
 the **DLL set is version-consistent** (all `10.0.19041.x`: kernelbase .1202,
 kernel32 .1202, ntdll .1288, shlwapi .1023 — the "2021" date on kernelbase is
 just a 19041 servicing build, not a different base), so a DLL cross-version
