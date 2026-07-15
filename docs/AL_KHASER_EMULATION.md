@@ -392,9 +392,11 @@ both outside pure throughput:
   instructions. The biggest wall-time lever is a scheduler spin/livelock
   detector (see F1), not per-instruction micro-optimisation.
 - **F3 NLS storm.** `kernelbase` re-opens `sortdefault.nls` ≈4684×/run (+ ~40
-  section ops) to drive the case-insensitive compares in the injected-DLL check.
-  Caching that mapping so the re-opens are cheap is a genuine throughput win, but
-  it belongs with the F3 NLS pass (same file, same pipeline).
+  section ops). This pass showed the re-opens are a **symptom** of the F3 bug,
+  not an independent cost: kernelbase's per-locale sort load fails every compare
+  (the sort registry never populates because `en-US` won't resolve — see F3), so
+  it re-attempts the whole open→map→parse each time. Fixing F3 makes the load
+  succeed **once** and the storm disappears — better than caching the mapping.
 
 **Per-instruction ceiling (for reference).** Disabling both always-on
 `UC_HOOK_CODE(1,0)` hooks raised the CPU-bound phase from 4.3M→7.2M insn/s
@@ -407,8 +409,9 @@ TSC counter (anti-timing realism — `_timestampCounter += 3` per instruction,
 consumed by tight `rdtsc`-delta probes), and `OnBlock`'s 4 % would need a new
 `UC_HOOK_BLOCK` path plumbed through the backend abstraction (Unicorn + KVM) for
 little gain. **Conclusion: per-instruction throughput is near its safe ceiling;
-the next real throughput wins are F1 (spin detection) and F3 (NLS mapping
-cache), not more micro-optimisation here.**
+the next real throughput wins are F1 (spin detection) and F3 (fixing the
+locale-resolution failure, which also ends the `sortdefault.nls` re-open storm),
+not more micro-optimisation here.**
 
 ### F3 — Injected-library false positive (residual: NLS collation)
 
@@ -419,32 +422,64 @@ table now opens. The false positive itself remains.
 **Symptom:** al-khaser's DLL-injection check still flags **every** legitimate
 module + the sample's own exe as "injected".
 
-**Root cause (traced to the NLS layer).** `IsBadLibrary` compares module paths
-with the case-insensitive `StrCmpNIW`/`StrCmpIW`. Instrumentation proved these
-return "not equal" for **byte-identical** inputs (e.g.
-`StrCmpNIW("C:\Windows\System32\", "C:\Windows\System32\KERNEL32.DLL", 20)` and
-`StrCmpIW("\Device\HarddiskVolume1", "\Device\HarddiskVolume1")` — the latter
-makes al-khaser's own `NormalizeNTPath` fail to convert the device path, so the
-own-exe comparison also fails). The chain is:
-`shlwapi!StrCmpNIW` (a `jmp [IAT]` thunk) → apiset
-`api-ms-win-core-shlwapi-obsolete-l1-1-0` → `kernelbase!StrCmpNIW`
-(`0x180024CA0`), which loads a sort-table structure, calls a collation function
-pointer from it (`[struct+0xF0]`) with flags `0x18000001` (NORM_IGNORECASE +
-linguistic), and returns `CompareString-2`. With a broken table the collation
-errs and the `-2` becomes non-zero. kernelbase re-opens
-`C:\Windows\Globalization\Sorting\sortdefault.nls` on every compare (≈4684×/run)
-plus ~40 section ops, so the table is consumed via file-open → `NtCreateSection`
-→ `NtMapViewOfSection` → parse.
+**Root cause — traced 8 layers into real `kernelbase` (this pass, corrects the
+earlier "collation returns wrong order" guess).** The earlier note said the
+collation "errs and the `-2` becomes non-zero". That is wrong: instrumentation
+(capture `StrCmpNIW`/`StrCmpIW` entry args + the return at the caller's return
+address, file-based so it survives `-s`) shows the return is a **constant**
+`0xFFFFFFFE` (`-2`) for **every** call — equal *and* unequal inputs alike:
 
-**Recommended approach:** audit the NLS sort-table pipeline kernelbase drives:
-confirm the `sortdefault.nls` open now returns a real handle, that
-`NtCreateSection`/`NtMapViewOfSection` of it yield the correct bytes, and that
-the `CompareString`/`LCMapString` emulation builds a usable collation from them
-(or short-circuit the ordinal/ignore-case path). This is broad — any
-case-insensitive comparison routed through kernelbase collation is affected, not
-just al-khaser — so it wants its own pass and regression coverage. Because
-`StrCmpNIW`/`StrCmpIW`/`lstrcmpi` and the CRT all reach it, a correct fix
-resolves the injected-DLL FP and improves realism across samples.
+```
+StrCmpIW  cnt=0  rax=-2 eqBytes=True  s1="\Device\HarddiskVolume1"  s2="\Device\HarddiskVolume1"
+StrCmpNIW cnt=20 rax=-2 eqBytes=True  s1="C:\Windows\System32\"     s2="C:\Windows\System32\"
+StrCmpIW  cnt=0  rax=-2 eqBytes=False s1="\Device\HarddiskVolume1"  s2="C:\Users"
+```
+
+`kernelbase!StrCmpNIW` is `CompareStringW(...) - 2` — a constant `-2` means
+**`CompareStringW` returns `0` (its error return) on every call**. Watching
+`kernelbase` RVAs at runtime (against the shipped `kernelbase.dll`, imagebase
+`0x180000000`) pins the failure precisely:
+
+- `StrCmpNIW` (RVA `0x24ca0`): FUNC A `0x22f90` (sort-handle getter) **succeeds**
+  (returns a handle), but FUNC C `0x21fa0` **returns 0** → the error path
+  `0x24d4d` runs `SetLastError(ERROR_INVALID_PARAMETER 0x57)` and returns `-2`.
+- FUNC C `0x21fa0` hashes the locale name and looks it up in kernelbase's
+  per-locale **sort registry** (128-bucket hash table at `.data` `0x28d2a0`).
+  On a miss it lazily loads the locale's sort data via `0x400401f8` and inserts
+  it — this lazy load is what re-opens `sortdefault.nls` every compare (the
+  ≈4684×/run storm). The registry is observed **empty** (`0/128` buckets).
+- The per-locale loader `0x400401f8` fails because its very first step, the
+  **locale-name resolver `0x1b4f0("en-US", 0)`, returns NULL**. That NULL is
+  passed as `rcx` into the collation builder `[0x1c0af0]`, which returns 0 →
+  loader returns 0 → registry stays empty → `CompareStringW` = 0 → `StrCmpNIW`
+  = `-2`.
+- The resolver `0x1b4f0` hashes the name (`0x1cbe0`, a simple deterministic
+  ASCII-fold hash `&0x7f`) and indexes kernelbase's **locale table**
+  (`[0x28e1f0]`). The table is **populated** (base `0x100163bb0`, ~hundreds of
+  entries), yet `en-US`'s bucket is empty — so `en-US` is not findable, even
+  though other names (`ar-SA`) are looked up. The bug is therefore in
+  kernelbase's **locale-table population** (which entries land where), not in
+  the sort table or the collation math.
+
+So the FP is one link deep: **`en-US` is not resolvable in kernelbase's
+locale table under Brovan**, which cascades into every case-insensitive
+`CompareStringW`/`StrCmpI*`/`lstrcmpi`/CRT compare returning error.
+
+**Recommended approach (next pass).** The remaining unknown is the **locale-table
+population**: which init routine fills `[0x28e1f0]`, what NLS data it reads
+(likely `locale.nls`, mapped by `NtInitializeNlsFiles` — verify the returned
+`BaseAddress`/`DefaultLcid`/`CasingSize` triple, especially that `CasingSize`
+= `[locale.nls+0x10]` is the field kernelbase actually expects), and why `en-US`
+lands in a bucket the resolver's hash does not probe (population/hash offset,
+version-table mismatch, or a mis-read count). Trace it with a memory-write watch
+on `[kbBase+0x28e1f0]`'s table region to find the writer, then diff the inserted
+entries against the resolver's `0x1cbe0` hash of `en-US`. Alternatively, since
+Brovan runs real `kernelbase` with interception only at the **syscall** boundary
+(no user-mode export hook exists), a "short-circuit `CompareStringW`" fix would
+require building an export-interception mechanism first — larger than fixing the
+data path. This is broad (all case-insensitive kernelbase collation is affected)
+and wants its own pass with regression coverage. The 8-layer trace above is the
+map; the diagnostic instrumentation was reverted (tree stays clean).
 
 ### F5 — x86 / WOW64 unsupported
 
