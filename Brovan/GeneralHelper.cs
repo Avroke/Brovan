@@ -2022,6 +2022,43 @@ namespace Brovan
                 return ResolveVirtualHostPathInternal(WinPath, CreateDirectories);
             }
 
+            /// <summary>
+            /// Backs a guest image at an emulated Windows path with the given bytes inside the
+            /// virtual C: drive, creating parent directories as needed. Used to present a sample
+            /// loaded from an arbitrary host location under a realistic guest path so the guest
+            /// can open, stat and read its own image (and drop files next to it). Existing files
+            /// are left untouched. Failures are non-fatal.
+            /// </summary>
+            /// <param name="GuestWinPath">emulated Windows path (e.g. C:\Users\user\Desktop\sample.exe).</param>
+            /// <param name="Bytes">raw image bytes to write.</param>
+            public static void SeedGuestImageFile(string GuestWinPath, ReadOnlySpan<byte> Bytes)
+            {
+                if (string.IsNullOrWhiteSpace(GuestWinPath))
+                    return;
+
+                try
+                {
+                    string HostPath = ResolveVirtualHostPath(GuestWinPath, BinaryFormat.PE, CreateDirectories: true);
+                    if (string.IsNullOrWhiteSpace(HostPath))
+                        return;
+
+                    string Dir = System.IO.Path.GetDirectoryName(HostPath);
+                    if (!string.IsNullOrEmpty(Dir))
+                        Directory.CreateDirectory(Dir);
+
+                    if (File.Exists(HostPath))
+                        return;
+
+                    using FileStream Stream = new FileStream(HostPath, FileMode.CreateNew, FileAccess.Write, FileShare.Read);
+                    if (!Bytes.IsEmpty)
+                        Stream.Write(Bytes);
+                }
+                catch (Exception ex)
+                {
+                    Utils.LogError($"[IO] Failed to seed guest image file '{GuestWinPath}': {ex.Message}");
+                }
+            }
+
             private static string NormalizeWindowsEmulatedPath(string Raw)
             {
                 if (string.IsNullOrWhiteSpace(Raw))

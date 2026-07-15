@@ -2456,9 +2456,15 @@ namespace Brovan.EmulationMenu
 
                 if (MappedMainModuleBase == 0)
                 {
-                    if (Binary.FileFormat == BinaryFormat.PE)
+                    if (Emulator.Guest is WindowsGuest WinGuest && WinGuest.MainModuleBase != 0)
                     {
-                        WinModule MappedMod = Emulator.WinHelper?.WinModules.FirstOrDefault(b => b.Path == Binary.Location);
+                        MappedMainModuleBase = WinGuest.MainModuleBase;
+                    }
+                    else if (Binary.FileFormat == BinaryFormat.PE)
+                    {
+                        // Fallback: match the main image by its mapped base / preferred image base
+                        // rather than by host path (Module.Path is now a synthetic guest path).
+                        WinModule MappedMod = Emulator.WinHelper?.WinModules.FirstOrDefault(b => b != null && b.MappedBase != 0 && b.OriginalBase == Binary.PE.ImageBase);
                         if (MappedMod != null)
                         {
                             MappedMainModuleBase = MappedMod.MappedBase;
