@@ -36,6 +36,17 @@ namespace Brovan.Core.Emulation.Guests
         private IReadOnlyDictionary<uint, WinSyscallEntry> WinSyscallTable = new Dictionary<uint, WinSyscallEntry>();
         private WinModule _ntdllModule;
 
+        // A sample is loaded from an arbitrary host location (e.g. /tmp/.../al-khaser_x64.exe
+        // on a Linux analysis host). That host path must never be exposed to the guest — the
+        // PEB ImagePathName, GetModuleFileName, NtQueryVirtualMemory(MemorySectionName) and
+        // std::filesystem::equivalent would all read back a non-Windows path and either
+        // mis-fingerprint the process or fail to resolve. We present the sample under a
+        // realistic per-run guest path (C:\Users\<user>\Desktop\<leaf>) and keep the username
+        // stable so the process parameters and the environment block agree. Cached so every
+        // consumer sees one coherent identity.
+        private string _guestUserName;
+        private string _guestImagePath;
+
         private bool UsesDirectBlobStartup => IsBlob && _blobLaunchMode == WindowsBlobLaunchMode.Direct;
 
         /// <summary>
@@ -44,6 +55,13 @@ namespace Brovan.Core.Emulation.Guests
         internal bool IsBlob { get; }
 
         internal ulong BlobMappedBase => _blob?.MappedBase ?? 0;
+
+        /// <summary>
+        /// Mapped base of the main PE image, published so consumers can identify the main
+        /// module without matching on <see cref="BinaryFile.Location"/> (which is the host
+        /// path, whereas the module now advertises a synthetic guest path).
+        /// </summary>
+        internal ulong MainModuleBase { get; private set; }
 
         private const ulong TebSameTebFlagsOffset64 = 0x17EE;
         private const ushort TEB_SAME_TEB_FLAG_SKIP_THREAD_ATTACH = 0x0008;
@@ -145,10 +163,16 @@ namespace Brovan.Core.Emulation.Guests
                     Module.Sections.TryAdd(SectionAddr, Section);
             }
 
-            if (!string.IsNullOrEmpty(Binary.Location) && File.Exists(Binary.Location))
+            string GuestImagePath = ResolveGuestImagePath(Binary);
+            if (!string.IsNullOrWhiteSpace(GuestImagePath))
             {
-                Module.Name = Path.GetFileName(Binary.Location);
-                Module.Path = Binary.Location;
+                Module.Name = GeneralHelper.IO.WindowsLeafName(GuestImagePath);
+                Module.Path = GuestImagePath;
+
+                // Back the sample bytes in the virtual C: drive so the guest can open, stat and
+                // read its own image (GetModuleFileName + CreateFile on self,
+                // std::filesystem::equivalent) and drop siblings such as log.txt next to it.
+                GeneralHelper.IO.SeedGuestImageFile(GuestImagePath, Binary.GetBinaryData());
             }
 
             Module.OriginalBase = Binary.PE.ImageBase;
@@ -156,6 +180,7 @@ namespace Brovan.Core.Emulation.Guests
             Module.SizeOfImage = ImageSize;
             Module.EntryPoint = Module.MappedBase + Binary.EntryPoint;
             Module.Architecture = Binary.Architecture;
+            MainModuleBase = BaseAddress;
 
             PrepareWinEnvironment(Instance, Module);
         }
@@ -1042,10 +1067,74 @@ namespace Brovan.Core.Emulation.Guests
             return new string(result);
         }
 
+        /// <summary>
+        /// The stable guest account name for this run. Generated once so the synthetic image
+        /// path (<c>C:\Users\&lt;user&gt;\Desktop\...</c>) and the environment block
+        /// (<c>USERNAME</c> / <c>USERPROFILE</c> / <c>TEMP</c>) all describe the same user.
+        /// </summary>
+        internal string GuestUserName => _guestUserName ??= GenerateRandomUsername();
+
+        /// <summary>
+        /// Resolves the guest-visible image path for the main module. The sample is loaded from
+        /// an arbitrary host location; that path must not leak to the guest (see the field
+        /// comment). Presents it under the current user's desktop and remembers the choice so
+        /// the loader LDR entry, the PEB process parameters and NtQueryVirtualMemory all agree.
+        /// A host location that is already an absolute Windows path (e.g. analysing a C:\ sample
+        /// on a Windows host) is kept verbatim.
+        /// </summary>
+        private string ResolveGuestImagePath(BinaryFile Binary)
+        {
+            if (_guestImagePath != null)
+                return _guestImagePath;
+
+            string Location = Binary?.Location;
+
+            // Already a real drive-letter Windows path: keep it (Windows analysis host).
+            if (!string.IsNullOrWhiteSpace(Location))
+            {
+                string WinLocation = Location.Replace('/', '\\');
+                if (WinLocation.Length >= 3 && char.IsLetter(WinLocation[0]) && WinLocation[1] == ':' && WinLocation[2] == '\\')
+                {
+                    _guestImagePath = WinLocation;
+                    return _guestImagePath;
+                }
+            }
+
+            // Extract the leaf with GeneralHelper.IO.WindowsLeafName — Path.GetFileName is
+            // host-relative and does not treat '\\' as a separator on a Linux analysis host,
+            // so it would return the whole backslashed host path as the "file name".
+            string Leaf = null;
+            if (!string.IsNullOrWhiteSpace(Location))
+                Leaf = GeneralHelper.IO.WindowsLeafName(Location).Trim().TrimEnd('\0');
+            if (string.IsNullOrWhiteSpace(Leaf))
+                Leaf = Binary?.FileFormat == BinaryFormat.PE ? "sample.exe" : "blob.bin";
+
+            _guestImagePath = $@"C:\Users\{GuestUserName}\Desktop\{Leaf}";
+            return _guestImagePath;
+        }
+
+        /// <summary>
+        /// Windows-semantics directory of a guest path (everything up to the last backslash,
+        /// including the trailing separator). <see cref="Path.GetDirectoryName(string)"/> is
+        /// host-relative and does not treat '\\' as a separator on Linux, so it cannot be used
+        /// for a <c>C:\...</c> path on a non-Windows analysis host.
+        /// </summary>
+        private static string GuestDirectoryOf(string GuestPath)
+        {
+            if (string.IsNullOrEmpty(GuestPath))
+                return "C:\\";
+
+            int LastSep = GuestPath.LastIndexOf('\\');
+            if (LastSep <= 0)
+                return "C:\\";
+
+            return GuestPath.Substring(0, LastSep + 1);
+        }
+
         public byte[] BuildEnvironment(BinaryEmulator Instance, out ulong size)
         {
             size = 0;
-            string Username = GenerateRandomUsername();
+            string Username = GuestUserName;
             Random RandomGen = new Random();
             string PcName = $"DESKTOP-{RandomGen.Next(4, 10)}";
             Dictionary<string, string> Env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
@@ -1185,12 +1274,12 @@ namespace Brovan.Core.Emulation.Guests
 
                 if (IsPeImage || UsesDirectBlobStartup)
                 {
-                    string ImagePath = IsPeImage
-                        ? Instance._binary.Location
-                        : (!string.IsNullOrWhiteSpace(Instance._binary.Location) ? Instance._binary.Location : (!string.IsNullOrWhiteSpace(MainModule.Path) ? MainModule.Path : (!string.IsNullOrWhiteSpace(MainModule.Name) ? MainModule.Name : "blob.bin")));
-                    string CurrentDir = Path.GetDirectoryName(ImagePath) ?? "C:\\";
-                    if (string.IsNullOrWhiteSpace(CurrentDir)) CurrentDir = "C:\\";
-                    if (!CurrentDir.EndsWith("\\")) CurrentDir += "\\";
+                    // Guest-visible image path (C:\Users\<user>\Desktop\<leaf>) rather than the
+                    // raw host location — see ResolveGuestImagePath / the _guestImagePath field.
+                    string ImagePath = ResolveGuestImagePath(Instance._binary);
+                    if (string.IsNullOrWhiteSpace(ImagePath))
+                        ImagePath = !string.IsNullOrWhiteSpace(MainModule.Path) ? MainModule.Path : (!string.IsNullOrWhiteSpace(MainModule.Name) ? MainModule.Name : "C:\\blob.bin");
+                    string CurrentDir = GuestDirectoryOf(ImagePath);
                     string DesktopInfo = "Winsta0\\Default";
                     string WindowTitle = ImagePath;
                     string CommandLine = GeneralHelper.QuoteCommandLineArg(ImagePath);

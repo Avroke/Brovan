@@ -667,7 +667,12 @@ namespace Brovan.Core.Emulation
             ["api-ms-win-core-heap-l1-1-0.dll"] = "KERNELBASE.dll",
             ["api-ms-win-core-heap-l1-2-0.dll"] = "KERNELBASE.dll",
             ["api-ms-win-core-heap-l2-1-0.dll"] = "KERNELBASE.dll",
-            ["api-ms-win-core-heap-obsolete-l1-1-0.dll"] = "KERNELBASE.dll",
+            // The obsolete Global*/Local* heap functions (GlobalSize/GlobalUnlock/
+            // GlobalLock/GlobalReAlloc/GlobalHandle/GlobalFlags/LocalSize/...) live
+            // ONLY in kernel32 - kernelbase exports just GlobalAlloc/Free + a subset
+            // of Local*. Mapping this contract to kernelbase makes gdi32full/user32
+            // fail to bind GlobalSize/GlobalUnlock (STATUS_ENTRYPOINT_NOT_FOUND).
+            ["api-ms-win-core-heap-obsolete-l1-1-0.dll"] = "kernel32.dll",
             ["api-ms-win-core-interlocked-l1-1-1.dll"] = "KERNELBASE.dll",
             ["api-ms-win-core-interlocked-l1-2-0.dll"] = "KERNELBASE.dll",
             ["api-ms-win-core-io-l1-1-1.dll"] = "KERNEL32.dll",

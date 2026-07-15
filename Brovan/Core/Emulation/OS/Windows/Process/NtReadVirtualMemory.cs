@@ -21,20 +21,19 @@ namespace Brovan.Core.Emulation.OS.Windows
             current_process:
                 if (ProcessHandle == ulong.MaxValue)
                 {
-                    if (BaseAddressPtr == 0)
-                        return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-                    if (!Instance.IsRegionMapped(BaseAddressPtr, sizeof(ulong)))
-                        return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
-
-                    if (BufferPtr == 0 || !Instance.IsRegionMapped(BufferPtr, sizeof(ulong)))
-                        return NTSTATUS.STATUS_INVALID_PARAMETER;
+                    // NtReadVirtualMemory passes BaseAddress (arg1) and Buffer (arg2) BY VALUE:
+                    // arg1 is the address to read FROM, arg2 is the destination buffer. They are
+                    // not pointers-to-pointers, so they must be used directly (the cross-process
+                    // branch below already writes to BufferPtr directly). Dereferencing them read
+                    // from the wrong address, so ReadProcessMemory-on-self returned the wrong
+                    // bytes / STATUS_INVALID_PARAMETER and callers that walk their own modules
+                    // corrupted their state (al-khaser's injected-DLL enumeration read 0x88-byte
+                    // entries this way and then faulted iterating the resulting vector).
+                    ulong BaseAddress = BaseAddressPtr;
+                    ulong Buffer = BufferPtr;
 
                     if (NumberOfBytesToRead == 0)
                         return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-                    ulong BaseAddress = Instance.ReadMemoryULong(BaseAddressPtr);
-                    ulong Buffer = Instance.ReadMemoryULong(BufferPtr);
 
                     if (BaseAddress == 0)
                         return NTSTATUS.STATUS_INVALID_PARAMETER;
@@ -51,12 +50,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (Instance.IsRegionFreed(Buffer, true))
                     {
                         if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
-                            Instance.TriggerEventMessage($"[!!] Tried reading from a freed buffer at 0x{Buffer:X} while using NtReadVirtualMemory.", LogFlags.Issues);
-                        return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
+                            Instance.TriggerEventMessage($"[!!] Tried reading into a freed buffer at 0x{Buffer:X} while using NtReadVirtualMemory.", LogFlags.Issues);
+                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
                     }
 
                     if (!Instance.IsRegionMapped(Buffer, NumberOfBytesToRead))
-                        return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
+                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                     byte[] value = Instance.ReadMemory(BaseAddress, (uint)NumberOfBytesToRead);
                     if (value.Length == 0)
@@ -64,6 +63,12 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                     if (!Instance.WriteMemory(Buffer, value))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                    // NtReadVirtualMemory writes the number of bytes actually read to its
+                    // optional 5th argument (NumberOfBytesRead — GetArg64 index 4, 0-based) when supplied.
+                    ulong NumberOfBytesReadPtr = Instance.WinHelper.GetArg64(4);
+                    if (NumberOfBytesReadPtr != 0 && Instance.IsRegionMapped(NumberOfBytesReadPtr, sizeof(ulong)))
+                        Instance.WriteMemory(NumberOfBytesReadPtr, BitConverter.GetBytes((ulong)value.Length));
 
                     return NTSTATUS.STATUS_SUCCESS;
                 }

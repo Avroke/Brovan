@@ -268,7 +268,16 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                         if (CurrentProcess)
                         {
-                            string Path = Instance._binary.Location;
+                            // NT device form of the guest image path (\Device\HarddiskVolume1\...),
+                            // NOT the raw host location. WinModules[0] is the main image (same
+                            // convention ProcessImageFileNameWin32 uses); its Path is the synthetic
+                            // guest DOS path. A sample that normalises this against QueryDosDevice
+                            // ("C:") -> \Device\HarddiskVolume1 (e.g. al-khaser's injected-DLL check)
+                            // needs both to agree, so we route through DosPathToNtDevicePath.
+                            string GuestDos = Instance.WinHelper.WinModules.Count > 0 && !string.IsNullOrEmpty(Instance.WinHelper.WinModules[0].Path)
+                                ? Instance.WinHelper.WinModules[0].Path
+                                : Instance._binary.Location;
+                            string Path = Instance.WinHelper.DosPathToNtDevicePath(GuestDos);
                             int PathByteCount = Encoding.Unicode.GetByteCount(Path);
                             Span<byte> PathBytes = Instance.WinHelper.Shared.GetSpan((uint)PathByteCount);
                             Encoding.Unicode.GetBytes(Path.AsSpan(), PathBytes);
@@ -301,7 +310,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 {
                                     return NTSTATUS.STATUS_ACCESS_DENIED;
                                 }
-                                string Path = Process.Path;
+                                string Path = Instance.WinHelper.DosPathToNtDevicePath(Process.Path);
                                 int PathByteCount = Encoding.Unicode.GetByteCount(Path);
                                 Span<byte> PathBytes = Instance.WinHelper.Shared.GetSpan((uint)PathByteCount);
                                 Encoding.Unicode.GetBytes(Path.AsSpan(), PathBytes);

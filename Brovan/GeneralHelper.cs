@@ -1,4 +1,5 @@
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
@@ -938,6 +939,7 @@ namespace Brovan
                     Directory.CreateDirectory(VirtualFileSystemRoot);
                     Directory.CreateDirectory(LinuxVirtualFileSystemRoot);
                     EnsureLinuxBaseFilesystem(LinuxVirtualFileSystemRoot);
+                    EnsureWindowsBaseFilesystem(Path.Combine(VirtualFileSystemRoot, "C"));
                 }
                 catch (Exception ex)
                 {
@@ -1109,6 +1111,135 @@ namespace Brovan
                     Directory.CreateDirectory(Parent);
 
                 File.WriteAllText(HostPath, Content, new UTF8Encoding(false));
+            }
+
+            /// <summary>
+            /// Seeds the virtual C: drive with the always-present Windows system images the
+            /// emulator advertises in its synthetic process table (explorer.exe, the System32
+            /// core services, ...). On a real Windows install these files always exist, so a
+            /// sample that resolves a process image path and then opens / stats / compares it
+            /// (e.g. std::filesystem::equivalent against C:\Windows\explorer.exe, which throws
+            /// std::filesystem_error when the file is missing) must find a real, PE-parseable
+            /// file there instead of STATUS_OBJECT_NAME_NOT_FOUND. The mirror of
+            /// <see cref="EnsureLinuxBaseFilesystem"/>. Existing files are left untouched.
+            /// </summary>
+            /// <param name="CRoot">host directory mapped to the emulated C: drive.</param>
+            private static void EnsureWindowsBaseFilesystem(string CRoot)
+            {
+                if (string.IsNullOrWhiteSpace(CRoot))
+                    return;
+
+                Directory.CreateDirectory(CombineWindowsRelativePath(CRoot, "Windows"));
+                Directory.CreateDirectory(CombineWindowsRelativePath(CRoot, "Windows\\System32"));
+
+                byte[] Stub = BuildMinimalWindowsPeStub();
+
+                // explorer.exe lives directly under C:\Windows and is what the synthetic parent
+                // process advertises as its image path.
+                WriteWindowsFileIfMissing(CRoot, "Windows\\explorer.exe", Stub);
+
+                // System32 executables a Windows 10 install always has running, mirroring the
+                // synthetic process table in WinSyscallsHelper so any advertised image is openable.
+                string[] System32Executables =
+                {
+                    "smss.exe", "csrss.exe", "wininit.exe", "services.exe", "winlogon.exe",
+                    "lsass.exe", "svchost.exe", "dwm.exe", "fontdrvhost.exe", "ntoskrnl.exe",
+                    "conhost.exe", "taskhostw.exe", "RuntimeBroker.exe", "sihost.exe",
+                    "spoolsv.exe", "ctfmon.exe", "userinit.exe", "dllhost.exe",
+                    "cmd.exe", "rundll32.exe", "regsvr32.exe", "SearchIndexer.exe",
+                };
+
+                foreach (string Executable in System32Executables)
+                    WriteWindowsFileIfMissing(CRoot, "Windows\\System32\\" + Executable, Stub);
+            }
+
+            private static void WriteWindowsFileIfMissing(string Root, string RelativePath, byte[] Content)
+            {
+                string HostPath = CombineWindowsRelativePath(Root, RelativePath);
+                if (string.IsNullOrWhiteSpace(HostPath) || File.Exists(HostPath) || Directory.Exists(HostPath))
+                    return;
+
+                string Parent = Path.GetDirectoryName(HostPath);
+                if (!string.IsNullOrWhiteSpace(Parent))
+                    Directory.CreateDirectory(Parent);
+
+                File.WriteAllBytes(HostPath, Content);
+            }
+
+            /// <summary>
+            /// Builds a minimal but valid PE32+ (x64) image used to back the always-present
+            /// Windows system executables in the virtual filesystem. It only needs to open,
+            /// stat and parse as a real PE — content is never executed — so the image is a
+            /// single .text section containing "xor eax,eax; ret".
+            /// </summary>
+            private static byte[] BuildMinimalWindowsPeStub()
+            {
+                const int HeadersSize = 0x200;
+                const int TextRaw = 0x200;
+                const uint TextRva = 0x1000;
+                const int OptSize = 0xF0;
+
+                byte[] Image = new byte[HeadersSize + 0x200];
+                Span<byte> Buffer = Image;
+
+                // DOS header.
+                Buffer[0] = (byte)'M';
+                Buffer[1] = (byte)'Z';
+                BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x3C), 0x40); // e_lfanew
+
+                int PeOff = 0x40;
+                Buffer[PeOff] = (byte)'P';
+                Buffer[PeOff + 1] = (byte)'E';
+
+                // COFF file header.
+                int CoffOff = PeOff + 4;
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(CoffOff + 0x00), 0x8664);  // Machine x64
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(CoffOff + 0x02), 1);       // NumberOfSections
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(CoffOff + 0x10), OptSize); // SizeOfOptionalHeader
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(CoffOff + 0x12), 0x22);    // EXECUTABLE_IMAGE | LARGE_ADDRESS_AWARE
+
+                // Optional header (PE32+).
+                int OptOff = CoffOff + 0x14;
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(OptOff + 0x00), 0x20B);        // Magic PE32+
+                Buffer[OptOff + 0x02] = 14;                                                          // MajorLinkerVersion
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x04), 0x200);        // SizeOfCode
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x10), TextRva);      // AddressOfEntryPoint
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x14), TextRva);      // BaseOfCode
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(OptOff + 0x18), 0x140000000);  // ImageBase
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x20), 0x1000);       // SectionAlignment
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x24), 0x200);        // FileAlignment
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(OptOff + 0x28), 10);           // MajorOperatingSystemVersion
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(OptOff + 0x2C), 10);           // MajorImageVersion
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(OptOff + 0x30), 6);            // MajorSubsystemVersion
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x38), TextRva + 0x1000); // SizeOfImage
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x3C), HeadersSize);  // SizeOfHeaders
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(OptOff + 0x44), 2);            // Subsystem WINDOWS_GUI
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(OptOff + 0x46), 0x8160);       // DllCharacteristics
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(OptOff + 0x48), 0x100000);     // SizeOfStackReserve
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(OptOff + 0x50), 0x1000);       // SizeOfStackCommit
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(OptOff + 0x58), 0x100000);     // SizeOfHeapReserve
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(OptOff + 0x60), 0x1000);       // SizeOfHeapCommit
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x6C), 16);           // NumberOfRvaAndSizes
+
+                // Single .text section header.
+                int SecOff = OptOff + OptSize;
+                Buffer[SecOff + 0] = (byte)'.';
+                Buffer[SecOff + 1] = (byte)'t';
+                Buffer[SecOff + 2] = (byte)'e';
+                Buffer[SecOff + 3] = (byte)'x';
+                Buffer[SecOff + 4] = (byte)'t';
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(SecOff + 0x08), 0x200);        // VirtualSize
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(SecOff + 0x0C), TextRva);      // VirtualAddress
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(SecOff + 0x10), 0x200);        // SizeOfRawData
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(SecOff + 0x14), TextRaw);      // PointerToRawData
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(SecOff + 0x24), 0x60000020);   // CODE | EXECUTE | READ
+
+                // Entry code: xor eax,eax ; ret.
+                Image[TextRaw + 0] = 0x31;
+                Image[TextRaw + 1] = 0xC0;
+                Image[TextRaw + 2] = 0xC3;
+
+                return Image;
             }
 
             private sealed class UbuntuRootfsPendingLink
@@ -1818,13 +1949,13 @@ namespace Brovan
 
                 if (RawWinPath.StartsWith("\\KnownDlls\\", StringComparison.OrdinalIgnoreCase))
                 {
-                    string KnownDllLeaf = Path.GetFileName(RawWinPath);
+                    string KnownDllLeaf = WindowsLeafName(RawWinPath);
                     if (!string.IsNullOrEmpty(KnownDllLeaf))
                         RawWinPath = @"C:\Windows\System32\\" + KnownDllLeaf;
                 }
                 else if (RawWinPath.StartsWith("\\KnownDlls32\\", StringComparison.OrdinalIgnoreCase))
                 {
-                    string KnownDllLeaf = Path.GetFileName(RawWinPath);
+                    string KnownDllLeaf = WindowsLeafName(RawWinPath);
                     if (!string.IsNullOrEmpty(KnownDllLeaf))
                         RawWinPath = @"C:\Windows\SysWOW64\\" + KnownDllLeaf;
                 }
@@ -1889,6 +2020,43 @@ namespace Brovan
                     return null;
 
                 return ResolveVirtualHostPathInternal(WinPath, CreateDirectories);
+            }
+
+            /// <summary>
+            /// Backs a guest image at an emulated Windows path with the given bytes inside the
+            /// virtual C: drive, creating parent directories as needed. Used to present a sample
+            /// loaded from an arbitrary host location under a realistic guest path so the guest
+            /// can open, stat and read its own image (and drop files next to it). Existing files
+            /// are left untouched. Failures are non-fatal.
+            /// </summary>
+            /// <param name="GuestWinPath">emulated Windows path (e.g. C:\Users\user\Desktop\sample.exe).</param>
+            /// <param name="Bytes">raw image bytes to write.</param>
+            public static void SeedGuestImageFile(string GuestWinPath, ReadOnlySpan<byte> Bytes)
+            {
+                if (string.IsNullOrWhiteSpace(GuestWinPath))
+                    return;
+
+                try
+                {
+                    string HostPath = ResolveVirtualHostPath(GuestWinPath, BinaryFormat.PE, CreateDirectories: true);
+                    if (string.IsNullOrWhiteSpace(HostPath))
+                        return;
+
+                    string Dir = System.IO.Path.GetDirectoryName(HostPath);
+                    if (!string.IsNullOrEmpty(Dir))
+                        Directory.CreateDirectory(Dir);
+
+                    if (File.Exists(HostPath))
+                        return;
+
+                    using FileStream Stream = new FileStream(HostPath, FileMode.CreateNew, FileAccess.Write, FileShare.Read);
+                    if (!Bytes.IsEmpty)
+                        Stream.Write(Bytes);
+                }
+                catch (Exception ex)
+                {
+                    Utils.LogError($"[IO] Failed to seed guest image file '{GuestWinPath}': {ex.Message}");
+                }
             }
 
             private static string NormalizeWindowsEmulatedPath(string Raw)
@@ -2731,6 +2899,28 @@ namespace Brovan
             }
 
             /// <summary>
+            /// Extracts the trailing leaf of a Windows-style path, splitting on '\\' and '/'.
+            /// </summary>
+            /// <remarks>
+            /// <see cref="Path.GetFileName(string)"/> splits on <see cref="Path.DirectorySeparatorChar"/>,
+            /// which is '/' on Linux — so on a backslash-separated Windows guest path it returns the whole
+            /// string instead of the leaf. This helper is separator-agnostic and safe on any host OS, so
+            /// consumers that hold a guest path (e.g. WindowsGuest) share it instead of re-inlining the split.
+            /// </remarks>
+            /// <param name="WinPath">windows-style path.</param>
+            /// <returns>returns the leaf component, or the input unchanged when it has no separator.</returns>
+            public static string WindowsLeafName(string WinPath)
+            {
+                if (string.IsNullOrEmpty(WinPath))
+                    return WinPath;
+
+                int Cut = WinPath.LastIndexOfAny(WindowsPathSeparators);
+                return Cut >= 0 ? WinPath.Substring(Cut + 1) : WinPath;
+            }
+
+            private static readonly char[] WindowsPathSeparators = { '\\', '/' };
+
+            /// <summary>
             /// Attempts to translate a Windows System32/SysWOW64/KnownDlls path into the shipped WindowsLibs directory.
             /// </summary>
             /// <param name="WinPath">windows-style path to resolve.</param>
@@ -2761,7 +2951,26 @@ namespace Brovan
                 // Some callers pass "\\KnownDlls\\xxx.dll" or similar, which ultimately maps to System32.
                 if (Normalized.StartsWith("\\KnownDlls\\", StringComparison.OrdinalIgnoreCase) || Normalized.StartsWith("\\KnownDlls32\\", StringComparison.OrdinalIgnoreCase))
                 {
-                    string Leaf = Path.GetFileName(Normalized);
+                    string Leaf = WindowsLeafName(Normalized);
+                    return TryResolveFromWindowsLibsByLeaf(Leaf);
+                }
+
+                // NLS data outside System32: the linguistic sorting table lives at
+                // C:\Windows\Globalization\Sorting\SortDefault.nls. kernelbase's CompareString /
+                // LCMapString (reached by StrCmpNIW / StrCmpIW / lstrcmpi and the CRT collation)
+                // maps that file to build its comparison tables; if it cannot be opened the
+                // comparison returns an error, so case-insensitive equality silently fails (this
+                // was the al-khaser injected-DLL false-positive: every System32 module compared
+                // "not equal" to the System32 prefix). The .nls files are shipped flat in
+                // WindowsLibs, so resolve any C:\Windows\Globalization\... file by leaf.
+                const string GlobalizationPrefix = "C:\\Windows\\Globalization\\";
+                if (Normalized.StartsWith(GlobalizationPrefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    // Extract the leaf with WindowsLeafName, NOT Path.GetFileName: the latter splits on
+                    // Path.DirectorySeparatorChar, which is '/' on Linux, so on a backslash Windows path it
+                    // returns the WHOLE string (no leaf) and the WindowsLibs lookup silently misses. That miss
+                    // is exactly why sortdefault.nls could not be opened, collapsing kernelbase's NLS sort init.
+                    string Leaf = WindowsLeafName(Normalized);
                     return TryResolveFromWindowsLibsByLeaf(Leaf);
                 }
 
@@ -2787,8 +2996,9 @@ namespace Brovan
                 if (!string.IsNullOrEmpty(Full) && (File.Exists(Full) || Directory.Exists(Full)))
                     return Full;
 
-                // Fall back to a case-insensitive leaf search.
-                string Leaf = Path.GetFileName(WindowsRelative);
+                // Fall back to a case-insensitive leaf search (WindowsLeafName, not Path.GetFileName,
+                // so a backslash relative path yields its leaf on Linux instead of the whole string).
+                string Leaf = WindowsLeafName(WindowsRelative);
                 return TryResolveFromWindowsLibsByLeaf(Leaf);
             }
 
