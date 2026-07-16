@@ -169,11 +169,30 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 case THREADINFOCLASS.ThreadHideFromDebugger:
                     {
-                        NTSTATUS Status = ValidateOutputBuffer(1);
-                        if (Status != NTSTATUS.STATUS_SUCCESS)
-                            return Status;
+                        // Ntoskrnl probes the output buffer with sizeof(ULONG) alignment BEFORE the
+                        // class-specific length check. Al-khaser deliberately probes with:
+                        //  - length=4, unaligned pointer  → expects DATATYPE_MISALIGNMENT (alignment probe fails)
+                        //  - length=4, aligned pointer    → expects INFO_LENGTH_MISMATCH (alignment ok, size wrong)
+                        //  - length=1, aligned pointer    → expects SUCCESS with the hidden flag byte
+                        // The size check for this class is STRICT (must equal sizeof(BOOLEAN)=1). See
+                        // al-khaser's NtSetInformationThread_ThreadHideFromDebugger.cpp for the exact
+                        // 8-shot unaligned batch + the strict-size verification.
+                        if (ThreadInformation != 0 && ThreadInformationLength >= 4 && (ThreadInformation & 3) != 0)
+                            return NTSTATUS.STATUS_DATATYPE_MISALIGNMENT;
 
-                        if (!Instance.WinHelper.WriteByte(ThreadInformation, 0))
+                        WriteReturnLength(1);
+
+                        if (ThreadInformationLength != 1)
+                            return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+
+                        if (ThreadInformation == 0)
+                            return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+                        if (!Instance.IsRegionMapped(ThreadInformation, 1))
+                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                        byte HiddenByte = (byte)(WinEmulatedThread.GetState(ThreadObj).HiddenFromDebugger ? 1 : 0);
+                        if (!Instance.WinHelper.WriteByte(ThreadInformation, HiddenByte))
                             return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                         return NTSTATUS.STATUS_SUCCESS;

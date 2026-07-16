@@ -737,10 +737,10 @@ confirms the deps analysis end-to-end:
   works, and the 397 `[!] Injected library` lines / the whole class of System32-module
   false positives drop to **0**. `WUDFPlatform.dll` now loads and al-khaser's
   `WudfIs{Any,Kernel,User}DebuggerPresent` resolve and execute (were NULL before).
-- **Verdict 44 GOOD / 4 BAD** (from 38/10 at the start of this work). The **only**
-  remaining `BAD` is `Thread Hide From Debugger` (flagged for its variants) — a real,
-  stable detection, not a false positive; a separate frontier from the deps/collation
-  work.
+- **Verdict 44 GOOD / 4 BAD** (from 38/10 at the start of this work). The four
+  remaining `BAD` probes — `NtSetInformationThread(ThreadHideFromDebugger)`, `Int
+  0x2D`, `SeDebugPrivilege`, `NtYieldExecution` — are landed as fixes in the
+  follow-up pass below (verdict `48 GOOD / 0 BAD`).
 - **New terminus surfaced, non-deterministic.** With the FP-storm gone the flow is
   shorter and different; one interleaving reaches MSVC's `__report_gsfailure`
   (`__fastfail(FAST_FAIL_STACK_COOKIE_CHECK_FAILURE)` / `int 0x29`, `0xC0000409`) at
@@ -841,6 +841,71 @@ and needs a validation strategy on other samples (rule #6) before shipping.
 
 All diagnostic instrumentation from this pass has been reverted; tree
 stays clean.
+
+### Landed this pass — the four residual BAD probes → GOOD (48 GOOD / 0 BAD)
+
+After the walker-terminus was diagnosed, the four residual `BAD` verdicts
+that ran to completion before the terminus were investigated individually
+against al-khaser's own upstream source. Every one was a concrete stub gap,
+not an intrinsic frontier. All four landed as generic, per-syscall fidelity
+fixes with no sample-specific tuning; verdict is **48 GOOD / 0 BAD stable
+across 5 consecutive runs** (both the ~47 M `Fast-Fail` interleaving and
+the ~72 M `0xC0000005` interleaving reach the terminus with an identical
+per-probe verdict distribution). The walker-terminus itself is unchanged
+— the sample still exits `Error`, but every visible probe result is now
+correct.
+
+- **`NtSetInformationThread(ThreadHideFromDebugger)`** — the stub always
+  returned `SUCCESS`, ignored the length argument, and stored nothing.
+  al-khaser probes it with (1) a bogus 12345 length expecting
+  `STATUS_INFO_LENGTH_MISMATCH`, (2) a bogus 0xFFFF handle expecting
+  `STATUS_INVALID_HANDLE`, then (3) a valid `Set(NULL, 0)` followed by
+  (4) 8 unaligned `Query(size=4, ptr=buf+i)` reads for `i∈[0,7]`
+  expecting `STATUS_DATATYPE_MISALIGNMENT` on offsets 1/2/3/5/6/7 and
+  `STATUS_INFO_LENGTH_MISMATCH` on the aligned 0/4, plus (5) a final
+  `Query(size=1)` expecting the hidden flag byte to read back as `1`.
+  Fixes: length-not-zero on Set → `INFO_LENGTH_MISMATCH`; track hidden
+  flag on `WindowsThreadState.HiddenFromDebugger`; on Query, do the
+  ntoskrnl `ProbeForWrite(sizeof(ULONG))` alignment check FIRST (length
+  ≥ 4 && unaligned → `DATATYPE_MISALIGNMENT`), then the strict size
+  check (`!= 1` → `INFO_LENGTH_MISMATCH`), then return the flag byte.
+- **`Int 0x2D` (`KiDebugService`)** — the WindowsGuest interrupt handler
+  had cases 1 / 3 / 0x29 / 0x2E but not 0x2D, so `int 0x2D` was silently
+  dropped and al-khaser's VEH never saw the expected `STATUS_BREAKPOINT`,
+  so its `SwallowedException` flag stayed `TRUE` and the probe reported
+  BAD. Fix: `case 0x2D: QueueUserModeException(STATUS_BREAKPOINT)` mirrors
+  the `int 3` path; the CPU/kernel already advances RIP past the CD 2D
+  opcode by the time the exception is delivered, matching the VEH's
+  "already advanced" expectation with no extra RIP fixup needed.
+- **`SeDebugPrivilege`** — al-khaser's probe is a compact
+  `OpenProcess(csrss.exe, PROCESS_QUERY_LIMITED_INFORMATION)` — a
+  non-`NULL` handle means the caller has `SeDebugPrivilege` (only
+  privileged callers can open a protected system process). Brovan's
+  `NtOpenProcess` allowed `PROCESS_QUERY_LIMITED_INFORMATION` on
+  protected processes regardless of caller elevation, so the probe got
+  a handle back and reported BAD. Fix: for any protected process
+  (`ProtectionStatus != None` — `LightTCB` covers csrss / wininit /
+  services / winlogon, `LightAM` covers MsMpEng / MpDefenderCoreService),
+  return `STATUS_ACCESS_DENIED` unconditionally unless the caller's
+  primary token has `IsElevated = true`. This is real-Windows behaviour
+  (protected processes are opaque to non-elevated callers even for
+  `QUERY_LIMITED_INFORMATION`) and generalises across every protected-
+  process detection variant, not just csrss.
+- **`NtYieldExecution`** — the stub returned `STATUS_SUCCESS` on every
+  call. al-khaser calls `NtYieldExecution` 20 times (with `Sleep(15)`
+  between each) and increments a counter on every non-
+  `STATUS_NO_YIELD_PERFORMED` return; the counter is compared against
+  `<= 3` for GOOD. Real bare-metal Windows returns `NO_YIELD_PERFORMED`
+  the vast majority of the time (nothing else is Ready to run), so the
+  counter never exceeds a few. Brovan returned SUCCESS on all 20 → BAD.
+  Fix: scan the emulator's thread table for any `EmulatedThreadState.Ready`
+  peer; if none, return `STATUS_NO_YIELD_PERFORMED`; otherwise mark the
+  caller Ready and stop-emulate exactly as before. This is the correct
+  scheduler semantics on any surface, not just this probe. The new
+  `NTSTATUS.STATUS_NO_YIELD_PERFORMED = 0x40000024` was added to the
+  enum (was missing).
+
+Fast test suite green through this pass; tree stays clean.
 
 **Bonus finding surfaced by getting further — a second injected-library FP.** The
 `Walking process memory for hidden modules` probe reported every System32 module

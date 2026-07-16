@@ -47,6 +47,10 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong AlertByThreadIdAddress { get; set; }
         public bool MsgWaitActive { get; set; }
         public uint MsgWaitMask { get; set; }
+        // ThreadHideFromDebugger flag, set by NtSetInformationThread(ThreadHideFromDebugger)
+        // and echoed by NtQueryInformationThread(ThreadHideFromDebugger). Al-khaser reads
+        // this back to verify the ThreadHideFromDebugger primitive round-trips.
+        public bool HiddenFromDebugger { get; set; }
         public bool GetMessageWaitActive { get; set; }
         public ulong GetMessageMessagePtr { get; set; }
         public ulong GetMessageHwndFilter { get; set; }

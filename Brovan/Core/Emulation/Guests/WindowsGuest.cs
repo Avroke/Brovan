@@ -718,6 +718,14 @@ namespace Brovan.Core.Emulation.Guests
                 case 3:
                     QueueUserModeException(Instance, NTSTATUS.STATUS_BREAKPOINT);
                     return true;
+                case 0x2D:
+                    // KiDebugService (int 2D). On real Windows without a kernel debugger the
+                    // kernel raises STATUS_BREAKPOINT and the CPU/kernel already advanced RIP
+                    // past the CD 2D opcode by the time the VEH runs — al-khaser's Interrupt_0x2d
+                    // probe VEH observes STATUS_BREAKPOINT with RIP already past the opcode and
+                    // returns EXCEPTION_CONTINUE_EXECUTION without adjusting RIP.
+                    QueueUserModeException(Instance, NTSTATUS.STATUS_BREAKPOINT);
+                    return true;
                 case 0x29:
                     if ((Instance.Settings.Flags & LogFlags.General) != 0)
                         Instance.TriggerEventMessage($"[!] The Emulated Program asked to Fast-Fail at 0x{Instance.ReadRegister(Instance.IPRegister):X}.", LogFlags.General);
