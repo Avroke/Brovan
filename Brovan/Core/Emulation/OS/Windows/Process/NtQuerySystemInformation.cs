@@ -480,7 +480,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
                             }
 
-                            uint NumberOfPhysicalPages = 0x200000;
+                            uint NumberOfPhysicalPages = WindowsMemorySupport.TotalPhysicalPages;
                             uint LowestPhysicalPageNumber = 0x00000001;
                             uint HighestPhysicalPageNumber = LowestPhysicalPageNumber + NumberOfPhysicalPages - 1;
                             uint AllocationGranularity = 0x10000;
@@ -505,6 +505,44 @@ namespace Brovan.Core.Emulation.OS.Windows
                                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                                 Instance._emulator.WriteMemory(ReturnLengthPtr, (uint)RequiredLength);
+                            }
+                            return NTSTATUS.STATUS_SUCCESS;
+                        }
+
+                    case SYSTEM_INFORMATION_CLASS.SystemMemoryUsageInformation:
+                        {
+                            // SYSTEM_MEMORY_USAGE_INFORMATION (0x38 bytes). This is the ONLY class
+                            // modern kernelbase!GlobalMemoryStatusEx queries; returning
+                            // STATUS_NOT_SUPPORTED left MEMORYSTATUSEX unfilled (ullTotalPhys == 0),
+                            // reading as a sub-2 GB VM. All figures come from the RAM SSOT.
+                            const uint RequiredLength = 0x38;
+                            if (SystemInformationLength < RequiredLength)
+                            {
+                                if (ReturnLengthPtr != 0)
+                                {
+                                    if (!Instance.IsRegionMapped(ReturnLengthPtr, 4))
+                                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                                    Instance._emulator.WriteMemory(ReturnLengthPtr, RequiredLength);
+                                }
+
+                                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                            }
+
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x00, WindowsMemorySupport.TotalPhysicalBytes, 8);
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x08, WindowsMemorySupport.AvailablePhysicalBytes, 8);
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x10, unchecked((ulong)WindowsMemorySupport.ResidentAvailableBytes), 8);
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x18, WindowsMemorySupport.CommittedBytes, 8);
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x20, WindowsMemorySupport.SharedCommittedBytes, 8);
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x28, WindowsMemorySupport.CommitLimitBytes, 8);
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x30, WindowsMemorySupport.PeakCommitmentBytes, 8);
+
+                            if (ReturnLengthPtr != 0)
+                            {
+                                if (!Instance.IsRegionMapped(ReturnLengthPtr, 4))
+                                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                                Instance._emulator.WriteMemory(ReturnLengthPtr, RequiredLength);
                             }
                             return NTSTATUS.STATUS_SUCCESS;
                         }

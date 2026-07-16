@@ -636,7 +636,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
                             }
 
-                            uint NumberOfPhysicalPages = 0x200000;
+                            uint NumberOfPhysicalPages = WindowsMemorySupport.TotalPhysicalPages;
                             uint LowestPhysicalPageNumber = 0x00000001;
                             uint HighestPhysicalPageNumber = LowestPhysicalPageNumber + NumberOfPhysicalPages - 1;
                             uint AllocationGranularity = 0x10000;
@@ -658,6 +658,36 @@ namespace Brovan.Core.Emulation.OS.Windows
                             NTSTATUS rl2 = WriteReturnLength(RequiredLength);
                             if (rl2 != NTSTATUS.STATUS_SUCCESS)
                                 return rl2;
+
+                            return NTSTATUS.STATUS_SUCCESS;
+                        }
+
+                    case SYSTEM_INFORMATION_CLASS.SystemMemoryUsageInformation:
+                        {
+                            // SYSTEM_MEMORY_USAGE_INFORMATION (0x38 bytes) — mirrors the plain
+                            // NtQuerySystemInformation path so RAM totals stay coherent across
+                            // both syscalls. All figures come from the RAM SSOT.
+                            const uint RequiredLength = 0x38;
+                            if (SystemInformationLength < RequiredLength)
+                            {
+                                NTSTATUS rl = WriteReturnLength(RequiredLength);
+                                if (rl != NTSTATUS.STATUS_SUCCESS)
+                                    return rl;
+
+                                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                            }
+
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x00, WindowsMemorySupport.TotalPhysicalBytes, 8);
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x08, WindowsMemorySupport.AvailablePhysicalBytes, 8);
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x10, unchecked((ulong)WindowsMemorySupport.ResidentAvailableBytes), 8);
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x18, WindowsMemorySupport.CommittedBytes, 8);
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x20, WindowsMemorySupport.SharedCommittedBytes, 8);
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x28, WindowsMemorySupport.CommitLimitBytes, 8);
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x30, WindowsMemorySupport.PeakCommitmentBytes, 8);
+
+                            NTSTATUS rlmu = WriteReturnLength(RequiredLength);
+                            if (rlmu != NTSTATUS.STATUS_SUCCESS)
+                                return rlmu;
 
                             return NTSTATUS.STATUS_SUCCESS;
                         }

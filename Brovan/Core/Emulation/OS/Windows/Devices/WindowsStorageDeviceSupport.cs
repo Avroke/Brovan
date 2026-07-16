@@ -28,8 +28,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal const ulong BytesPerSector = 512;
         internal const ulong SectorsPerCluster = 8;
         internal const ulong BytesPerCluster = BytesPerSector * SectorsPerCluster;
-        internal const ulong TotalClusters = 0x01000000UL;
-        internal const ulong FreeClusters = 0x00800000UL;
+        // 512 GB disk: 0x08000000 clusters * 4096 B/cluster = 549,755,813,888 B.
+        // A 64 GB report (the old 0x01000000) sits under every common anti-VM disk
+        // floor (al-khaser/pafish probe GetDiskFreeSpaceEx + IOCTL geometry against
+        // 60-128 GB); a realistic consumer SSD size clears them without a VM tell.
+        internal const ulong TotalClusters = 0x08000000UL;
+        internal const ulong FreeClusters = 0x04000000UL;
         internal const ulong TotalSectors = TotalClusters * SectorsPerCluster;
         internal const ulong DiskSize = TotalSectors * BytesPerSector;
         internal const ulong VolumeSerialNumber = 0xB10A0001UL;

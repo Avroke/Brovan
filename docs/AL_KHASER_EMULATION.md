@@ -838,10 +838,10 @@ patched yet, not accidental passes:
   bundled `dbghelp.dll` is legitimately present in the loader list.
 - **`Checking mouse movement`** — no mouse event stream is synthesised by the
   virtual GUI subsystem.
-- **`Checking memory space using GlobalMemoryStatusEx`** — reported memory
-  values disagree with al-khaser's threshold.
-- **`Checking disk size using GetDiskFreeSpaceEx`** — reported disk size
-  disagrees with al-khaser's threshold.
+- ~~**`Checking memory space using GlobalMemoryStatusEx`**~~ — **fixed**, see
+  *Landed later — RAM + disk size fidelity* below.
+- ~~**`Checking disk size using GetDiskFreeSpaceEx`**~~ — **fixed**, see
+  *Landed later — RAM + disk size fidelity* below.
 
 **Fingerprint discipline**: the only Windows-observable divergence from the
 rescue path is that a guest read of a page whose VirtualQuery reports
@@ -853,6 +853,49 @@ has no SEH around the byte read — the AV is a Brovan-specific timing artefact,
 not a probe target). The alternative — the deterministic `0xC0000005` terminus
 we had before this change — was strictly more fingerprintable (100 % crash on
 the "hidden modules" probe on every run).
+
+### Landed later — RAM + disk size fidelity (both size probes → GOOD)
+
+With the walker terminus unblocked, al-khaser reaches its `SystemInfo`-category
+size probes, which had surfaced two `BAD`s. Both were honest fidelity gaps, both
+now fixed and confirmed `GOOD` end-to-end on a run that reaches them (`memory
+space using GlobalMemoryStatusEx → GOOD`, `disk size using GetDiskFreeSpaceEx →
+GOOD`, alongside the already-passing `hard disk size using WMI` /
+`DeviceIoControl`).
+
+- **Disk size (`GetDiskFreeSpaceEx`)** — `WindowsStorageDeviceSupport` reported a
+  64 GB volume (`TotalClusters = 0x01000000` × 4 KiB/cluster). al-khaser's disk
+  probes fail any volume under a 60–128 GB floor, so 64 GB read as a VM. Bumped
+  the single `TotalClusters` SSOT to `0x08000000` → a realistic 512 GB SSD, which
+  propagates coherently to every derived surface (drive geometry, NTFS volume
+  data, disk extents, `FileFsSizeInformation`). Also added
+  `FileFsFullSizeInformation` (class 7) to `NtQueryVolumeInformationFile` so the
+  modern `GetDiskFreeSpaceEx` takes its primary query path instead of the
+  error-fallback to `FileFsSizeInformation` (class 3).
+
+- **RAM (`GlobalMemoryStatusEx`)** — root cause was NOT a wrong value but an
+  unhandled class: modern `kernelbase!GlobalMemoryStatusEx` sources the *entire*
+  `MEMORYSTATUSEX` from a single `NtQuerySystemInformation(SystemMemoryUsageInformation
+  = 0xB6)` call (verified from the syscall trace — it makes no other query and
+  does **not** consult `SystemBasicInformation`). Brovan returned
+  `STATUS_NOT_SUPPORTED`, so the function returned with the buffer unfilled
+  (`ullTotalPhys == 0`), reading as a sub-2 GB VM. Implemented class `0xB6`
+  returning the full 0x38-byte `SYSTEM_MEMORY_USAGE_INFORMATION` (layout confirmed
+  against `ntdiff/headers` extracts, identical 1607→22H2, and multiple phnt
+  copies) on both the plain and `Ex` syscall surfaces.
+
+- **New RAM SSOT** — the physical-page count (`0x200000` = 8 GiB) had been
+  duplicated inline in `SystemBasicInformation` and its `Ex` twin. Extracted to
+  `WindowsMemorySupport` (mirroring the `WindowsStorageDeviceSupport` idiom) so
+  every RAM-reporting surface reads one coherent 8 GiB machine — a sample that
+  cross-checks total RAM across `SystemBasicInformation` and
+  `SystemMemoryUsageInformation` sees agreeing answers (realism rule #1). The
+  five commitment figures are internally consistent (Available < Total, Committed
+  < CommitLimit, Peak ∈ [Committed, CommitLimit]).
+
+Both fixes are pure fidelity — realistic, deterministic, SSOT-derived — with no
+sample-specific values (rules #4, #6). Remaining `SystemInfo`-adjacent BADs
+(dbghelp.dll in the loader list, mouse-movement synthesis) are still open.
 
 ### Traced this pass — the "hidden modules" AV is an intrinsic timing race
 
