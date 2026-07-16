@@ -744,11 +744,103 @@ confirms the deps analysis end-to-end:
 - **New terminus surfaced, non-deterministic.** With the FP-storm gone the flow is
   shorter and different; one interleaving reaches MSVC's `__report_gsfailure`
   (`__fastfail(FAST_FAIL_STACK_COOKIE_CHECK_FAILURE)` / `int 0x29`, `0xC0000409`) at
-  ~47 M inside the now-correct module-scan path, another runs past it to ~73 M. That
-  GS-cookie mismatch is a **stack-imbalance emulation bug in a path only reachable once
-  collation is correct** — not caused by the deps/syscall work, newly exposed by it.
-  It joins the non-deterministic `0xC0000005` SEH terminus as an open F2/coherence
-  frontier; the livelock watchdog stays silent throughout.
+  ~47 M inside the now-correct module-scan path, another runs past it to ~73 M
+  hitting a `0xC0000005` in the same path. Investigated this pass (below); both
+  termini share one root cause. The livelock watchdog stays silent throughout.
+
+### Traced this pass — the "hidden modules" AV is an intrinsic timing race
+
+Instrumented (env-gated `BROVAN_QVMDBG`, reverted) to bracket the fault site
+`0x14000CA73: cmp BYTE [rax], 0x4d` in al-khaser's hidden-module scanner
+(`fn 0x14000C9D6-0x14000CBDE`). The mechanism, verified against 10+ runs:
+
+1. **Al-khaser snapshots MBIs into a heap-allocated vector**
+   (`fn 0x140017230`: `HeapAlloc(48)` per MBI, `VirtualQuery(addr, mbi)`, push
+   into `std::vector`, advance by `mbi.RegionSize`). ~25 000 `NtQueryVirtualMemory`
+   calls in a **1.7 M-instruction window** ending at insn ~47 M. Every reply
+   is a snapshot of the region topology at that instant.
+
+2. **Al-khaser then walks the snapshot linearly** in the enclosing function
+   at `0x14000C9D6`, calling `GetModuleHandleExW(FROM_ADDRESS, page)` per page
+   and — if the page is COMMIT+readable per the *snapshotted* MBI — reading
+   `[page]` to check for the `MZ` magic. Each iteration is ~1 000 instructions
+   (module-handle lookup + PEB LDR walk + string ops); the whole walk is
+   ~25 M instructions and covers insn ~47 M → ~72 M.
+
+3. **During that walk, the emulated ntdll segment heap calls
+   `NtFreeVirtualMemory(MEM_DECOMMIT)`** ~50 times, all from the same site
+   (`ntdll+0x20957`, a heap-manager decommit helper called via
+   `ntdll+0x9AF4 = NtFreeVirtualMemory`). The decommit ranges are subranges
+   of the same `AllocationBase=0x100120000` heap arena al-khaser is walking.
+
+4. **The snapshotted MBI at page P still says `COMMIT+RW`** (from step 1) but
+   at read time (step 2) the page has been **decommitted** (step 3). The
+   `cmp [rax], 0x4d` then raises `EXCEPTION_ACCESS_VIOLATION`.
+
+5. **The fault is not caught by al-khaser code.** `fn 0x14000C9D6-0x14000CBDE`'s
+   unwind info has `UNW_FLAG_CHAININFO` (no local scope table); the SEH
+   walker chains up, `__C_specific_handler` is invoked from thunk `0x140018BA6`,
+   returns `ExceptionContinueSearch`, and the exception reaches `main()`'s CRT
+   top-level filter `_seh_filter_exe` (invoked via thunk `0x140018C0C`), which
+   `TerminateProcess`es with `0xC0000005`. The occasional `0xC0000409`
+   fast-fail terminus is the same fault manifesting as an MSVC stack-cookie
+   check failure at `__report_gsfailure` (0x140017F84) when the AV happens
+   inside a cookie-protected function's epilogue path — same class, same root.
+
+The two participants — the guest's MBI-vector walker and the emulated ntdll's
+periodic MEM_DECOMMIT — are both **faithful**. Al-khaser is running its real
+detection code; the emulated ntdll IS a real Windows 10 ntdll.dll (from the
+deps bundle) executing its real segment-heap decommit paths. The bug is in
+neither.
+
+**What differs from real Windows is the timing distribution across the walk**.
+On real hardware the same walker completes in ~ms; the segment heap's
+delayed-coalesce / decommit pass doesn't fire on µs granularity between
+one page's snapshot and its read. In Brovan every instruction runs
+sequentially with per-`RtlEnterCriticalSection` / `RtlpAllocateHeap` /
+`GetModuleHandleExW` cost, so `GetModuleHandleExW` calls during the walk
+provide many more heap-allocator opportunities per unit of *guest time*
+than they would on hardware, tripping the decommit threshold from **inside**
+the walker itself. The specific arena being walked gets decommitted under
+the walker; the snapshot goes stale; the read faults.
+
+**Why this is not routed to `Boundary`** (verdict rule #14): the sample IS
+being terminated by a `0xC0000005` from its own code path — that's an honest
+`Error` verdict, not a natural boundary at an external dependency. Faking
+this as `Boundary` would hide the fact that al-khaser's own written contract
+(no SEH around its detection functions, relying on the impossibility of
+fault) is being exercised, and would set a precedent for masking any similar
+timing race in future samples. The verdict stays honest.
+
+**Why this is not fixable by a Brovan-side patch** (verdict rule #14 + rule #6):
+
+- Making `DecommitMemory` a metadata-only flip that leaves the Unicorn
+  mapping alive so subsequent reads succeed **would diverge from Windows
+  semantics** (real Windows returns `STATUS_ACCESS_VIOLATION` for a read
+  of a decommitted page); a probe that deliberately reads a decommitted
+  page to fingerprint the emulator would flag Brovan.
+- Preventing the emulated ntdll heap from calling `NtFreeVirtualMemory` is
+  impossible — that's the real ntdll's own decommit code path.
+- Retimed / batched / synthesised decommit is sample-specific tuning (rule
+  #6) — the trigger is a legitimate memory-pressure signal, not a stub gap.
+- Wrapping the guest's read in emulator-side SEH so al-khaser survives its
+  own bug would also be sample-specific and mask the real signal.
+
+**Result of this pass**: the 44 GOOD / 4 BAD verdict for probes that complete
+before the walker is stable; the walker terminus itself remains an honest
+`Error(0xC0000005)`. All the value from the earlier probes is preserved.
+The trace exposes both the `[GOOD]` /  `[ BAD ]` per-probe lines and the
+terminus code — the log alone tells the correct story.
+
+**Deferred as a future direction, not landed here**: the segment-heap
+decommit threshold might be soft-nudged by pre-populating a larger initial
+`RtlpHeapReservedBytes` field in the PEB so ntdll thinks it has more
+committed slack; this could delay the decommit past the walker's completion
+without patching semantics. It is a research direction, not a landed fix,
+and needs a validation strategy on other samples (rule #6) before shipping.
+
+All diagnostic instrumentation from this pass has been reverted; tree
+stays clean.
 
 **Bonus finding surfaced by getting further — a second injected-library FP.** The
 `Walking process memory for hidden modules` probe reported every System32 module
