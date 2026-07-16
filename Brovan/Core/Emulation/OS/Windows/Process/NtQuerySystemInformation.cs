@@ -570,14 +570,33 @@ namespace Brovan.Core.Emulation.OS.Windows
                             if (ProviderSignature != AcpiProvider)
                                 break; // unsupported provider -> default (unimplemented), unchanged
 
-                            byte[] FirmwareData = FirmwareAction switch
+                            byte[] FirmwareData;
+                            if (FirmwareAction == 0) // SystemFirmwareTable_Enumerate
                             {
-                                0u => AcpiEnumerateTables(), // SystemFirmwareTable_Enumerate
-                                1u => AcpiGetTable(FirmwareTableId), // SystemFirmwareTable_Get
-                                _ => null
-                            };
-                            if (FirmwareData == null)
+                                FirmwareData = AcpiEnumerateTables();
+                            }
+                            else if (FirmwareAction == 1) // SystemFirmwareTable_Get
+                            {
+                                FirmwareData = AcpiGetTable(FirmwareTableId);
+                                // Only the tables we actually enumerate exist. A Get for any other
+                                // signature (e.g. a probe that reads a hypervisor-specific table such
+                                // as QEMU's 'PCAF' and inspects a fixed byte) must fail exactly as it
+                                // would on bare metal where that table is absent. Report size 0 so the
+                                // GetSystemFirmwareTable wrapper returns 0 ("table not present") instead
+                                // of leaving the caller's input TableBufferLength in place — which a probe
+                                // would read as "table exists" and then inspect at a fixed offset.
+                                if (FirmwareData == null)
+                                {
+                                    Instance._emulator.WriteMemory(SystemInformationPtr + 0x0C, 0u);
+                                    if (ReturnLengthPtr != 0 && Instance.IsRegionMapped(ReturnLengthPtr, 4))
+                                        Instance._emulator.WriteMemory(ReturnLengthPtr, FirmwareHeaderLen);
+                                    return NTSTATUS.STATUS_NOT_FOUND;
+                                }
+                            }
+                            else
+                            {
                                 break; // unsupported action (e.g. register handler) -> default
+                            }
 
                             // GetSystemFirmwareTable reads TableBufferLength back as the actual size.
                             Instance._emulator.WriteMemory(SystemInformationPtr + 0x0C, (uint)FirmwareData.Length);
@@ -612,19 +631,38 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
             return Instance.WinUnimplemented;
         }
-        // A bare-metal-realistic ACPI table set (standard signatures every real Win10 machine exposes).
-        // Stored as the little-endian DWORDs EnumSystemFirmwareTables returns and GetSystemFirmwareTable
-        // takes back as TableID (the 4 signature bytes read as a ULONG). No hypervisor-specific tables.
+
+        private const uint AcpiSigSSDT = 0x54445353; // 'SSDT'
+
+        // Bare-metal-realistic ACPI signature set. Deliberately EXCLUDES 'WAET' (the "Windows ACPI
+        // Emulated devices Table" — its presence is itself a virtualization tell) and INCLUDES 'WSMT'
+        // (Windows SMM Security Mitigations Table — present on real modern machines; its absence is a
+        // tell). Stored as the little-endian DWORDs EnumSystemFirmwareTables returns / GetSystemFirmware
+        // Table takes back as TableID.
         private static readonly uint[] AcpiTableSignatures =
         {
             0x50434146, // 'FACP' (FADT)
             0x43495041, // 'APIC'
             0x54455048, // 'HPET'
             0x4746434D, // 'MCFG'
-            0x54454157, // 'WAET'
-            0x54445353, // 'SSDT'
+            AcpiSigSSDT, // 'SSDT'
             0x54524742, // 'BGRT'
+            0x544D5357, // 'WSMT'
         };
+
+        // Standard ACPI PnP hardware IDs a real firmware exposes (PS/2, power/sleep buttons, container,
+        // memory). Embedded (as ASCII, the form a firmware string scan matches) in the SSDT body so a
+        // scan that treats the ABSENCE of real PnP devices as a virtualization tell is satisfied.
+        private static readonly byte[] AcpiSsdtDeviceIds =
+            System.Text.Encoding.ASCII.GetBytes("PNP0000\0PNP0C0C\0PNP0C0E\0PNP0C14\0PNP0D80\0");
+
+        private static bool IsKnownAcpiTable(uint Signature)
+        {
+            foreach (uint Sig in AcpiTableSignatures)
+                if (Sig == Signature)
+                    return true;
+            return false;
+        }
 
         private static byte[] AcpiEnumerateTables()
         {
@@ -636,16 +674,19 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static byte[] AcpiGetTable(uint TableId)
         {
-            // Minimal but well-formed ACPI table: the 36-byte common header + a small body, with a
-            // corrected 8-bit checksum (whole table sums to 0 mod 256). OEM fields are the ubiquitous
-            // AMI/desktop strings — bare metal, no VM signature. An unknown TableID still yields a
-            // generic header rather than a failure the caller could read as an emulator tell.
+            // Only the tables we enumerate exist; anything else is absent (bare-metal behavior).
+            if (!IsKnownAcpiTable(TableId))
+                return null;
+
+            // Minimal but well-formed ACPI table: the 36-byte common header + a body, with a corrected
+            // 8-bit checksum (whole table sums to 0 mod 256). OEM fields are the ubiquitous AMI/desktop
+            // strings — bare metal, no VM signature. The SSDT carries the standard PnP device IDs.
             const int HeaderLen = 36;
-            const int BodyLen = 16;
-            byte[] Table = new byte[HeaderLen + BodyLen];
+            byte[] Body = TableId == AcpiSigSSDT ? AcpiSsdtDeviceIds : new byte[16];
+            byte[] Table = new byte[HeaderLen + Body.Length];
             Span<byte> S = Table;
 
-            BinaryPrimitives.WriteUInt32LittleEndian(S.Slice(0, 4), TableId == 0 ? 0x50434146u : TableId); // Signature
+            BinaryPrimitives.WriteUInt32LittleEndian(S.Slice(0, 4), TableId); // Signature
             BinaryPrimitives.WriteUInt32LittleEndian(S.Slice(4, 4), (uint)Table.Length);                   // Length
             S[8] = 3;                                                                                       // Revision
             S[9] = 0;                                                                                       // Checksum (computed below)
@@ -654,6 +695,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             BinaryPrimitives.WriteUInt32LittleEndian(S.Slice(24, 4), 0x01072009);                          // OEM Revision
             WriteAcpiAscii(S.Slice(28, 4), "AMI ");                                                         // Creator ID
             BinaryPrimitives.WriteUInt32LittleEndian(S.Slice(32, 4), 0x00010013);                          // Creator Revision
+            Body.CopyTo(S.Slice(HeaderLen));                                                                // table-specific body
 
             byte Sum = 0;
             foreach (byte B in Table)
