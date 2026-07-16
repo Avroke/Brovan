@@ -130,6 +130,20 @@ else
     warn "Archive contained none of WindowsLibs/WinReg/apisetmap.bin."
 fi
 
+# --- drop faultrep.dll (WER helper that pulls in dbghelp.dll) --------------------
+# faultrep.dll is only ever loaded by the CRT/WER unhandled-exception path, and it
+# statically imports dbghelp.dll. Brovan runs that path and then continues, leaving
+# dbghelp.dll resident where al-khaser's "loaded modules contains dbghelp.dll"
+# anti-analysis probe flags it. Removing faultrep makes LoadLibrary(faultrep) return
+# NULL so WER no-ops and dbghelp never loads. Newer bundles omit it already; this
+# fixes bundles exported before that change. Nothing imports faultrep/dbghelp directly.
+for view in "WindowsLibs" "WindowsLibs/SysWOW64"; do
+    fr="$DEST/$view/faultrep.dll"
+    if [ -f "$fr" ]; then
+        rm -f "$fr" && step "Removed $view/faultrep.dll (WER->dbghelp anti-analysis tell)"
+    fi
+done
+
 # --- sanitize VM-identifying strings out of the hives ---------------------------
 # The dependency is `reg save`d from a real Windows box; when that box is a
 # Hyper-V/Azure VM its SYSTEM hive carries the VM's disk identity

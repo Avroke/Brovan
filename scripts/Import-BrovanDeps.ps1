@@ -93,6 +93,21 @@ finally {
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+# --- Drop faultrep.dll (WER helper that pulls in dbghelp.dll) --------------------
+# faultrep.dll is only ever loaded by the CRT/WER unhandled-exception path, and it
+# statically imports dbghelp.dll. Brovan runs that path and then continues, leaving
+# dbghelp.dll resident where al-khaser's "loaded modules contains dbghelp.dll"
+# anti-analysis probe flags it. Removing faultrep makes LoadLibrary(faultrep) return
+# NULL so WER no-ops and dbghelp never loads. Newer bundles omit it already; this
+# fixes bundles exported before that change. Nothing imports faultrep/dbghelp directly.
+foreach ($view in @('WindowsLibs','WindowsLibs\SysWOW64')) {
+    $fr = Join-Path $Destination (Join-Path $view 'faultrep.dll')
+    if (Test-Path $fr) {
+        Remove-Item $fr -Force
+        Write-Step "Removed $view\faultrep.dll (WER->dbghelp anti-analysis tell)"
+    }
+}
+
 # --- Sanitize VM-identifying strings out of the hives ---------------------------
 # The dependency is `reg save`d from a real Windows box; when that box is a
 # Hyper-V/Azure VM its SYSTEM hive carries the VM's disk identity
