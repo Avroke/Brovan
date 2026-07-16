@@ -743,9 +743,44 @@ identical to baseline (no throughput regression). This closes the write-watch
 anti-emulation class faithfully rather than with the previous always-fail
 `STATUS_NOT_SUPPORTED`.
 
-**Still deferred (need a feature, not a stub).** `NtQueryInformationAtom` (0x147,
-1×) needs atom-table modeling; the `win32u` GUI syscalls are out of scope for the
-ntdll pass.
+**Landed (fidelity pass on the still-noisy return paths).** Every previously
+`STATUS_NOT_SUPPORTED` syscall / info-class the run touched was audited against
+what real Windows returns from an unprivileged token, and each replaced with the
+correct answer. Verdict unchanged at **48 GOOD / 0 BAD** (stable across 4 runs);
+the residual noise dropped from 12 unimplemented markers per run to 4 (all in
+paths where no clean answer exists: `0xC8 NtCreateUserProcess` fired by the CRT
+terminus spawning WerFault, `0x1037` / `0x105D` `win32u` GUI syscalls, one
+`ProcessTelemetryCoverage` init call).
+
+- **`NtQueryInformationAtom` (0x147)** — implemented. Integer atoms
+  (`>= 0xC000`) round-trip through `ATOM_BASIC_INFORMATION` with the canonical
+  `"#N"` name; string-atom queries — the al-khaser `GlobalGetAtomName(bogus)`
+  probe uses this shape — return `STATUS_INVALID_HANDLE` (matches real Windows
+  when the atom isn't in the process's atom table), so `GlobalGetAtomName`
+  fails without writing the OUT buffer. Previously the `NOT_SUPPORTED` reply
+  worked only by kernel32's LastError propagation.
+- **`NtSetSystemInformation` (0x1AA)** — implemented. Kernel-mode / TCB-privileged
+  surface; from a non-elevated user process real Windows returns
+  `STATUS_PRIVILEGE_NOT_HELD` for every information class (the callable-from-userland
+  carve-outs still need `SeTcbPrivilege`). Returning that instead of NOT_SUPPORTED
+  matches the honest usermode answer.
+- **`NtQueryInformationProcess(ProcessDebugFlags = 0x1F)`** — implemented. Real
+  Windows returns `NoDebugInherit = 1` for a non-debugged process; al-khaser's
+  probe checks `Status == SUCCESS && buffer == 0` for BAD, so `SUCCESS + 1` is
+  both the honest "no debugger" answer and the value that keeps the probe GOOD.
+  The old NOT_SUPPORTED reply worked only because the probe treats a failed
+  call as GOOD too.
+- **`NtQueryInformationProcess(ProcessDefaultHardErrorMode = 0x0C)`** — implemented.
+  Called by ntdll's process-init code path; `SUCCESS + 0` (SEM_ flags all clear,
+  default critical-error handling) matches real Windows.
+
+**Still deferred.** `NtCreateUserProcess` (0xC8) fires once from the CRT terminus
+spawning WerFault after the walker AV — the syscall is a full process-creation
+surface (14 args, PS_ATTRIBUTES) with no honest usermode payoff to model on this
+sample, and no probe hangs on it. `NtQueryInformationProcess(0x56 =
+ProcessTelemetryCoverage)` is a WIP telemetry class ntdll may or may not expose
+depending on the build; keeping it NOT_SUPPORTED is the honest answer. The
+`win32u` GUI syscalls (`0x1037`, `0x105D`) remain out of scope for the ntdll pass.
 
 **Verified with a corrected bundle (SortDefault.nls + WUDFPlatform.dll + faultrep.dll
 shipped).** Re-exporting with the fixed `Export-BrovanDeps.ps1` and re-running

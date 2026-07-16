@@ -427,6 +427,48 @@ namespace Brovan.Core.Emulation.OS.Windows
                         }
                     case PROCESSINFOCLASS.ProcessImageFileNameWin32:
                         return QueryProcessImageFileNameWin32(Instance, ProcessHandle, OutBufferPtr, OutBufferLength, SetReturnLength);
+                    case PROCESSINFOCLASS.ProcessDefaultHardErrorMode:
+                        {
+                            // Default hard-error mode: the process-wide SEM_* flags controlling
+                            // whether critical errors pop a system-error dialog. Real Windows
+                            // reports 0 for a normal process (SEM_FAILCRITICALERRORS not set,
+                            // default critical-error handling). Called by ntdll's process-init
+                            // code path; returning SUCCESS+0 matches, silences the init noise.
+                            if (OutBufferLength < 4)
+                            {
+                                SetReturnLength(4);
+                                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                            }
+                            if (OutBufferPtr == 0 || !Instance.IsRegionMapped(OutBufferPtr, 4))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                            if (!Instance._emulator.WriteMemory(OutBufferPtr, 0u, 4))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                            SetReturnLength(4);
+                            return NTSTATUS.STATUS_SUCCESS;
+                        }
+                    case PROCESSINFOCLASS.ProcessDebugFlags:
+                        {
+                            // NoDebugInherit flag (DWORD): 1 = normal (no debugger), 0 = debugger
+                            // is attached with inherit-debug. Al-khaser's ProcessDebugFlags probe
+                            // treats (STATUS_SUCCESS && buffer==0) as detected — so returning
+                            // SUCCESS+1 is both the honest "no debugger" answer and the value
+                            // al-khaser expects to see GOOD. The old NOT_SUPPORTED response
+                            // worked only by accident (probe treated a failed call as GOOD too).
+                            if (OutBufferLength < 4)
+                            {
+                                SetReturnLength(4);
+                                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                            }
+
+                            if (OutBufferPtr == 0 || !Instance.IsRegionMapped(OutBufferPtr, 4))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                            if (!Instance._emulator.WriteMemory(OutBufferPtr, 1u, 4))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                            SetReturnLength(4);
+                            return NTSTATUS.STATUS_SUCCESS;
+                        }
                     case (PROCESSINFOCLASS)52:
                         {
                             uint StructSize = 0x20;
