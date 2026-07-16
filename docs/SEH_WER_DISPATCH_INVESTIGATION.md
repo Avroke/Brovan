@@ -115,14 +115,32 @@ correct *pragmatic* choice because:
   which is a Brovan boundary anyway (WER is out-of-process on real Windows).
 - A clean run never triggers the delay bind, so the host is never consulted (validated: the
   296-line al-khaser run is byte-identical healthy).
-- **Any** resolution to a non-resident host force-loads it early: tested `default → faultrep`
-  with no override at all → faultrep still loaded eagerly (dbghelp BAD). So Brovan resolves
-  this particular delay import at load time regardless of override-vs-default. Pointing it at
-  an already-resident DLL (kernelbase) is the only resolution that both keeps the module list
-  faithful (no faultrep/dbghelp) and never fails a bind in practice.
+- Any resolution to faultrep (default or override) reloads it; pointing the contract at an
+  already-resident DLL (kernelbase) is the only resolution that keeps the module list faithful
+  and never fails a bind in practice.
 
-**Deeper root cause (not fixed here):** Brovan eager-resolves this delay import instead of
-honoring delay-load laziness. Fixing that in the loader would let the contract map to its
-true host (faultrep) with faultrep loading only if `BasepReportFault` is ever called — the
-fully-faithful end state. Out of scope for this change; the KERNELBASE mapping is the correct
-interim resolution and the module list now matches a clean Win10 box.
+### Is there a "deeper" loader bug behind this? — investigated, NO.
+
+An earlier draft speculated that Brovan *eager-resolves* this delay import (would be a broad
+loader bug). A full-map diagnostic (log every DLL the guest loader maps, `BROVAN_MAPLOG`)
+disproves that:
+
+- **Brovan does not eager-load delay imports.** combase delay-imports `clbcatq`, shcore
+  delay-imports `imm32`, etc. — **none of those delay-only hosts are loaded**. The loader
+  honors delay-load laziness generally.
+- **The fix removes exactly the faultrep chain and nothing else.** Diffing the mapped-DLL set
+  override-on (faultrep) vs fixed (KERNELBASE): the only DLLs that drop are
+  `faultrep.dll → dbghelp.dll → dbgcore.dll`. Every other delay-host (gdi32full,
+  windows.storage, powrprof, cfgmgr32, shcore, …) is loaded in **both** — pulled by
+  al-khaser's actual GDI/shell/power calls, exactly as on real Windows.
+- **faultrep was pulled by a real call, not an eager bind.** In the load order it appears at
+  position ~34 — after the *entire* static-import graph, where the CRT / early al-khaser
+  checks run — i.e. a genuine delay-load of `CheckForReadOnlyResourceFilter` /
+  `BasepReportFault` fired. With the contract → faultrep that call loads faultrep (the tell);
+  with → KERNELBASE the same call resolves to a function that is not there, the delay bind
+  no-ops, and faultrep never loads.
+
+So there is **no separate loader bug to fix**. WER / fault-reporting is a Brovan boundary by
+design, so a WER-internal helper whose delay slot resolves to a no-op is the *desired*
+behavior, not a defect — and the resulting module list matches a clean Win10 box exactly.
+The KERNELBASE mapping is the complete and correct fix, not an interim one.
