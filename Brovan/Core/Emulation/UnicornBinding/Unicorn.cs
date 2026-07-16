@@ -46,7 +46,13 @@ namespace Brovan.Core.Emulation
         {
             public ulong Address;
             public ulong Size;
+            // Host address backing this (sub-)region, i.e. AllocBase + (Address - the region base at
+            // allocation time). Zero when the region was mapped without a host buffer (uc_mem_map).
             public IntPtr Ptr;
+            // The original NativeMemory.AlignedAlloc base to hand back to AlignedFree. A region created
+            // by splitting a larger mapping shares its parent's AllocBase, so the buffer is only freed
+            // once the last sub-region referencing it is unmapped. Zero mirrors Ptr for buffer-less maps.
+            public IntPtr AllocBase;
         }
 
         private readonly struct RegionAddressComparer : IComparer<int>
@@ -176,7 +182,7 @@ namespace Brovan.Core.Emulation
                     _error = uc_mem_map_ptr(_uc, address, new UIntPtr(size), protection, (IntPtr)ptr);
                     if (_error == UCErrors.UC_ERR_OK)
                     {
-                        _mappedRegions.Add(new MappedRegion { Address = address, Size = size, Ptr = (IntPtr)ptr });
+                        _mappedRegions.Add(new MappedRegion { Address = address, Size = size, Ptr = (IntPtr)ptr, AllocBase = (IntPtr)ptr });
                         _regionIndexDirty = true;
                         return true;
                     }
@@ -186,7 +192,7 @@ namespace Brovan.Core.Emulation
                 _error = uc_mem_map(_uc, address, new UIntPtr(size), protection);
                 if (_error == UCErrors.UC_ERR_OK)
                 {
-                    _mappedRegions.Add(new MappedRegion { Address = address, Size = size, Ptr = IntPtr.Zero });
+                    _mappedRegions.Add(new MappedRegion { Address = address, Size = size, Ptr = IntPtr.Zero, AllocBase = IntPtr.Zero });
                     _regionIndexDirty = true;
                     return true;
                 }
@@ -211,22 +217,97 @@ namespace Brovan.Core.Emulation
                 if (_error == UCErrors.UC_ERR_OK)
                 {
                     FlushTlb();
-
-                    for (int i = 0; i < _mappedRegions.Count; i++)
-                    {
-                        if (_mappedRegions[i].Address == address && _mappedRegions[i].Size == size)
-                        {
-                            if (_mappedRegions[i].Ptr != IntPtr.Zero)
-                                _pendingFrees.Add(_mappedRegions[i].Ptr);
-                            _mappedRegions.RemoveAt(i);
-                            _regionIndexDirty = true;
-                            break;
-                        }
-                    }
+                    ReconcileUnmap(address, size);
                     return true;
                 }
             }
             return false;
+        }
+
+        /// <summary>
+        /// Reconcile <see cref="_mappedRegions"/> (the C# host-pointer view consulted by
+        /// <see cref="TryGetHostPointer"/>) with a just-completed <c>uc_mem_unmap([address, address+size))</c>.
+        /// Unicorn splits a host-backed region on a partial/overlapping unmap, keeping the surviving
+        /// halves aliased into the same host buffer at the correct offset; the C# side must mirror that
+        /// exactly, or a stale full-size entry keeps shadowing a VA that Unicorn has since re-backed with
+        /// a different buffer — emulated writes would then land in a buffer the guest never reads (the
+        /// al-khaser hidden-modules NULL-read desync). Any surviving half keeps the parent AllocBase; the
+        /// buffer is deferred-freed only once no region still references it.
+        /// </summary>
+        private unsafe void ReconcileUnmap(ulong address, ulong size)
+        {
+            ulong uStart = address;
+            ulong uEnd = address + size;
+
+            List<IntPtr> candidateBases = null;
+
+            for (int i = _mappedRegions.Count - 1; i >= 0; i--)
+            {
+                MappedRegion r = _mappedRegions[i];
+                ulong rStart = r.Address;
+                ulong rEnd = r.Address + r.Size;
+
+                // No overlap with the unmapped range -> untouched.
+                if (rEnd <= uStart || rStart >= uEnd)
+                    continue;
+
+                ulong overlapStart = Math.Max(rStart, uStart);
+                ulong overlapEnd = Math.Min(rEnd, uEnd);
+
+                _mappedRegions.RemoveAt(i);
+                _regionIndexDirty = true;
+
+                // Left survivor [rStart, overlapStart): base address unchanged, so Ptr is unchanged.
+                if (overlapStart > rStart)
+                {
+                    _mappedRegions.Add(new MappedRegion
+                    {
+                        Address = rStart,
+                        Size = overlapStart - rStart,
+                        Ptr = r.Ptr,
+                        AllocBase = r.AllocBase
+                    });
+                }
+
+                // Right survivor [overlapEnd, rEnd): Ptr shifts by the same delta as the base address.
+                if (overlapEnd < rEnd)
+                {
+                    IntPtr rightPtr = r.Ptr == IntPtr.Zero
+                        ? IntPtr.Zero
+                        : (IntPtr)((byte*)r.Ptr + (overlapEnd - rStart));
+                    _mappedRegions.Add(new MappedRegion
+                    {
+                        Address = overlapEnd,
+                        Size = rEnd - overlapEnd,
+                        Ptr = rightPtr,
+                        AllocBase = r.AllocBase
+                    });
+                }
+
+                if (r.AllocBase != IntPtr.Zero)
+                    (candidateBases ??= new List<IntPtr>()).Add(r.AllocBase);
+            }
+
+            // Defer-free every AllocBase no surviving region references any longer. Deferral (rather than
+            // an immediate AlignedFree) preserves the existing safety contract: the buffer may still be
+            // read/written by the in-flight Unicorn operation until the emulation step returns.
+            if (candidateBases != null)
+            {
+                foreach (IntPtr allocBase in candidateBases)
+                {
+                    bool stillReferenced = false;
+                    for (int j = 0; j < _mappedRegions.Count; j++)
+                    {
+                        if (_mappedRegions[j].AllocBase == allocBase)
+                        {
+                            stillReferenced = true;
+                            break;
+                        }
+                    }
+                    if (!stillReferenced && !_pendingFrees.Contains(allocBase))
+                        _pendingFrees.Add(allocBase);
+                }
+            }
         }
 
         /// <summary>
