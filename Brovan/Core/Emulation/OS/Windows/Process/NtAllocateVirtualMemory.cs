@@ -9,6 +9,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const ulong AllocationGranularity = 0x10000;
         private const ulong MemReset = 0x00080000UL;
         private const ulong MemResetUndo = 0x01000000UL;
+        private const ulong MemWriteWatch = 0x00200000UL;
 
         private static bool TryApplyResetState(BinaryEmulator Instance, ulong BaseAddress, ulong RegionSize, bool Reset, out NTSTATUS Status)
         {
@@ -198,6 +199,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                 {
                     if (!Instance.CommitMemory(BaseAddress, RegionSize, (uint)ProtectValue))
                         return NTSTATUS.STATUS_NO_MEMORY;
+                }
+
+                // MEM_WRITE_WATCH: start recording guest writes to this region so a later
+                // NtGetWriteWatch reports the dirtied pages (opt-in — see WriteWatchManager).
+                if ((AllocationTypeValue & MemWriteWatch) != 0)
+                {
+                    Instance.WriteWatch ??= new WriteWatchManager(Instance);
+                    Instance.WriteWatch.Register(BaseAddress, RegionSize);
                 }
 
                 if (!Instance._emulator.WriteMemory(BaseAddressPtr, BaseAddress))

@@ -694,9 +694,10 @@ shipped 19044 ntdll stubs): `0x19E NtSetInformationVirtualMemory` (31×),
 `0xFB NtGetWriteWatch` (5×), `0x162 NtQueryTimerResolution`, `0xA5
 NtCreateDebugObject`, `0x1BD NtSystemDebugControl`, `0x179 NtResetWriteWatch`,
 `0x147 NtQueryInformationAtom` (the `0x1037` / `0x105D` ones are `win32u` GUI
-syscalls — a different subsystem). Four are now implemented (each auto-registers
-via the `IWinSyscall` generator; the SSN is read from the shipped ntdll, so it
-tracks the build):
+syscalls — a different subsystem). Six are now implemented — the four below plus
+`NtGetWriteWatch` (0xFB) / `NtResetWriteWatch` (0x179), covered in the write-watch
+entry that follows — each auto-registering via the `IWinSyscall` generator (the SSN
+is read from the shipped ntdll, so it tracks the build):
 
 - **`NtSetInformationVirtualMemory` (0x19E)** — advisory VM operations (prefetch /
   page-priority / CFG call-target / working-set / hot-patch / contiguity /
@@ -717,17 +718,34 @@ tracks the build):
   `NtQueryInformationProcess(ProcessDebugObjectHandle)` → `STATUS_PORT_NOT_SET`), so
   it allocates a real handle (new `HandleType.DebugObjectHandle`) and returns it.
 
-**Deferred (need a feature, not a stub).** `NtGetWriteWatch` / `NtResetWriteWatch`
-back al-khaser's write-watch technique, which detects an emulator when
-`GetWriteWatch` *wrongly succeeds* ("succeeded when it should've failed"). A
-faithful implementation needs per-region write tracking — a `MEM_WRITE_WATCH`
-allocation flag plus a global memory-write hook to record dirty pages — which has a
-per-write throughput cost (the F2 concern) and is a real feature, not a stub. The
-current `STATUS_NOT_SUPPORTED` does **not** trip al-khaser's detection (it only
-flags on wrong success), so this is a fidelity-only gap, deferred deliberately
-rather than papered over with an always-fail stub. `NtQueryInformationAtom` (0x147,
-1×) similarly needs atom-table modeling; the `win32u` GUI syscalls are out of scope
-for the ntdll pass.
+**Landed (the "needs a feature" pair, done right).** `NtGetWriteWatch` (0xFB) /
+`NtResetWriteWatch` (0x179) back al-khaser's four write-watch checks (buffer-only /
+API-calls / IsDebuggerPresent / code-write), which detect an emulator when the
+reported dirty-page set doesn't match what was actually written. Implemented as a
+**genuinely opt-in** feature (`System/.../WriteWatchManager.cs`): a region allocated
+with `MEM_WRITE_WATCH` (0x00200000) gets a **ranged** Unicorn write hook scoped to
+just that region, so a program that never uses the feature pays **zero** cost (the
+backend filters the hook range before any managed callback runs — no global
+per-write hook, sidestepping the F2 concern entirely). The design is correct by a
+Unicorn property: only guest STORE instructions trigger the write hook, while
+host-side stub writes go through `uc_mem_write` (which bypasses hooks) — so a probe
+that hands the buffer to a *failing* API and expects a **zero** hit-count gets it
+(the API never stored to the buffer), while a real `buffer[0]=x` store yields
+exactly one dirty page. `NtGetWriteWatch` returns the pages ascending + granularity
+0x1000 and honours `WRITE_WATCH_FLAG_RESET`; `NtResetWriteWatch` clears the set (the
+code-write probe writes generated code into the buffer, resets, runs it, then
+expects zero). Registered on the MEM_WRITE_WATCH alloc, unregistered (hook removed)
+on MEM_RELEASE. Verdict unchanged at **48 GOOD / 0 BAD** — the four probes stay GOOD
+and the syscalls are now exercised for real (4× `NtGetWriteWatch → STATUS_SUCCESS`,
+1× `NtResetWriteWatch → STATUS_SUCCESS`, plus one intentional `INVALID_PARAMETER`
+for the API-calls probe's non-watch query), stable across runs, instruction count
+identical to baseline (no throughput regression). This closes the write-watch
+anti-emulation class faithfully rather than with the previous always-fail
+`STATUS_NOT_SUPPORTED`.
+
+**Still deferred (need a feature, not a stub).** `NtQueryInformationAtom` (0x147,
+1×) needs atom-table modeling; the `win32u` GUI syscalls are out of scope for the
+ntdll pass.
 
 **Verified with a corrected bundle (SortDefault.nls + WUDFPlatform.dll + faultrep.dll
 shipped).** Re-exporting with the fixed `Export-BrovanDeps.ps1` and re-running

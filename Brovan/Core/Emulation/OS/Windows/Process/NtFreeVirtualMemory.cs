@@ -70,6 +70,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                             return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
                     }
 
+                    // Drop any MEM_WRITE_WATCH tracking + its ranged hook for the released base.
+                    Instance.WriteWatch?.Unregister(BaseAddress);
+
                     Instance._emulator.WriteMemory(BaseAddressPtr, 0UL);
                     Instance._emulator.WriteMemory(RegionSizePtr, 0UL);
                     return NTSTATUS.STATUS_SUCCESS;

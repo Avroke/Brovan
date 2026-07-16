@@ -342,6 +342,13 @@ namespace Brovan.Core.Emulation
 
         internal List<MemoryRegion> _memory = new();
         internal List<MemoryRegion> _freedmemory = new();
+
+        /// <summary>
+        /// Tracks guest writes to MEM_WRITE_WATCH regions (NtGetWriteWatch / NtResetWriteWatch).
+        /// Lazily created the first time the guest allocates a write-watch region, so programs
+        /// that never use the feature pay nothing.
+        /// </summary>
+        internal Brovan.Core.Emulation.OS.Windows.WriteWatchManager WriteWatch;
         private readonly List<int> MemoryRegionIndex = new();
         private readonly Queue<int>[] MlfqReadyQueues = new Queue<int>[32];
         private readonly HashSet<int> MlfqQueuedThreads = new();
