@@ -66,6 +66,20 @@ namespace Brovan.Core.Emulation
         private readonly System.Collections.Generic.Dictionary<ulong, MemoryProtection> DecommittedProtection = new System.Collections.Generic.Dictionary<ulong, MemoryProtection>();
 
         /// <summary>
+        /// Original page bytes captured at <see cref="DecommitMemory"/> time, restored by
+        /// <see cref="TryRescueDecommittedRead"/> when the page is rescued. The rescue premise is that
+        /// the decommit is a Brovan interleaving artefact — real Windows never actually reaches the
+        /// decommitted state within the probe's window — so the page's content is still logically
+        /// valid and must come back intact. Re-mapping a fresh (zero) page instead handed the guest
+        /// zero where a live pointer/size/stack-cookie once was, which accumulated across a deep run
+        /// and capped al-khaser at ~95 probes (run-specific NULL-derefs / `0xC0000005` in the memory-
+        /// walk probes). Preserving content lifts the deep-run ceiling to the end of the suite.
+        /// Parallel-keyed with <see cref="DecommittedProtection"/>; entries are dropped on rescue
+        /// (after restore) and on reclaim.
+        /// </summary>
+        private readonly System.Collections.Generic.Dictionary<ulong, byte[]> DecommittedContent = new System.Collections.Generic.Dictionary<ulong, byte[]>();
+
+        /// <summary>
         /// Pages the rescue path re-mapped in the backend (moved out of <see cref="DecommittedPages"/>
         /// by <see cref="TryRescueDecommittedRead"/>). They are live Unicorn mappings that Brovan's
         /// region map no longer tracks, so <see cref="ReclaimRescuedPages"/> MUST unmap them before the
@@ -1713,15 +1727,29 @@ namespace Brovan.Core.Emulation
 
                 if (MidSize > 0)
                 {
-                    if (Region.IsCommitted && IsRegionMapped(OverlapStart, 1) && !_emulator.UnmapMemory(OverlapStart, MidSize))
-                        return false;
+                    // Capture the live bytes BEFORE unmapping so a subsequent rescue can restore
+                    // the real content instead of zeroing the page (see DecommittedContent doc).
+                    Dictionary<ulong, byte[]> SavedPages = null;
+                    if (Region.IsCommitted && IsRegionMapped(OverlapStart, 1))
+                    {
+                        SavedPages = new Dictionary<ulong, byte[]>();
+                        for (ulong PageAddr = OverlapStart; PageAddr < OverlapEnd; PageAddr += 0x1000)
+                        {
+                            byte[] PageBytes = new byte[0x1000];
+                            if (ReadMemory(PageAddr, PageBytes, 0x1000))
+                                SavedPages[PageAddr] = PageBytes;
+                        }
+
+                        if (!_emulator.UnmapMemory(OverlapStart, MidSize))
+                            return false;
+                    }
 
                     // Track the mid-piece as decommitted-but-rescuable: on a subsequent read
                     // fault (see TryRescueDecommittedRead) the pages come back with their
-                    // original protection so the guest read succeeds. See the field doc above
-                    // for the rationale; this closes the walker/heap-decommit race without
-                    // diverging from Windows on any observable path (VirtualQuery still says
-                    // MEM_RESERVE for these ranges).
+                    // original protection AND content so the guest read succeeds. See the field
+                    // docs above for the rationale; this closes the walker/heap-decommit race
+                    // without diverging from Windows on any observable path (VirtualQuery still
+                    // says MEM_RESERVE for these ranges).
                     if (Region.IsCommitted)
                     {
                         MemoryProtection PrevProt = Region.Protections != MemoryProtection.None
@@ -1734,6 +1762,10 @@ namespace Brovan.Core.Emulation
                             RescuedPages.Remove(PageAddr);
                             DecommittedPages.Add(PageAddr);
                             DecommittedProtection[PageAddr] = PrevProt;
+                            if (SavedPages != null && SavedPages.TryGetValue(PageAddr, out byte[] Saved))
+                                DecommittedContent[PageAddr] = Saved;
+                            else
+                                DecommittedContent.Remove(PageAddr);
                         }
                     }
 
@@ -1830,6 +1862,7 @@ namespace Brovan.Core.Emulation
                     _emulator.UnmapMemory(Page, 0x1000);
                     RescuedPages.Remove(Page);
                     DecommittedProtection.Remove(Page);
+                    DecommittedContent.Remove(Page);
                 }
                 ToRemove.Clear();
             }
@@ -1849,6 +1882,7 @@ namespace Brovan.Core.Emulation
                 _emulator.UnmapMemory(Page, 0x1000);
                 DecommittedPages.Remove(Page);
                 DecommittedProtection.Remove(Page);
+                DecommittedContent.Remove(Page);
             }
         }
 
@@ -1871,6 +1905,16 @@ namespace Brovan.Core.Emulation
 
             if (!_emulator.MapMemory(Page, 0x1000, Prot))
                 return false;
+
+            // Restore the bytes captured at decommit time so the guest reads its real data, not
+            // zero (see DecommittedContent doc). The backend write bypasses guest protection, so a
+            // read-only rescued page still gets its content back. If nothing was captured the page
+            // stays zero-filled (matches the prior behaviour for genuinely-fresh backing).
+            if (DecommittedContent.TryGetValue(Page, out byte[] Content))
+            {
+                WriteMemory(Page, Content);
+                DecommittedContent.Remove(Page);
+            }
 
             // The page is now a live backend mapping. Move it out of the rescue-eligible set
             // and into RescuedPages so it is never re-mapped again (that would UC_ERR_MAP) but

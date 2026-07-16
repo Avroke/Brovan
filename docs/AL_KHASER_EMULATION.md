@@ -675,11 +675,44 @@ device-enumeration wait returns `STATUS_INVALID_HANDLE` once (no retry spin —
 unchanged), `SetupDiGetClassDevsW` takes its error path, and the run continues:
 the deepest interleavings now print **95 `GOOD` / 1 `BAD`** (up from 88/0) before
 hitting the pre-existing `0xC0000005` memory-coherence terminus further along. The
-new `1 BAD` is a `Generic Sandbox/VM Detection` artifact this fix merely lets runs
-*reach* — a separate detection frontier, not a regression. The earlier GS/stack-
-cookie `__fastfail` and null-read `wcslen` termini (both ~48 `GOOD`, run-specific
-pages in the same `0x100120000` allocation family) are the same open memory-model
-coherence question and are unchanged.
+new `1 BAD` is `al-khaser`'s *"process loaded modules contains: dbghelp.dll"*
+check: Brovan's exception dispatch for the earlier `SetUnhandledExceptionFilter`
+self-test engages the CRT/WER path (`ucrtbase!_seh_filter_exe` → loads
+`faultrep.dll`, which statically imports `dbghelp.dll`), and — unlike real Windows,
+where WER only runs as the process is dying — Brovan continues executing with
+`dbghelp.dll` resident for the probe to find. That is a separate SEH/WER frontier
+(hiding a genuinely-loaded module would be a rule-#1 state-inconsistency tell, so
+the fix must stop the spurious load, not mask it), not a regression. The earlier
+GS/stack-cookie `__fastfail` and null-read `wcslen` termini (both ~48 `GOOD`,
+run-specific pages in the same `0x100120000` allocation family) are the same open
+memory-model coherence question.
+
+**Decommit-rescue now restores real content, not zero (removes the `0xC0000005`
+deep-run cap; full-suite completion becomes reachable).** The rescue path
+(`TryRescueDecommittedRead`) re-mapped a decommitted heap page on a fault but
+handed back a **fresh zero page** — it restored the page's protection, not its
+bytes. The rescue's own premise is that the decommit is a Brovan interleaving
+artefact (real Windows never reaches the decommitted state inside the probe's
+window), which means the page's content is still logically valid and must come
+back intact; zeroing it handed the guest `0` where a live pointer / allocation
+size / stack cookie once sat. Over a deep run this accumulated and was the source
+of the run-specific NULL-derefs and `0xC0000005` faults in the memory-walk probes
+that **hard-capped every baseline interleaving at 95 `GOOD`** (no baseline run has
+ever exceeded it). `DecommitMemory` now snapshots each page's bytes before
+unmapping (parallel-keyed `DecommittedContent`, dropped on rescue-restore and on
+reclaim/commit), and `TryRescueDecommittedRead` writes them back after re-mapping.
+The write uses the backend path so it bypasses guest protection, and a legitimate
+decommit→commit→read still gets fresh zeros (the commit reclaim drops the saved
+content first) — so no observable Windows semantics change. Effect is
+**non-deterministic** (which pages get decommitted / rescued / re-read varies
+run-to-run, so the corruption — and thus the fix's benefit — is hit-or-miss per
+run): across batches the early-terminus rate drops and, decisively, some
+interleavings now run al-khaser's **entire suite to completion** — a clean
+`GetMessageW` / `NtUserGetMessage` message-loop terminus at **247 `GOOD`** —
+which the zero-rescue baseline could categorically never reach. No run regressed
+(worst case is the unchanged ~48/95 terminus). The residual ~48 GS-`__fastfail` is
+**stack** corruption the heap rescue never touches and is unaffected — the next
+memory-coherence frontier.
 
 **Deps-bundle fix landing with this note** (`scripts/Export-BrovanDeps.ps1` +
 importer validators). The export script's NLS copy globs `System32\*.nls`, but
