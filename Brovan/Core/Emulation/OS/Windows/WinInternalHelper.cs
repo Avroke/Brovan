@@ -471,6 +471,15 @@ namespace Brovan.Core.Emulation.OS.Windows
                 // SystemCall flag
                 WriteUInt32(OffsetSystemCallX64, 0);
 
+                // TickCountMultiplier — the standard Win10 value (0x0FA00000). kernel32!GetTickCount
+                // computes (TickCount.LowPart * TickCountMultiplier) >> 24; left at 0 the field made
+                // GetTickCount return 0 on every call, so a Sleep-delta timing check (al-khaser's
+                // accelerated_sleep: GetTickCount / Sleep(60s) / GetTickCount, detect if dwDiff <= 59s)
+                // always saw dwDiff == 0 and flagged emulated time. With TickCountQuad = InterruptTime /
+                // 156250 (one tick per 15.625 ms), this multiplier scales GetTickCount back to
+                // EmulatedTickCount64 milliseconds.
+                WriteUInt32(OffsetTickCountMultiplier, 0x0FA00000u);
+
                 // TickCount64
                 WriteUInt64(OffsetTickCountQuad, unchecked((ulong)Emulator.EmulatedTickCount64));
 
