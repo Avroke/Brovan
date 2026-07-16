@@ -77,3 +77,50 @@ which are the faultrep exports). Verified: every function kernel32/kernelbase im
   `--silent`.
 - The al-khaser run under Brovan consistently ends at ~line 296 (the SetTimer timing
   section) for this profile; that truncation is pre-existing and unrelated to this fix.
+
+## Follow-up: systematic ApiSet audit (are there other bad overrides / bad contracts?)
+
+A static audit cross-checked every apiset contract each WindowsLibs DLL imports against
+Brovan's `ApiSetMap` + `ApiSetOverrideMap` and the resolved host's real export table.
+Matching uses Brovan's hash key (strip the last `-<digit>` once, per
+`ComputeHashedLengthBytes`), so a `…-l1-1-3` entry already covers `…-l1-1-0/1/2`.
+
+- **Conflicting hosts (same hash key → >1 distinct host):** none.
+- **Bad overrides (override host lacks the importer's functions):** none remaining — the
+  faultrep override was the only one; every other override
+  (appinit/io/processsecurity/processthreads/util → KERNELBASE for kernel32) checks out.
+- **Missing contracts (imported, no schema entry):** 13, all `ext-ms-win-*` **extension**
+  apisets (knownfolderext, defaultdiscovery, win32-subsystem-query, containers-policymanager,
+  appmodel-deployment, security-authz-helper, oobe-query, winrt-remote, com-apartmentrestriction,
+  com-suspendresiliency, appmodel-viewscalefactor, windowscore-deviceinfo, security-chambers).
+  These are optional/empty on a real Win10 client; because they map to **nothing** they cannot
+  drag a wrong DLL in (not the faultrep class). The importing DLLs (combase, ole32, shell32,
+  windows.storage, …) all load and run fine. Minor faithfulness gap only: real Win10 carries
+  them as empty-host entries; Brovan omits them. Left as-is (benign).
+- **Redundant entries:** the `api-ms-win-core-windowserrorreporting-l1-1-0/1/2` entries added
+  alongside `-l1-1-3` are redundant (same hash key, same host); harmless, kept.
+
+### The one real nuance (AUDIT 4): `ext-ms-win-kernel32-errorhandling-l1-1-0`
+
+This contract genuinely hosts **faultrep** functions — kernelbase `BasepReportFault` /
+`CheckForReadOnlyResourceFilter` come from it — and kernelbase imports them via **delay-load**
+(dir[13]), so on a real clean Win10 process faultrep never loads (the delay bind only fires on
+an actual fault-report). Mapping the contract to KERNELBASE (the fix) points that delay import
+at a host that does **not** export those two functions — strictly a "wrong host". It is the
+correct *pragmatic* choice because:
+
+- The functions are internal WER-reporting helpers, only reached on the fault-report path,
+  which is a Brovan boundary anyway (WER is out-of-process on real Windows).
+- A clean run never triggers the delay bind, so the host is never consulted (validated: the
+  296-line al-khaser run is byte-identical healthy).
+- **Any** resolution to a non-resident host force-loads it early: tested `default → faultrep`
+  with no override at all → faultrep still loaded eagerly (dbghelp BAD). So Brovan resolves
+  this particular delay import at load time regardless of override-vs-default. Pointing it at
+  an already-resident DLL (kernelbase) is the only resolution that both keeps the module list
+  faithful (no faultrep/dbghelp) and never fails a bind in practice.
+
+**Deeper root cause (not fixed here):** Brovan eager-resolves this delay import instead of
+honoring delay-load laziness. Fixing that in the loader would let the contract map to its
+true host (faultrep) with faultrep loading only if `BasepReportFault` is ever called — the
+fully-faithful end state. Out of scope for this change; the KERNELBASE mapping is the correct
+interim resolution and the module list now matches a clean Win10 box.
