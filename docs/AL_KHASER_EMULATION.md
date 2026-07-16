@@ -714,6 +714,34 @@ which the zero-rescue baseline could categorically never reach. No run regressed
 **stack** corruption the heap rescue never touches and is unaffected — the next
 memory-coherence frontier.
 
+**Guest-visible non-determinism pinned (reproducibility + removed per-run tells).**
+Two runs of the *same* sample diverged (e.g. 130.6 M vs 132.1 M instructions), and
+several synthetic-identity values changed every run. The `EmulatedTickCount64`
+delta already advanced purely by instruction count, but the surrounding sources
+leaked host state: the system-time BASE was `DateTime.UtcNow`; `QueryPerformance
+Counter` returned the host `Stopwatch.GetTimestamp()` (non-deterministic AND a
+stealth tell — a QPC-vs-RDTSC/GetTickCount timing check saw the huge, variable
+emulation cost instead of a coherent virtual delta); the volume GUID was
+`Guid.NewGuid()`; PIDs and the KUSER `SharedUserData->Cookie` came from an unseeded
+`Random` / crypto RNG; and the guest username was a **random-length** string
+(5–11 chars) whose length rippled into every path/env/compare, jittering the
+instruction stream. Fix: one deterministic per-sample seed (`BinaryEmulator.
+DeterministicSeed`, FNV-1a over the image bytes) drives a single shared
+`SeededRandom` and the clock base; QPC now derives from the emulated TSC
+(invariant-TSC model, 10 MHz); the internal LDR-refresh `Pump` throttles by
+emulated time, not host `Stopwatch`; and `NtQueryAttributesFile` file times use
+the emulated clock. Crypto RNG (`BCryptGenRandom` / `RtlGenRandom`) stays genuinely
+random. Result: run-to-run variance collapses from ~12 %+ with 48/95/247 depth
+swings to a **stable verdict** (+~0.4 % residual instruction jitter). **Trade-off,
+accepted deliberately:** pinning timing/identity/layout also pins the still-open
+memory-coherence frontier, so al-khaser now hits the 48-`GOOD` terminus
+*consistently* instead of reaching ~95 on lucky interleavings — reproducible-48 is
+the honest state and a better base for fixing the corruption than flaky-48/95.
+Recovering depth deterministically is now purely a matter of fixing that heap/stack
+corruption. A few niche GUIDs (AFD socket paths, RPC context ids) and the USN-journal
+timestamp are still `Guid.NewGuid()`/`DateTime.UtcNow`; al-khaser does not exercise
+them, so they are the residual determinism gap.
+
 **Deps-bundle fix landing with this note** (`scripts/Export-BrovanDeps.ps1` +
 importer validators). The export script's NLS copy globs `System32\*.nls`, but
 the sort table the F3 fix (`b205488`) needs to open for `CompareStringW` /

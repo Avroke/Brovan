@@ -412,7 +412,26 @@ namespace Brovan.Core.Emulation
         private const ulong TscCyclesPerMillisecond = 3_000_000UL;
         private const ulong RdtscReadCycles = 60;
         private const ulong RdtscpReadCycles = 90;
-        private readonly long EmulatedSystemTimeBaseFileTimeUtc = DateTime.UtcNow.ToFileTimeUtc();
+        // Deterministic guest system-time base. Was DateTime.UtcNow, which broke the
+        // "deterministic guest system time" contract below (GetEmulatedSystemTimeFileTimeUtc):
+        // the absolute base drifted run-to-run, so two runs of the same sample diverged and
+        // the reported "now" was a per-run value. Default is a fixed plausible timestamp;
+        // SeedEmulatedClockBase re-seeds it deterministically per sample so different samples
+        // still get different (but reproducible) clocks. The tick DELTA already advances purely
+        // by instruction count, so only the base needed pinning.
+        private long EmulatedSystemTimeBaseFileTimeUtc = new DateTime(2024, 1, 1, 9, 30, 0, DateTimeKind.Utc).ToFileTimeUtc();
+
+        /// <summary>
+        /// Seeds the guest system-time base deterministically from a per-sample seed. The base
+        /// lands in a fixed, plausible window (early 2024 + up to ~300 days) so the value is
+        /// realistic yet reproducible for a given sample. Called once during guest init.
+        /// </summary>
+        internal void SeedEmulatedClockBase(ulong Seed)
+        {
+            long WindowStart = new DateTime(2024, 1, 1, 0, 0, 0, DateTimeKind.Utc).ToFileTimeUtc();
+            long WindowSpan = TimeSpan.FromDays(300).Ticks; // 100 ns units
+            EmulatedSystemTimeBaseFileTimeUtc = WindowStart + (long)(Seed % (ulong)WindowSpan);
+        }
 
         /// <summary>
         /// Current deterministic guest tick count in milliseconds.
@@ -428,6 +447,64 @@ namespace Brovan.Core.Emulation
                 return long.MaxValue;
 
             return EmulatedSystemTimeBaseFileTimeUtc + (EmulatedTickCount64 * 10000);
+        }
+
+        /// <summary>Frequency reported by QueryPerformanceFrequency (10 MHz), matching QueryPerformanceCounter below.</summary>
+        internal const ulong EmulatedQpcFrequency = 10_000_000UL;
+
+        // TSC advances at TscCyclesPerMillisecond (3 GHz) per emulated ms; QPC runs at 10 MHz.
+        private const ulong TscCyclesPerQpcTick = TscCyclesPerMillisecond / (EmulatedQpcFrequency / 1000); // 300
+
+        /// <summary>
+        /// Deterministic QueryPerformanceCounter value, derived from the same emulated TSC as
+        /// RDTSC (invariant-TSC model) scaled to <see cref="EmulatedQpcFrequency"/>. Replaces the
+        /// host <c>Stopwatch.GetTimestamp()</c>, which was non-deterministic AND leaked real
+        /// wall-clock into the guest — a timing check comparing QPC deltas to RDTSC/GetTickCount
+        /// would see the (huge, variable) emulation cost instead of a coherent virtual delta.
+        /// </summary>
+        internal ulong GetEmulatedQpc() => _timestampCounter / TscCyclesPerQpcTick;
+
+        /// <summary>
+        /// Deterministic per-emulation seed derived from the guest image. Every synthetic-identity
+        /// value the guest can observe (RNG stream, volume GUID, PIDs, KUSER cookie, clock base) is
+        /// derived from it, so two runs of the same sample are reproducible and none of these values
+        /// is a per-run tell. Crypto RNG (BCryptGenRandom / RtlGenRandom) stays genuinely random.
+        /// </summary>
+        internal ulong DeterministicSeed { get; private set; }
+
+        /// <summary>Single deterministic RNG stream seeded from <see cref="DeterministicSeed"/>. Shared by all non-crypto synthetic-value sites so their draws are reproducible.</summary>
+        internal Random SeededRandom { get; private set; } = new Random(0);
+
+        // FNV-1a over the guest image bytes (path-independent: the same sample seeds identically
+        // wherever it lives), size folded in; falls back to the image path, then a fixed constant.
+        private static ulong ComputeDeterministicSeed(BinaryFile Binary)
+        {
+            const ulong FnvOffset = 1469598103934665603UL;
+            const ulong FnvPrime = 1099511628211UL;
+            ulong Hash = FnvOffset;
+
+            ReadOnlySpan<byte> Data = Binary != null ? Binary.GetBinaryData() : ReadOnlySpan<byte>.Empty;
+            if (Data.Length != 0)
+            {
+                for (int i = 0; i < Data.Length; i++)
+                    Hash = (Hash ^ Data[i]) * FnvPrime;
+                Hash = (Hash ^ (ulong)(uint)Data.Length) * FnvPrime;
+            }
+            else if (Binary != null && !string.IsNullOrEmpty(Binary.Location))
+            {
+                string Loc = Binary.Location;
+                for (int i = 0; i < Loc.Length; i++)
+                    Hash = (Hash ^ (byte)Loc[i]) * FnvPrime;
+            }
+
+            return Hash == 0 ? FnvOffset : Hash;
+        }
+
+        private void InitDeterministicIdentity()
+        {
+            DeterministicSeed = ComputeDeterministicSeed(_binary);
+            SeededRandom = new Random(unchecked((int)DeterministicSeed));
+            SeedEmulatedClockBase(DeterministicSeed);
         }
 
         /// <summary>
@@ -535,6 +612,7 @@ namespace Brovan.Core.Emulation
                 throw new BadImageFormatException("Unsupported binary architecture.");
 
             _binary = Binary;
+            InitDeterministicIdentity();
             BackendArch = Arch.X86;
             BackendMode = Binary.Architecture == BinaryArchitecture.x64 ? Mode.MODE_64 : Mode.MODE_32;
             _emulator = BackendFactory.Create(Settings.BackendKind, BackendArch, BackendMode, Settings.NoHooks);
@@ -574,6 +652,7 @@ namespace Brovan.Core.Emulation
                 throw new NullReferenceException(nameof(Data));
 
             _binary = Binary ?? new BinaryFile(Data, true);
+            InitDeterministicIdentity();
             BackendArch = arch;
             BackendMode = mode;
             _emulator = BackendFactory.Create(Settings.BackendKind, arch, mode, Settings.NoHooks);

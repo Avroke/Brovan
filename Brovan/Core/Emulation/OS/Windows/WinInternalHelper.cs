@@ -404,7 +404,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Page[OffsetProductTypeIsValid] = 1;
                 WriteUInt32(Page, OffsetNtMajorVersion, WindowsVersionInfo.MajorVersion);
                 WriteUInt32(Page, OffsetNtMinorVersion, WindowsVersionInfo.MinorVersion);
-                WriteUInt32(Page, OffsetCookie, (uint)RandomNumberGenerator.GetInt32(int.MaxValue));
+                WriteUInt32(Page, OffsetCookie, (uint)Emulator.SeededRandom.Next(int.MaxValue));
             }
             else
             {
@@ -416,7 +416,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Page[Offset] = Value;
                 }
 
-                Random random = new Random();
+                Random random = Emulator.SeededRandom;
 
                 void WriteUInt32(int Offset, uint Value)
                 {
@@ -670,8 +670,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal void Pump()
         {
-            long Now = Stopwatch.GetTimestamp();
-            long MinDelta = Stopwatch.Frequency / 2000; // ~0.5ms throttle
+            // Throttle by EMULATED time, not host Stopwatch: a wall-clock throttle fired a
+            // host-load-dependent number of times, so RefreshLdrHooks ran at non-reproducible
+            // points and the guest-visible LDR state diverged run-to-run.
+            long Now = Emulator.EmulatedTickCount64;
+            const long MinDelta = 1; // ~1 ms of emulated time between refreshes
             if (LastPumpTicks != 0 && (Now - LastPumpTicks) < MinDelta)
                 return;
 

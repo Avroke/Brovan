@@ -1168,7 +1168,17 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             Shared = new WindowsSharedBuffer();
             this.Emulator = Emulator;
-            SyntheticVolumeGuid = Guid.NewGuid().ToString("D").ToLowerInvariant();
+
+            // Draw all synthetic identity (volume GUID, PIDs, ...) from the emulator's single
+            // deterministic RNG stream (seeded per sample from the guest image), so an analysis is
+            // reproducible and none of these values is a per-run tell. Previously RandomGen was
+            // time-seeded and the volume GUID was Guid.NewGuid(), so two runs of the same sample
+            // produced different guest identities and diverged.
+            RandomGen = Emulator.SeededRandom;
+
+            byte[] VolumeGuidBytes = new byte[16];
+            RandomGen.NextBytes(VolumeGuidBytes);
+            SyntheticVolumeGuid = new Guid(VolumeGuidBytes).ToString("D").ToLowerInvariant();
             SyntheticVolumeGuidSymbolicLink = $"\\??\\Volume{{{SyntheticVolumeGuid}}}";
             SyntheticVolumeWin32GuidPath = $"\\\\?\\Volume{{{SyntheticVolumeGuid}}}\\";
             SyntheticMountDevUniqueId = Guid.Parse(SyntheticVolumeGuid).ToByteArray();
