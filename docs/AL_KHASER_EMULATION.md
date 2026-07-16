@@ -834,10 +834,13 @@ on other AVs in downstream probes, but the walker terminus itself no longer
 fires deterministically). The 4 new BADs are all real fidelity gaps we haven't
 patched yet, not accidental passes:
 
-- **`Checking if process loaded modules contains: dbghelp.dll`** — Brovan's
-  bundled `dbghelp.dll` is legitimately present in the loader list.
-- **`Checking mouse movement`** — no mouse event stream is synthesised by the
-  virtual GUI subsystem.
+- **`Checking if process loaded modules contains: dbghelp.dll`** — an
+  unhandled `RaiseException` self-test drives the CRT's `_seh_filter_exe`
+  unhandled/WER path, which maps `faultrep.dll` (and its static dependency
+  `dbghelp.dll`) in-process; on real Windows WER reporting is out-of-process so
+  neither is loaded. Still open (needs SEH-dispatch / in-process-WER work).
+- ~~**`Checking mouse movement`**~~ — **fixed**, see *Landed later — cursor
+  movement fidelity* below.
 - ~~**`Checking memory space using GlobalMemoryStatusEx`**~~ — **fixed**, see
   *Landed later — RAM + disk size fidelity* below.
 - ~~**`Checking disk size using GetDiskFreeSpaceEx`**~~ — **fixed**, see
@@ -894,8 +897,41 @@ GOOD`, alongside the already-passing `hard disk size using WMI` /
   < CommitLimit, Peak ∈ [Committed, CommitLimit]).
 
 Both fixes are pure fidelity — realistic, deterministic, SSOT-derived — with no
-sample-specific values (rules #4, #6). Remaining `SystemInfo`-adjacent BADs
-(dbghelp.dll in the loader list, mouse-movement synthesis) are still open.
+sample-specific values (rules #4, #6).
+
+### Landed later — cursor movement fidelity (`mouse movement` → GOOD)
+
+al-khaser's human-presence probe samples the cursor twice across a `Sleep` and
+flags an unmoving cursor as a sandbox. `user32!GetCursorPos` faulted through to
+`STATUS_NOT_SUPPORTED`, so the caller's `POINT` stayed `(0,0)` on both reads.
+
+The routing was not obvious. `GetCursorPos` issues win32u syscall `0x102A`, but
+that SSN is **not** `NtUserGetCursorPos` (which this build's win32u does not even
+export) — disassembling the bundled `user32!GetCursorPos` shows
+`mov edx,1; lea r8d,[rdx+0x7e]; jmp NtUserCallTwoParam`, i.e. it tail-calls the
+`NtUserCallTwoParam(lpPoint, 1, 0x7F)` multiplexer (`GetPhysicalCursorPos` routes
+identically). Implemented `NtUserCallTwoParam`: for code `0x7F` it writes a
+screen-space `POINT` and returns TRUE; every other code returns
+`WinUnimplemented` (STATUS_NOT_SUPPORTED), preserving prior behaviour so
+registering the handler regresses nothing.
+
+The position is a smooth Lissajous (two coprime-ish triangle-wave periods, ~0.3
+px/ms, bounded well inside 1920×1080) driven by the guest virtual clock
+(`EmulatedTickCount64`, which `Sleep`/`NtDelayExecution` advances). Two reads
+separated by any nonzero delay therefore differ — realistic human movement, not
+fabricated per-call jitter (rule #4). Verified `GOOD` end-to-end (the syscall now
+logs `NtUserCallTwoParam (0x102A) → STATUS_SUCCESS`, `mouse movement → GOOD`).
+
+**Generator caveat learned here**: the win32k syscall registry is
+source-generated from the handler class names. A compile *error* in a
+just-added handler poisons the incremental generator cache, so the next
+*successful* incremental build silently ships a registry without the new class
+(the syscall stays "unimplemented" at runtime with no build error). Rebuild
+`--no-incremental` after adding a syscall handler, and confirm the class appears
+in `obj/**/WinRegistry.g.cs`.
+
+Remaining `SystemInfo`-adjacent BAD: only `dbghelp.dll` in the loader list
+(in-process WER/`faultrep` load, described above) is still open.
 
 ### Traced this pass — the "hidden modules" AV is an intrinsic timing race
 
