@@ -1,8 +1,10 @@
 # SEH/WER dispatch — dbghelp module-list detection (investigation handoff)
 
-**Status: OPEN — diagnosed, not yet root-caused. Runtime instrumentation resisted; a
-static code-audit of the init-time DLL-load / LDR-bootstrap path is the recommended
-next approach.** Tree is clean; nothing was committed for this investigation.
+**Status: OPEN — mechanism pinned, fix not yet applied.** The static code-audit is DONE
+and settles the rule-#7 verdict: the faultrep-removal **is masking a runtime WER-dispatch
+divergence** (the "init-time pre-population" reframe is DISPROVEN — see "Reframe — RESOLVED"
+below). What remains is a targeted runtime fix to the WER/UEF gate so a *handled* exception
+never reaches `WerpReportFault`. Tree is clean; only this doc changed.
 
 ## The question (rule #7)
 
@@ -58,36 +60,71 @@ they are in the LDR. This points to an **init-time pre-population / cached load*
 runtime WER file-load — which partly **contradicts commit 996f60e's "runtime WER
 LoadLibrary(faultrep)" premise**.
 
-## Reframe (matters for the rule-#7 verdict)
+## Reframe — RESOLVED by static audit (the init-time hypothesis is DISPROVEN)
 
-If the mechanism is init-time LDR pre-population (Brovan processes WindowsLibs DLLs / the
-import graph and creates LDR entries for faultrep + its static import dbghelp), then the
-faultrep-removal is **not masking a WER-dispatch bug** — it is correcting the set of
-pre-listed modules to match a clean process (where faultrep/dbghelp are not loaded). That
-would make the current fix **more defensible** than the commit's own self-critique.
-But this cannot be asserted without locating the mechanism.
+The previous draft floated an "init-time LDR pre-population" reframe that would have made
+the faultrep-removal a *correct clean-process* fix rather than masking. **A static code
+audit of the module-load / LDR path disproves it.** The mechanism is now pinned:
 
-## The one unhooked path + recommended next step
+1. **No Brovan C# code loads faultrep.** The only three references in the whole tree are
+   inert: `BinaryEmulatorHelper.cs:796` (`api-ms-win-core-windowserrorreporting-l1-1-3`
+   -> KERNELBASE, schema) and `:1188` (`ext-ms-win-kernel32-windowserrorreporting-l1-1-1`
+   -> KERNEL32, schema) are apiset name-map entries, not loads; `:1470` is the **dead**
+   `ApiSetOverrideMap` entry (never consumed). Nothing force-loads faultrep.
+2. **The guest LDR is NOT seeded with a fabricated module list.** Bootstrap maps **only
+   ntdll** directly (`WindowsGuest.cs:1585` -> `LoadWinLibrary`). Every other module
+   (kernel32, kernelbase, …, and faultrep) is loaded by the **real guest ntdll loader
+   executing on the CPU**, which writes PEB->Ldr; Brovan's `WinModules` merely *mirrors*
+   that via the LDR-snapshot walk (`WinInternalHelper.cs:737-808`). `WinModules` has
+   exactly two writers — the snapshot mirror (`:786`) and `AddModule`
+   (`WinSyscallsHelper.cs:2280`, fed by `LoadWinLibrary`); **neither copies the host
+   process's modules nor injects a static list**. So there is no init-time pre-population
+   path that could put faultrep in the LDR.
+3. **Therefore faultrep can only enter the LDR via the runtime guest-loader path**
+   (`NtOpenFile` -> `NtCreateSection(SEC_IMAGE, fileHandle)` -> `NtMapViewOfSection` ->
+   `LoadWinLibrary`). An image section *requires* a file handle
+   (`NtCreateSection.cs:43-49`), so an `NtOpenFile("…faultrep.dll")` must precede any map.
+   **This means WER genuinely engages at runtime** — the faultrep-removal **IS masking a
+   real SEH/WER-dispatch divergence**, exactly as commit 996f60e's own self-critique said.
+   The reframe is dead; do not re-open it.
 
-The only DLL-read path NOT instrumented is the **`new BinaryFile(path, true)` ctor**, used
-at init to read DLLs directly (e.g. ntdll at `BinaryEmulatorHelper.cs:1635`), bypassing
-`GeneralHelper.IO.ReadFile`. faultrep is most likely read there, at init.
+### Why the earlier 9 instrumentation points missed the load
 
-**Recommended next approach — static code audit (not more runtime instrumentation):**
-1. Read the init-time DLL-load / LDR-bootstrap path: the `BinaryFile` ctor callers, and how
-   the initial guest module graph is resolved and written into the guest PEB LDR
-   (`WindowsGuest.cs` module setup around `:138`/`:239`; `WinInternalHelper.cs:750-786`
-   LDR snapshot sync; `GeneralHelper.cs:3029` `EnsureWindowsLibsIndex`).
-2. Determine whether faultrep is pulled by **transitive import-graph resolution at init**
-   (which importer references the `ext-ms-win-kernel32-errorhandling`/faultrep contract?
-   check KERNELBASE.dll's imports — it was absent from `deps2`, get it from the runtime
-   `Brovan/bin/Release/net8.0/WindowsLibs/`), vs a **runtime WER path** after all.
-3. If init-time: confirm the fix is correct clean-process behaviour and update
-   `AL_KHASER_EMULATION.md` + the `Export-BrovanDeps.ps1:127-139` note to drop the
-   "masking / WER-dispatch" framing. If runtime WER: pinpoint the `WerpReportFault`
-   gating divergence (needs al-khaser's exact `SetUnhandledExceptionFilter` filter return
-   — the source file 404'd at `al-khaser/AntiDebug/SetUnhandledExceptionFilter.cpp`; find
-   the correct path in `ayoubfaouzi/al-khaser`).
+The real image-map chokepoint is **`NtMapViewOfSection` -> `LoadBinary(SectionHostPath)`
+-> `new BinaryFile(hostPath, true)`** (`NtMapViewOfSection.cs:186`,
+`BinaryEmulator.WindowsBridge.cs:890`). `LoadBinary` reads the host DLL with a **direct
+`BinaryFile` ctor (host `File` read), which bypasses `GeneralHelper.IO.ReadFile`** — that
+is precisely why the ReadFile hook never fired. The `AddModule`-sees-2-modules observation
+is consistent: most modules register through the **snapshot mirror**, not `AddModule`.
+The one still-unexplained gap is that the (reverted) `NtOpenFile` hook did not fire either
+— an image map cannot happen without a preceding open, so either that hook was mis-gated,
+**or faultrep enters through the `NtOpenSection(\KnownDlls\…)` fallback** the loader tries
+before `NtOpenFile`. Both are runtime paths; neither revives the init-time theory.
+
+## Recommended next step (runtime, at the CORRECT chokepoint)
+
+Root-causing the WER-dispatch divergence is now a targeted runtime task, not another broad
+sweep:
+
+1. Instrument the **confirmed image-map chokepoint** — `NtMapViewOfSection.cs:186` /
+   `LoadBinary` (`BinaryEmulator.WindowsBridge.cs:890`) — plus `NtOpenSection` and (with
+   correct gating this time) `NtOpenFile`. Log the mapped basename + the guest return
+   address / preceding syscall. Confirm faultrep maps and capture **who calls it**
+   (expected: a `Werp…`/`kernelbase` frame on the exception path).
+2. With the caller pinned, find the **WER-gating divergence**: al-khaser's
+   `UnhandledExcepFilterTest` is GOOD (its `SetUnhandledExceptionFilter` callback runs and
+   the process survives), so on real Windows `WerpReportFault` would NOT run. Get
+   al-khaser's exact filter return value (`ayoubfaouzi/al-khaser`,
+   `AntiDebug/UnhandledExceptionFilter*.cpp` — the path 404'd before; locate it) and
+   compare against how Brovan's SEH/UEF dispatch decides to fall through to WER.
+3. Fix the gate so a *handled* exception does not reach `WerpReportFault`. Once WER no
+   longer engages, faultrep/dbghelp are never loaded **as a consequence of correct
+   dispatch** — at which point the faultrep-removal becomes redundant and can be dropped,
+   turning the symptom-level mitigation into a real fix (satisfies rule #7).
+
+Do NOT restore the "init-time / clean-process-correction" framing in `AL_KHASER_EMULATION.md`
+or `Export-BrovanDeps.ps1:127-139` — the audit shows the current removal is a runtime-WER
+mask, so that framing would be wrong.
 
 ## Reproduction quick-reference
 
