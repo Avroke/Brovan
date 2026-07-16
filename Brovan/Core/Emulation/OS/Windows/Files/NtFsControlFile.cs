@@ -79,7 +79,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             NTSTATUS Status;
             try
             {
-                Status = WindowsStorageDeviceSupport.HandleFsControl(FsControlCode, ref Data, File);
+                Status = WindowsStorageDeviceSupport.HandleFsControl(Instance, FsControlCode, ref Data, File);
             }
             catch
             {

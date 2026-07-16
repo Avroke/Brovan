@@ -121,14 +121,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                 IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS => IsVolume ? QueryVolumeDiskExtents(ref Data) : NTSTATUS.STATUS_INVALID_DEVICE_REQUEST,
                 FSCTL_GET_NTFS_VOLUME_DATA => IsVolume ? QueryNtfsVolumeData(ref Data) : NTSTATUS.STATUS_INVALID_DEVICE_REQUEST,
                 FSCTL_QUERY_USN_JOURNAL => IsVolume ? QueryUsnJournal(ref Data) : NTSTATUS.STATUS_INVALID_DEVICE_REQUEST,
-                FSCTL_ENUM_USN_DATA => IsVolume ? EnumUsnData(ref Data) : NTSTATUS.STATUS_INVALID_DEVICE_REQUEST,
+                FSCTL_ENUM_USN_DATA => IsVolume ? EnumUsnData(Instance, ref Data) : NTSTATUS.STATUS_INVALID_DEVICE_REQUEST,
                 FSCTL_READ_USN_JOURNAL => IsVolume ? ReadUsnJournal(ref Data) : NTSTATUS.STATUS_INVALID_DEVICE_REQUEST,
                 FSCTL_GET_REPARSE_POINT => NTSTATUS.STATUS_NOT_A_REPARSE_POINT,
                 _ => NTSTATUS.STATUS_INVALID_DEVICE_REQUEST,
             };
         }
 
-        internal static NTSTATUS HandleFsControl(uint FsControlCode, ref DeviceData Data, WinFile File)
+        internal static NTSTATUS HandleFsControl(BinaryEmulator Instance, uint FsControlCode, ref DeviceData Data, WinFile File)
         {
             bool IsVolume = File != null && (IsVolumeDevicePath(File.Path) || (File.Device && IsStorageDevicePath(File.Path)));
 
@@ -136,7 +136,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 FSCTL_GET_NTFS_VOLUME_DATA => IsVolume ? QueryNtfsVolumeData(ref Data) : NTSTATUS.STATUS_INVALID_DEVICE_REQUEST,
                 FSCTL_QUERY_USN_JOURNAL => IsVolume ? QueryUsnJournal(ref Data) : NTSTATUS.STATUS_INVALID_DEVICE_REQUEST,
-                FSCTL_ENUM_USN_DATA => IsVolume ? EnumUsnData(ref Data) : NTSTATUS.STATUS_INVALID_DEVICE_REQUEST,
+                FSCTL_ENUM_USN_DATA => IsVolume ? EnumUsnData(Instance, ref Data) : NTSTATUS.STATUS_INVALID_DEVICE_REQUEST,
                 FSCTL_READ_USN_JOURNAL => IsVolume ? ReadUsnJournal(ref Data) : NTSTATUS.STATUS_INVALID_DEVICE_REQUEST,
                 FSCTL_GET_REPARSE_POINT => NTSTATUS.STATUS_NOT_A_REPARSE_POINT,
                 _ => NTSTATUS.STATUS_INVALID_DEVICE_REQUEST,
@@ -262,7 +262,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return WriteOutput(ref Data, Output, AllowOverflow: false);
         }
 
-        private static NTSTATUS EnumUsnData(ref DeviceData Data)
+        private static NTSTATUS EnumUsnData(BinaryEmulator Instance, ref DeviceData Data)
         {
             if (Data.InputBuffer == null || Data.InputLength < 24)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
@@ -275,7 +275,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_NO_MORE_FILES;
             }
 
-            byte[] Record = BuildUsnRecord(".", RootFileReferenceNumber, RootFileReferenceNumber, 1, 0x00000100);
+            byte[] Record = BuildUsnRecord(Instance, ".", RootFileReferenceNumber, RootFileReferenceNumber, 1, 0x00000100);
             byte[] Output = new byte[8 + Record.Length];
             BinaryPrimitives.WriteUInt64LittleEndian(Output.AsSpan(0, 8), RootFileReferenceNumber + 1);
             Record.CopyTo(Output.AsSpan(8));
@@ -357,7 +357,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Output;
         }
 
-        private static byte[] BuildUsnRecord(string FileName, ulong FileReferenceNumber, ulong ParentFileReferenceNumber, ulong Usn, uint FileAttributes)
+        private static byte[] BuildUsnRecord(BinaryEmulator Instance, string FileName, ulong FileReferenceNumber, ulong ParentFileReferenceNumber, ulong Usn, uint FileAttributes)
         {
             byte[] FileNameBytes = Encoding.Unicode.GetBytes(FileName);
             int RecordLength = AlignUp(60 + FileNameBytes.Length, 8);
@@ -368,7 +368,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             BinaryPrimitives.WriteUInt64LittleEndian(Output.AsSpan(8, 8), FileReferenceNumber);
             BinaryPrimitives.WriteUInt64LittleEndian(Output.AsSpan(16, 8), ParentFileReferenceNumber);
             BinaryPrimitives.WriteUInt64LittleEndian(Output.AsSpan(24, 8), Usn);
-            BinaryPrimitives.WriteUInt64LittleEndian(Output.AsSpan(32, 8), unchecked((ulong)DateTime.UtcNow.ToFileTimeUtc()));
+            BinaryPrimitives.WriteUInt64LittleEndian(Output.AsSpan(32, 8), unchecked((ulong)Instance.GetEmulatedSystemTimeFileTimeUtc()));
             BinaryPrimitives.WriteUInt32LittleEndian(Output.AsSpan(40, 4), 0x00000100);
             BinaryPrimitives.WriteUInt32LittleEndian(Output.AsSpan(44, 4), 0);
             BinaryPrimitives.WriteUInt32LittleEndian(Output.AsSpan(48, 4), 0);

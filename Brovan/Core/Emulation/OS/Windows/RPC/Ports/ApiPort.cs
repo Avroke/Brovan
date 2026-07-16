@@ -533,7 +533,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                 return BuildDceRpcFault(SendData, RpcOffset, 0x000006BAu);
 
             ushort Opnum = ReadU16(SendData, RpcOffset + 0x16);
-            if (!IsEventLogPort(Port) || !TryBuildEventLogStub(Opnum, out byte[] Stub))
+            if (!IsEventLogPort(Port) || !TryBuildEventLogStub(Instance, Opnum, out byte[] Stub))
                 return BuildDceRpcFault(SendData, RpcOffset, 0x000006BAu);
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
@@ -541,7 +541,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             return BuildDceRpcResponse(SendData, RpcOffset, Stub);
         }
 
-        private static bool TryBuildEventLogStub(ushort Opnum, out byte[] Stub)
+        private static bool TryBuildEventLogStub(BinaryEmulator Instance, ushort Opnum, out byte[] Stub)
         {
             Stub = null;
 
@@ -551,7 +551,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                 case EventLogOpnum.ElfrRegisterEventSourceW:
                 case EventLogOpnum.ElfrOpenELA:
                 case EventLogOpnum.ElfrRegisterEventSourceA:
-                    Stub = BuildEventLogOpenStub();
+                    Stub = BuildEventLogOpenStub(Instance);
                     return true;
                 case EventLogOpnum.ElfrCloseEL:
                 case EventLogOpnum.ElfrDeregisterEventSource:
@@ -570,10 +570,14 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             }
         }
 
-        private static byte[] BuildEventLogOpenStub()
+        private static byte[] BuildEventLogOpenStub(BinaryEmulator Instance)
         {
             byte[] Stub = new byte[0x18];
-            Guid ContextId = Guid.NewGuid();
+            // Deterministic RPC context handle: derive from the emulator's seeded RNG so the
+            // handle the guest receives is reproducible run-over-run (Guid.NewGuid() leaked host entropy).
+            byte[] ContextIdBytes = new byte[16];
+            Instance.SeededRandom.NextBytes(ContextIdBytes);
+            Guid ContextId = new Guid(ContextIdBytes);
             EventLogContexts[ContextId] = "Application";
             WriteContextHandle(Stub, 0x00, ContextId);
             WriteU32(Stub, 0x14, (uint)NTSTATUS.STATUS_SUCCESS);
