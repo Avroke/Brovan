@@ -349,9 +349,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                             if (Instance.ProcessCookie == 0)
                             {
-                                Instance.ProcessCookie = (uint)Random.Shared.NextInt64();
-                                if (Instance.ProcessCookie == 0)
-                                    Instance.ProcessCookie = 1;
+                                // Deterministic per emulation: the process cookie feeds the guest CRT's
+                                // stack-cookie derivation, so a host-random value perturbs every downstream
+                                // GS canary run-over-run. Route through the emulator's seeded RNG.
+                                Instance.ProcessCookie = (uint)Instance.SeededRandom.Next(1, int.MaxValue);
                             }
 
                             if (!Instance._emulator.WriteMemory(OutBufferPtr, Instance.ProcessCookie, 4))
