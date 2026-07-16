@@ -35,6 +35,9 @@ ok()   { printf '%s[+] %s%s\n' "$C_GREEN"  "$1" "$C_RST"; }
 warn() { printf '%s[!] %s%s\n' "$C_YELLOW" "$1" "$C_RST"; }
 err()  { printf '%s[-] %s%s\n' "$C_RED"    "$1" "$C_RST" 1>&2; }
 
+# Directory of this script (for locating sibling helpers like sanitize_hive.py).
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 # Print the leading comment block (skip the shebang, stop at the first code line).
 usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"; }
 
@@ -125,6 +128,22 @@ if [ -n "$moved" ]; then
     ok "Imported:$moved"
 else
     warn "Archive contained none of WindowsLibs/WinReg/apisetmap.bin."
+fi
+
+# --- sanitize VM-identifying strings out of the hives ---------------------------
+# The dependency is `reg save`d from a real Windows box; when that box is a
+# Hyper-V/Azure VM its SYSTEM hive carries the VM's disk identity
+# (SCSI\Disk&Ven_Msft&Prod_Virtual_Disk), which a guest reads as a sandbox tell.
+# Length-preserving fix-up at the dependency layer keeps every registry read
+# coherent without any runtime masking. Non-fatal if python3 is unavailable.
+if [ -f "$DEST/WinReg/SYSTEM" ]; then
+    step "Sanitizing hive VM strings"
+    if command -v python3 >/dev/null 2>&1; then
+        python3 "$SCRIPT_DIR/sanitize_hive.py" "$DEST/WinReg/SYSTEM" \
+            || warn "sanitize_hive.py failed; hives keep their exported VM strings."
+    else
+        warn "python3 not found - skipping hive sanitization; storage buses will read as a VM."
+    fi
 fi
 
 # --- verification ---------------------------------------------------------------
