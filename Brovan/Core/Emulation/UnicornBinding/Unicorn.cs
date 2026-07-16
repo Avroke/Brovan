@@ -1536,17 +1536,24 @@ namespace Brovan.Core.Emulation
                         {
                             unsafe
                             {
+                                // Free each distinct AllocBase exactly once. A region produced by a
+                                // partial-unmap split shares its parent's AllocBase while its own Ptr is
+                                // an interior offset (AllocBase + delta); freeing per-region Ptr would be
+                                // an invalid free, and two survivors sharing a base would double-free.
+                                // Mirror the ReconcileUnmap ownership model instead.
+                                var freed = new HashSet<IntPtr>();
                                 foreach (var region in _mappedRegions)
                                 {
-                                    if (region.Ptr != IntPtr.Zero)
-                                        NativeMemory.AlignedFree((void*)region.Ptr);
+                                    if (region.AllocBase != IntPtr.Zero && freed.Add(region.AllocBase))
+                                        NativeMemory.AlignedFree((void*)region.AllocBase);
                                 }
                                 _mappedRegions.Clear();
                                 _regionIndex.Clear();
                                 _regionIndexDirty = true;
 
                                 foreach (IntPtr ptr in _pendingFrees)
-                                    NativeMemory.AlignedFree((void*)ptr);
+                                    if (ptr != IntPtr.Zero && freed.Add(ptr))
+                                        NativeMemory.AlignedFree((void*)ptr);
                             }
                             _pendingFrees.Clear();
                         }
