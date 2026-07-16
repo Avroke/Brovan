@@ -799,6 +799,35 @@ the guest CRT stack-cookie derivation), are all now routed through the per-sampl
 `SeededRandom` / emulated clock. Crypto RNG (`BCryptGenRandom` / Ksec / Cng) stays
 genuinely random by design.
 
+### Anti-VM probe hardening after the desync fix — 48 → 251 GOOD / 4 BAD
+
+Clearing the hidden-modules terminus exposed the rest of al-khaser's suite. Fixed since:
+
+- **ACPI firmware tables** (`NtQuerySystemInformation` `SystemFirmwareTableInformation`,
+  previously unimplemented): `EnumSystemFirmwareTables`/`GetSystemFirmwareTable('ACPI')`
+  now return a bare-metal table set (FACP/APIC/HPET/MCFG/SSDT/BGRT/WSMT, no `WAET`, no
+  fabricated tables — absent signatures fail with `STATUS_NOT_FOUND`). Flips the
+  VirtualBox + VMware "Checking ACPI tables" probes to GOOD.
+- **`GetTickCount` returned 0 for all guests** — `KUSER_SHARED_DATA.TickCountMultiplier`
+  (offset 0x004) was never written, so `(TickCount.Low * 0) >> 24 == 0`. Set to the
+  standard `0x0FA00000`; GetTickCount now tracks `EmulatedTickCount64` ms. Flips
+  al-khaser's `accelerated_sleep` ("Check if time has been accelerated") to GOOD, and is
+  a general correctness fix for any GetTickCount-based timing.
+
+**Residual 4 BAD — honestly left:**
+- **"Checking ACPI table strings" + QEMU "Checking ACPI tables"** both route through
+  al-khaser's `firmware_ACPI()`, which returns detected unless EVERY enumerated ACPI
+  table contains all five of `PNP0000`/`PNP0C0C`/`PNP0C0E`/`PNP0C14`/`PNP0D80`. No real
+  bare-metal firmware satisfies that (FADT/MADT/HPET carry no PnP device IDs), so this
+  al-khaser check false-positives on real hardware too. Passing it would require embedding
+  fake PnP strings in every synthetic table (unrealistic forgery / over-fit to one tool),
+  so it's left BAD per the "return realistic values, don't over-fit" discipline.
+- **"Checking CPU fan using WMI"** (`SELECT * FROM Win32_Fan`, detected when 0 instances)
+  and **"VM Driver Services"** (`OpenSCManager` returns NULL) each need a subsystem Brovan
+  doesn't have: a WMI query-interception provider that synthesizes a `Win32_Fan` instance,
+  and a `svcctl` RPC endpoint (`ROpenSCManagerW` + service enumeration). Both are scoped
+  follow-ups, not stub gaps.
+
 **Deps-bundle fix landing with this note** (`scripts/Export-BrovanDeps.ps1` +
 importer validators). The export script's NLS copy globs `System32\*.nls`, but
 the sort table the F3 fix (`b205488`) needs to open for `CompareStringW` /
