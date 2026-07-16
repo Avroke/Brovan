@@ -124,16 +124,13 @@ $CuratedDlls = @(
     'comctl32','comdlg32','setupapi','cfgmgr32','devobj',
     # WUDFPlatform: al-khaser resolves WudfIs{Any,Kernel,User}DebuggerPresent from it
     # for its WUDF debugger checks; its GetProcAddress calls no-op harmlessly when absent.
-    # NOTE: faultrep.dll is deliberately NOT shipped. It is only ever pulled in by the CRT/WER
-    # unhandled-exception path (ucrtbase!_seh_filter_exe -> LoadLibrary(faultrep)), and it
-    # statically imports dbghelp.dll -> dbgcore/imagehlp. On real Windows that WER path only
-    # runs as a process is dying, so dbghelp never stays resident; Brovan runs WER and then
-    # CONTINUES, leaving dbghelp.dll in the module list where al-khaser's "loaded modules
-    # contains dbghelp.dll" anti-analysis probe flags it (a false detection). With faultrep
-    # absent, LoadLibrary(faultrep) returns NULL, WER no-ops, dbghelp is never loaded, and the
-    # probe correctly reads clean. al-khaser does not import faultrep/dbghelp directly, so
-    # nothing else regresses. (The deeper SEH/WER-dispatch divergence is tracked separately.)
-    'WUDFPlatform',
+    # faultrep: exists in a standard System32; shipped so a file-existence probe passes.
+    # It is NOT loaded at runtime — an earlier bogus apiset override
+    # (ext-ms-win-kernel32-errorhandling-l1-1-0 -> faultrep) used to drag it (and its static
+    # import dbghelp.dll) into every process, which al-khaser's "loaded modules contains
+    # dbghelp.dll" probe flagged. That override was removed (the contract now resolves to
+    # KERNELBASE, matching real Windows), so faultrep ships on disk but stays unloaded.
+    'WUDFPlatform','faultrep',
     'powrprof','umpdc','wmiclnt','psapi','version','profapi','userenv',
     'netapi32','netutils','samcli','srvcli','wkscli','logoncli',
     'secur32','sspicli','dbghelp','dbgcore','imagehlp',

@@ -676,13 +676,16 @@ unchanged), `SetupDiGetClassDevsW` takes its error path, and the run continues:
 the deepest interleavings now print **95 `GOOD` / 1 `BAD`** (up from 88/0) before
 hitting the pre-existing `0xC0000005` memory-coherence terminus further along. The
 new `1 BAD` is `al-khaser`'s *"process loaded modules contains: dbghelp.dll"*
-check: Brovan's exception dispatch for the earlier `SetUnhandledExceptionFilter`
-self-test engages the CRT/WER path (`ucrtbase!_seh_filter_exe` → loads
-`faultrep.dll`, which statically imports `dbghelp.dll`), and — unlike real Windows,
-where WER only runs as the process is dying — Brovan continues executing with
-`dbghelp.dll` resident for the probe to find. That is a separate SEH/WER frontier
-(hiding a genuinely-loaded module would be a rule-#1 state-inconsistency tell, so
-the fix must stop the spurious load, not mask it), not a regression. The earlier
+check. **RESOLVED (and it was never SEH/WER — see
+`docs/SEH_WER_DISPATCH_INVESTIGATION.md`):** runtime tracing proved `faultrep.dll`
+(+ its static import `dbghelp.dll`) was dragged in **at load time by a bogus
+`ApiSetOverrideMap` entry** (`ext-ms-win-kernel32-errorhandling-l1-1-0 →
+faultrep.dll`), with **no exception involved** — kernelbase statically imports that
+error-handling contract, and the override mis-resolved it to the fault-*reporting*
+DLL. Fix: the contract now resolves to `KERNELBASE` (matching real Windows), so
+faultrep ships on disk (file-existence probe passes) but is never loaded and dbghelp
+never enters the LDR (`BAD → GOOD`). The stop-the-spurious-load-don't-mask-it
+requirement below was met at the source. The earlier
 GS/stack-cookie `__fastfail` and null-read `wcslen` termini (both ~48 `GOOD`,
 run-specific pages in the same `0x100120000` allocation family) are the same open
 memory-model coherence question.
@@ -1011,11 +1014,14 @@ on other AVs in downstream probes, but the walker terminus itself no longer
 fires deterministically). The 4 new BADs are all real fidelity gaps we haven't
 patched yet, not accidental passes:
 
-- **`Checking if process loaded modules contains: dbghelp.dll`** — an
-  unhandled `RaiseException` self-test drives the CRT's `_seh_filter_exe`
-  unhandled/WER path, which maps `faultrep.dll` (and its static dependency
-  `dbghelp.dll`) in-process; on real Windows WER reporting is out-of-process so
-  neither is loaded. Still open (needs SEH-dispatch / in-process-WER work).
+- **`Checking if process loaded modules contains: dbghelp.dll`** — **RESOLVED
+  (not SEH/WER).** `faultrep.dll` (+ static import `dbghelp.dll`) was pulled in at
+  **load time** by a bogus `ApiSetOverrideMap` entry
+  (`ext-ms-win-kernel32-errorhandling-l1-1-0 → faultrep.dll`), not by any WER path
+  — runtime tracing recorded zero exceptions before the map. That error-handling
+  contract (kernelbase statically imports it) now resolves to `KERNELBASE`, matching
+  real Windows; faultrep ships on disk but stays unloaded. See
+  `docs/SEH_WER_DISPATCH_INVESTIGATION.md`.
 - ~~**`Checking mouse movement`**~~ — **fixed**, see *Landed later — cursor
   movement fidelity* below.
 - ~~**`Checking memory space using GlobalMemoryStatusEx`**~~ — **fixed**, see
@@ -1107,8 +1113,9 @@ just-added handler poisons the incremental generator cache, so the next
 `--no-incremental` after adding a syscall handler, and confirm the class appears
 in `obj/**/WinRegistry.g.cs`.
 
-Remaining `SystemInfo`-adjacent BAD: only `dbghelp.dll` in the loader list
-(in-process WER/`faultrep` load, described above) is still open.
+Remaining `SystemInfo`-adjacent BAD: the `dbghelp.dll` loader-list probe is now
+RESOLVED (bogus apiset override → faultrep, fixed to resolve to KERNELBASE; described
+above), leaving no open `SystemInfo`-adjacent BAD.
 
 ### Traced this pass — the "hidden modules" AV is an intrinsic timing race
 

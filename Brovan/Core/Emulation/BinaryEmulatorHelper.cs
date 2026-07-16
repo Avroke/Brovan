@@ -793,6 +793,9 @@ namespace Brovan.Core.Emulation
             ["api-ms-win-core-version-private-l1-1-0.dll"] = "KERNELBASE.dll",
             ["api-ms-win-core-versionansi-l1-1-1.dll"] = "KERNELBASE.dll",
             ["api-ms-win-core-windowsceip-l1-1-0.dll"] = "KERNELBASE.dll",
+            ["api-ms-win-core-windowserrorreporting-l1-1-0.dll"] = "KERNELBASE.dll",
+            ["api-ms-win-core-windowserrorreporting-l1-1-1.dll"] = "KERNELBASE.dll",
+            ["api-ms-win-core-windowserrorreporting-l1-1-2.dll"] = "KERNELBASE.dll",
             ["api-ms-win-core-windowserrorreporting-l1-1-3.dll"] = "KERNELBASE.dll",
             ["api-ms-win-core-winrt-error-l1-1-1.dll"] = "combase.dll",
             ["api-ms-win-core-winrt-errorprivate-l1-1-1.dll"] = "combase.dll",
@@ -1174,7 +1177,7 @@ namespace Brovan.Core.Emulation
             ["ext-ms-win-kernel32-appcompat-l1-1-0.dll"] = "KERNEL32.dll",
             ["ext-ms-win-kernel32-datetime-l1-1-0.dll"] = "KERNEL32.dll",
             ["ext-ms-win-kernel32-elevation-l1-1-0.dll"] = "KERNEL32.dll",
-            ["ext-ms-win-kernel32-errorhandling-l1-1-0.dll"] = "KERNEL32.dll",
+            ["ext-ms-win-kernel32-errorhandling-l1-1-0.dll"] = "KERNELBASE.dll",
             ["ext-ms-win-kernel32-file-l1-1-0.dll"] = "KERNEL32.dll",
             ["ext-ms-win-kernel32-localization-l1-1-0.dll"] = "KERNEL32.dll",
             ["ext-ms-win-kernel32-package-current-l1-1-0.dll"] = "kernel.appcore.dll",
@@ -1467,7 +1470,15 @@ namespace Brovan.Core.Emulation
             [new ApiSetOverrideKey("api-ms-win-core-processsecurity-l1-1-0.dll", "kernel32.dll")] = "KERNELBASE.dll",
             [new ApiSetOverrideKey("api-ms-win-core-processthreads-l1-1-8.dll", "kernel32.dll")] = "KERNELBASE.dll",
             [new ApiSetOverrideKey("api-ms-win-core-util-l1-1-1.dll", "kernel32.dll")] = "KERNELBASE.dll",
-            [new ApiSetOverrideKey("ext-ms-win-kernel32-errorhandling-l1-1-0.dll", "kernel32.dll")] = "faultrep.dll",
+            // NOTE: there used to be an override mapping the *error-handling* contract
+            // ext-ms-win-kernel32-errorhandling-l1-1-0 -> faultrep.dll. That was wrong:
+            // this contract hosts the error-handling family (RaiseException / SetErrorMode /
+            // UnhandledExceptionFilter, all KERNELBASE exports), NOT the fault-*reporting*
+            // family (ReportFault / BasepReportFault, which live in faultrep). kernelbase
+            // statically imports this contract, so the bogus override dragged faultrep.dll
+            // (and its static import dbghelp.dll) into EVERY emulated process at load time —
+            // an al-khaser "loaded modules contains dbghelp.dll" tell. The contract now
+            // resolves to KERNELBASE (see ApiSetMap), matching real Windows.
         };
 
         private static IReadOnlyDictionary<uint, WinSyscallEntry> CachedSyscallDictionary = null;
