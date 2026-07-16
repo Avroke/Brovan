@@ -19,22 +19,24 @@ ext-ms-win-kernel32-errorhandling-l1-1-0.dll  (importer kernel32.dll)  ->  fault
 `CrossGenerator.GenerateMap()` (`GeneralHelper.cs:3077`) bakes this override into the
 synthetic ApiSet schema (`apisetmap.bin`) that the **real guest ntdll loader** consumes
 (there is no `apisetschema.dll` on disk, so Brovan supplies the schema). **kernelbase.dll
-statically imports `ext-ms-win-kernel32-errorhandling-l1-1-0`**, and the resolver applied
-the override to it, so at process-load time the loader mapped faultrep.dll → which
-statically imports dbghelp.dll → both land in the PEB LDR. al-khaser walks the LDR
+imports `ext-ms-win-kernel32-errorhandling-l1-1-0`** (via delay-load — dir[13] — see the
+audit section below), the override resolved the contract to faultrep, and Brovan bound that
+import at process-load time, so the loader mapped faultrep.dll → which statically imports
+dbghelp.dll → both land in the PEB LDR. al-khaser walks the LDR
 (`LdrEnumerateLoadedModules`) and flags dbghelp.
 
-The override was simply wrong: that contract hosts the **error-handling** family
-(`RaiseException` / `SetErrorMode` / `UnhandledExceptionFilter` — all KERNELBASE exports),
-**not** the **fault-reporting** family (`ReportFault` / `BasepReportFault` / `WerReportHang`,
-which are the faultrep exports). Verified: every function kernel32/kernelbase import from
-`ext-ms-win-kernel32-errorhandling-l1-1-0` is a KERNELBASE export.
+The override was wrong for this emulator's goal: pointing the contract at faultrep force-loads
+faultrep + dbghelp into every process, whereas on a real clean Win10 box the delay import
+never fires and neither DLL is resident. (Strictly, this contract *does* host faultrep's
+`BasepReportFault` / `CheckForReadOnlyResourceFilter`; resolving it to KERNELBASE is the
+pragmatic fix — see "AUDIT 4" below for the full nuance.)
 
 ## The fix
 
 1. **Remove the override** and map the contract to KERNELBASE in `ApiSetMap`
-   (`ext-ms-win-kernel32-errorhandling-l1-1-0 → KERNELBASE.dll`). kernelbase's static import
-   now binds to already-loaded kernelbase — faultrep is never pulled.
+   (`ext-ms-win-kernel32-errorhandling-l1-1-0 → KERNELBASE.dll`). The contract now binds to
+   already-resident kernelbase, so Brovan's eager resolution of the import maps no new module
+   — faultrep is never pulled.
 2. **Completed the WER apiset mappings** as a related correctness fix: the schema had only
    `api-ms-win-core-windowserrorreporting-l1-1-3 → KERNELBASE`, but kernel32 statically
    imports `-l1-1-0/1/2/3`; all their functions are KERNELBASE exports, so all four now map
