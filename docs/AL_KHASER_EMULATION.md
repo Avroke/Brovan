@@ -651,6 +651,36 @@ top table records**:
   not chased here: the runs all reach the same terminus category, and the
   livelock watchdog is silent throughout every one.
 
+**Invalid-handle wait terminus fixed — `NtWaitForMultipleObjects` now validates
+handles (deep-run ceiling 88 → 95 `GOOD`).** After the rescued-page memory fix
+lifted the earlier `0xC0000005` ceiling, a fraction of runs reached a **new
+silent terminus** deep in the `Generic Sandbox/VM Detection` section: the main
+thread parked on `NtWaitForMultipleObjects` returning `STATUS_PENDING` forever
+(~130 M instructions, 88 `GOOD`), so the scheduler ran out of runnable threads
+and returned. Instrumenting the block point showed the wait array held handles
+that Brovan never allocated — a constant `0x4` (below the `0x40` handle base) plus
+a run-varying second slot (`0x7C`/`0x7E`, sometimes resolving to an unrelated ETW
+registration) — sourced by the **real `setupapi.dll`/`devobj.dll` device-
+enumeration path** that `al-khaser`'s `SetupDiGetClassDevsW` VM-hardware probe
+drives. Root cause: `NtWaitForMultipleObjects` did **not** validate its handles —
+an unknown handle was silently treated as "never satisfiable" and the wait parked
+indefinitely. Real Windows references every object by handle *before* waiting and
+fails the whole call with `STATUS_INVALID_HANDLE` if any is invalid (it never
+blocks); `NtWaitForSingleObject` already did exactly this for its single handle.
+The one-file fix ports that check to the multi-object path (every waitable object
+lives in the handle table, so a null lookup is a genuinely invalid handle — both
+`CanSatisfyWaitHandle` and `WindowsGuest.IsHandleSignaled` agree). With it, the
+device-enumeration wait returns `STATUS_INVALID_HANDLE` once (no retry spin —
+`NtWaitForMultipleObjects` fires exactly twice per run, the legitimate first wait
+unchanged), `SetupDiGetClassDevsW` takes its error path, and the run continues:
+the deepest interleavings now print **95 `GOOD` / 1 `BAD`** (up from 88/0) before
+hitting the pre-existing `0xC0000005` memory-coherence terminus further along. The
+new `1 BAD` is a `Generic Sandbox/VM Detection` artifact this fix merely lets runs
+*reach* — a separate detection frontier, not a regression. The earlier GS/stack-
+cookie `__fastfail` and null-read `wcslen` termini (both ~48 `GOOD`, run-specific
+pages in the same `0x100120000` allocation family) are the same open memory-model
+coherence question and are unchanged.
+
 **Deps-bundle fix landing with this note** (`scripts/Export-BrovanDeps.ps1` +
 importer validators). The export script's NLS copy globs `System32\*.nls`, but
 the sort table the F3 fix (`b205488`) needs to open for `CompareStringW` /
