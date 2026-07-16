@@ -712,7 +712,9 @@ interleavings now run al-khaser's **entire suite to completion** — a clean
 which the zero-rescue baseline could categorically never reach. No run regressed
 (worst case is the unchanged ~48/95 terminus). The residual ~48 GS-`__fastfail` is
 **stack** corruption the heap rescue never touches and is unaffected — the next
-memory-coherence frontier.
+memory-coherence frontier. **[SUPERSEDED — see "RESOLVED" below: the residual-48
+terminus was NOT stack corruption but a host-pointer bookkeeping desync on partial
+unmap; fixed, 48 → 248 GOOD.]**
 
 **Guest-visible non-determinism pinned (reproducibility + removed per-run tells).**
 Two runs of the *same* sample diverged (e.g. 130.6 M vs 132.1 M instructions), and
@@ -741,6 +743,61 @@ Recovering depth deterministically is now purely a matter of fixing that heap/st
 corruption. A few niche GUIDs (AFD socket paths, RPC context ids) and the USN-journal
 timestamp are still `Guid.NewGuid()`/`DateTime.UtcNow`; al-khaser does not exercise
 them, so they are the residual determinism gap.
+
+---
+
+## RESOLVED — the "corruption" was a host-pointer bookkeeping desync, not a heap/stack timing race. 48 → 248 GOOD.
+
+**Everything below this line in the older "memory-coherence frontier" / "not fixable
+by a Brovan-side patch" analysis is SUPERSEDED.** Instruction-level instrumentation
+(env-gated, since reverted) proved the earlier root-cause attribution wrong on every
+point: the decommit-content **rescue path fires 0×** in the terminating run, and the
+fault is **not** a GS-`__fastfail` stack-cookie smash — it is a plain NULL-read
+`0xC0000005` at al-khaser's hidden-module MZ-probe (`cmp byte [rax],0x4D`, `rax=0`,
+IP `0x14000CA73`). At the fault, the C# host-pointer view (`ReadMemoryULong`) returned
+the correct value while the guest CPU's own read (`uc_mem_read` path) returned `0` — a
+**backend-vs-C# mapping desync**, not a TLB/cache staleness (an explicit
+`UC_CTL_TLB_FLUSH` + TB-cache removal did **not** clear it).
+
+**Real root cause.** `Unicorn.UnmapMemory` reconciled the C# `_mappedRegions` view
+(consulted by `TryGetHostPointer` for every emulated read/write) with the backend
+**only on an exact `(Address,Size)` match**. The guest ntdll segment heap constantly
+issues *sub-range* `NtFreeVirtualMemory(MEM_DECOMMIT)` on parts of a larger arena
+(`AllocationBase 0x100120000`). `uc_mem_unmap` split its own mapping correctly, but the
+stale full-size C# entry survived and kept aliasing the *old* host buffer; a later
+`MapMemory` re-backed that VA with a **new** buffer in Unicorn. `TryGetHostPointer`
+then resolved the VA to the stale buffer, so emulated `NtQueryVirtualMemory` wrote the
+`MEMORY_BASIC_INFORMATION` into a buffer the guest never reads → a page-straddling
+MBI node's `BaseAddress` read as `0` → `cmp [0]` → AV. (This is why only straddling
+nodes faulted, and why the earlier "stack corruption" / heap-decommit-timing framing
+never reconciled with the evidence.)
+
+**Fix** (`Unicorn.cs`, `UnmapMemory` only, all guests — commit *Fix host-pointer desync
+on partial unmap*): `ReconcileUnmap` splits every `_mappedRegions` entry overlapping the
+unmapped range into its surviving left/right halves, mirroring Unicorn's own
+`split_region` (the right half's `Ptr` shifts by `overlapEnd - rStart` so it stays
+aliased into the same host buffer at the correct offset). A new `MappedRegion.AllocBase`
+records the real `AlignedAlloc` base; the buffer is deferred-freed only once no surviving
+region references it (also closing a latent free-of-wrong-pointer). No masking, no ntdll
+patching, no sample-specific tuning, no budget change — a pure backend-invariant
+correctness fix, so the rejected-fix table below no longer applies (none of those levers
+were needed).
+
+**Result** (deterministic across runs): al-khaser advances **48 → 248 GOOD / 7 BAD**,
+past the entire anti-VM suite (VirtualBox/VMware/Parallels/Hyper-V) to its own
+**Timing-attacks** long-sleep section (the new terminus is the sample's deliberate
+600 s delay, not a crash). The **7 BAD** are newly-reachable, orthogonal anti-emulation
+stealth gaps (time-acceleration, WMI CPU-fan, ACPI-table-string probes) never reached
+before because the run died at probe 48 — a fresh, separate work item, not a regression.
+Regression guard: svchost/services/lsass/spoolsv/rundll32/csrss/explorer all still exit
+clean. The heap-decommit-content rescue (`DecommittedContent` / `TryRescueDecommittedRead`)
+is retained but was **not** what unblocked this terminus.
+
+**Determinism residuals now also closed.** The "niche GUIDs (AFD/RPC) + USN timestamp"
+gap noted just above, plus a `ProcessCookie` still seeded from `Random.Shared` (it feeds
+the guest CRT stack-cookie derivation), are all now routed through the per-sample
+`SeededRandom` / emulated clock. Crypto RNG (`BCryptGenRandom` / Ksec / Cng) stays
+genuinely random by design.
 
 **Deps-bundle fix landing with this note** (`scripts/Export-BrovanDeps.ps1` +
 importer validators). The export script's NLS copy globs `System32\*.nls`, but
@@ -1025,6 +1082,16 @@ Remaining `SystemInfo`-adjacent BAD: only `dbghelp.dll` in the loader list
 (in-process WER/`faultrep` load, described above) is still open.
 
 ### Traced this pass — the "hidden modules" AV is an intrinsic timing race
+
+> **[SUPERSEDED by the "RESOLVED" section above.]** This pass concluded the AV was an
+> intrinsic segment-heap decommit *timing race* that was "not fixable by a Brovan-side
+> patch." Later instruction-level instrumentation disproved that: the fault is a
+> host-pointer bookkeeping desync in `UnmapMemory` (stale `_mappedRegions` entry after a
+> partial `uc_mem_unmap`), fixed generically via `ReconcileUnmap`. The decommit *does*
+> happen mid-walk, but a correct C#-vs-Unicorn mapping mirror makes the guest read the
+> right buffer, so the walk no longer faults (48 → 248 GOOD). The rejected-fix reasoning
+> and the `RtlpHeapReservedBytes` "deferred direction" below were both moot — the bug was
+> not in the heap model at all. Kept for the trace detail (fault site, ntdll RVAs).
 
 Instrumented (env-gated `BROVAN_QVMDBG`, reverted) to bracket the fault site
 `0x14000CA73: cmp BYTE [rax], 0x4d` in al-khaser's hidden-module scanner
