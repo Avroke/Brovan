@@ -691,6 +691,11 @@ namespace Brovan.Core.Emulation.Guests
             }
         }
 
+        public bool TryRescueDecommittedMemory(BinaryEmulator Instance, BackendMemoryAccessType Type, ulong Address)
+        {
+            return Instance.TryRescueDecommittedRead(Type, Address);
+        }
+
         public bool HandleInvalidMemory(BinaryEmulator Instance, BackendMemoryAccessType Type, ulong Address, uint Size, ulong Value)
         {
             if (Instance._binary == null || (!IsBlob && Instance._binary.FileFormat != BinaryFormat.PE))

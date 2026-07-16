@@ -101,6 +101,15 @@ namespace Brovan.Core.Emulation
         void HandleInvalidInstruction(BinaryEmulator Instance);
         bool HandleInvalidMemory(BinaryEmulator Instance, BackendMemoryAccessType Type, ulong Address, uint Size, ulong Value);
 
+        /// <summary>
+        /// Called from the backend's invalid-memory hook before dispatching a page fault. If the
+        /// address corresponds to guest state the guest layer can transparently repair (e.g. a
+        /// Windows heap arena page recently taken by the emulated segment heap's decommit pass),
+        /// re-map it and return true; the backend will retry the access. Return false to let the
+        /// fault dispatch normally. Default is false — only the Windows guest currently uses this.
+        /// </summary>
+        bool TryRescueDecommittedMemory(BinaryEmulator Instance, BackendMemoryAccessType Type, ulong Address);
+
         ulong CreateInitialThread(BinaryEmulator Instance);
         EmulatedThread CreateEmulatedThread(BinaryEmulator Instance, ulong StartAddress, string Name = null!, ulong Parameter = 0, ulong? StackSizeOverride = null, int BasePriority = 8);
         void OnThreadContextLoaded(BinaryEmulator Instance, EmulatedThread Thread);

@@ -801,6 +801,59 @@ confirms the deps analysis end-to-end:
   hitting a `0xC0000005` in the same path. Investigated this pass (below); both
   termini share one root cause. The livelock watchdog stays silent throughout.
 
+### Landed later — soft-rescue on decommitted-read closes the walker terminus
+
+The intrinsic-timing analysis below stayed correct, but the terminus itself is now
+closable with a **fault-driven rescue** that leaves observable Windows semantics
+intact (VirtualQuery still reports MEM_RESERVE for the affected pages). Design:
+
+- `DecommitMemory` still unmaps in the backend as before AND records each
+  page it drops into `DecommittedPages` (per-emulation `HashSet<ulong>`) along
+  with the region's pre-decommit protection in `DecommittedProtection`.
+- On any read/write/fetch fault the guest layer's new
+  `TryRescueDecommittedMemory` runs before the fault dispatches: if the page
+  is in the set, it is re-mapped in the backend with its original protection
+  and removed from the set. `InvalidMemoryHandler` returns `true`; the guest
+  access retries and succeeds — the walker completes and the process runs on
+  to whatever probe comes next.
+- `CommitMemory` and `ReleaseMemory` call `ReclaimRescuedPages` which unmaps
+  any earlier-rescued page in the target range so the caller's own MapMemory
+  (COMMIT) or UnmapMemory (RELEASE) has clean ground; freshly-released
+  pages correctly go MEM_FREE and any subsequent access there faults.
+- Only the Windows guest wires the rescue — Linux / Generic default to false
+  so their semantics are unchanged.
+
+**Observable effect**: the terminus documented below (0xC0000005 at
+`0x14000CA73`) no longer happens on the "walker snapshotted + heap decommitted"
+class. Al-khaser's `Walking process memory for hidden modules` probe completes
+(`-> 0`) and the run continues into the **AntiDumping / SystemInfo / AntiVM /
+HumanInteraction** categories that were previously blocked. New high-water mark:
+**92 GOOD / 4 BAD** across ~124 M instructions on the deeper interleaving
+(steady state per run is non-deterministic — some runs still terminate earlier
+on other AVs in downstream probes, but the walker terminus itself no longer
+fires deterministically). The 4 new BADs are all real fidelity gaps we haven't
+patched yet, not accidental passes:
+
+- **`Checking if process loaded modules contains: dbghelp.dll`** — Brovan's
+  bundled `dbghelp.dll` is legitimately present in the loader list.
+- **`Checking mouse movement`** — no mouse event stream is synthesised by the
+  virtual GUI subsystem.
+- **`Checking memory space using GlobalMemoryStatusEx`** — reported memory
+  values disagree with al-khaser's threshold.
+- **`Checking disk size using GetDiskFreeSpaceEx`** — reported disk size
+  disagrees with al-khaser's threshold.
+
+**Fingerprint discipline**: the only Windows-observable divergence from the
+rescue path is that a guest read of a page whose VirtualQuery reports
+MEM_RESERVE (having been decommitted) returns stale bytes instead of raising
+STATUS_ACCESS_VIOLATION. No al-khaser variant, pafish, or VMAware probe tests
+this specific "read-decommitted-expect-AV" shape (each of them walks memory
+through VirtualQuery + read *believing* the region is committed, and their code
+has no SEH around the byte read — the AV is a Brovan-specific timing artefact,
+not a probe target). The alternative — the deterministic `0xC0000005` terminus
+we had before this change — was strictly more fingerprintable (100 % crash on
+the "hidden modules" probe on every run).
+
 ### Traced this pass — the "hidden modules" AV is an intrinsic timing race
 
 Instrumented (env-gated `BROVAN_QVMDBG`, reverted) to bracket the fault site

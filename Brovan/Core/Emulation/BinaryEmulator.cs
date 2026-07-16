@@ -2811,6 +2811,15 @@ namespace Brovan.Core.Emulation
                 return false;
             }
 
+            // Windows-guest specific: reads into a decommitted heap arena page (dropped by the
+            // real ntdll segment heap under memory pressure) transparently come back to their
+            // original protection so the guest access succeeds. This closes the walker/heap-
+            // decommit timing race that terminates al-khaser's hidden-modules probe at
+            // 0xC0000005 — see BinaryEmulator.WindowsBridge.cs :: DecommittedPages for the full
+            // rationale. Returning true here tells Unicorn to retry the access.
+            if (Guest.TryRescueDecommittedMemory(this, Type, Address))
+                return true;
+
             ulong Rip = ReadRegister(IPRegister);
             if ((Settings.Flags & LogFlags.Issues) != 0)
                 TriggerEventMessage($"[-] Invalid memory {GetAction(Type)} related to the address 0x{Address:X} at 0x{Rip:X}.", LogFlags.Issues);

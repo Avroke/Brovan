@@ -567,6 +567,8 @@ namespace Brovan.Core.Emulation.Guests
             return false;
         }
 
+        public bool TryRescueDecommittedMemory(BinaryEmulator Instance, BackendMemoryAccessType Type, ulong Address) => false;
+
         internal ulong GetOrCreateSignalRestorer(BinaryEmulator Instance)
         {
             if (Instance.IsX64Guest)

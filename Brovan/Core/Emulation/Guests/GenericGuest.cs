@@ -185,6 +185,8 @@ namespace Brovan.Core.Emulation.Guests
             return false;
         }
 
+        public bool TryRescueDecommittedMemory(BinaryEmulator Instance, BackendMemoryAccessType Type, ulong Address) => false;
+
         public ulong CreateInitialThread(BinaryEmulator Instance)
         {
             return 0;
