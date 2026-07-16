@@ -65,6 +65,16 @@ namespace Brovan.Core.Emulation
         /// <summary>Original protection to restore when a page in <see cref="DecommittedPages"/> is rescued.</summary>
         private readonly System.Collections.Generic.Dictionary<ulong, MemoryProtection> DecommittedProtection = new System.Collections.Generic.Dictionary<ulong, MemoryProtection>();
 
+        /// <summary>
+        /// Pages the rescue path re-mapped in the backend (moved out of <see cref="DecommittedPages"/>
+        /// by <see cref="TryRescueDecommittedRead"/>). They are live Unicorn mappings that Brovan's
+        /// region map no longer tracks, so <see cref="ReclaimRescuedPages"/> MUST unmap them before the
+        /// address is reused — otherwise a later commit at the same base hits UC_ERR_MAP and the guest's
+        /// allocation spuriously fails with STATUS_NO_MEMORY. Kept separate from
+        /// <see cref="DecommittedPages"/> so a mapped page is never re-rescued (which would UC_ERR_MAP).
+        /// </summary>
+        private readonly System.Collections.Generic.HashSet<ulong> RescuedPages = new System.Collections.Generic.HashSet<ulong>();
+
         private static IcedX86Disassembler Disassembler = new IcedX86Disassembler(X86DisassembleMode.Bit64, X86DisassemblerFormat.FastFormat);
         private static CodeHookCallback InstructionHook;
 
@@ -1719,6 +1729,9 @@ namespace Brovan.Core.Emulation
                             : Region.InitialProtections;
                         for (ulong PageAddr = OverlapStart; PageAddr < OverlapEnd; PageAddr += 0x1000)
                         {
+                            // Just unmapped above -> back to rescue-pending; a page can't be both
+                            // rescued (mapped) and decommitted (unmapped) at once.
+                            RescuedPages.Remove(PageAddr);
                             DecommittedPages.Add(PageAddr);
                             DecommittedProtection[PageAddr] = PrevProt;
                         }
@@ -1794,28 +1807,45 @@ namespace Brovan.Core.Emulation
         /// </summary>
         private void ReclaimRescuedPages(ulong BaseAddress, ulong Size)
         {
-            if (DecommittedPages.Count == 0)
+            if (DecommittedPages.Count == 0 && RescuedPages.Count == 0)
                 return;
 
             ulong Start = BaseAddress & ~0xFFFUL;
             ulong End = AlignUp(BaseAddress + Size, 0x1000);
+
+            // RescuedPages are LIVE backend mappings Brovan's region map no longer tracks; they
+            // MUST be unmapped or the caller's fresh MapMemory at the reused base hits UC_ERR_MAP.
+            // DecommittedPages are already unmapped (rescue-pending) — unmapping again is a harmless
+            // no-op, but clearing them keeps the rescue set honest for the reused range.
             System.Collections.Generic.List<ulong> ToRemove = null;
+            foreach (ulong Page in RescuedPages)
+            {
+                if (Page >= Start && Page < End)
+                    (ToRemove ??= new System.Collections.Generic.List<ulong>()).Add(Page);
+            }
+            if (ToRemove != null)
+            {
+                foreach (ulong Page in ToRemove)
+                {
+                    _emulator.UnmapMemory(Page, 0x1000);
+                    RescuedPages.Remove(Page);
+                    DecommittedProtection.Remove(Page);
+                }
+                ToRemove.Clear();
+            }
+
             foreach (ulong Page in DecommittedPages)
             {
                 if (Page >= Start && Page < End)
-                {
                     (ToRemove ??= new System.Collections.Generic.List<ulong>()).Add(Page);
-                }
             }
             if (ToRemove == null)
                 return;
 
             foreach (ulong Page in ToRemove)
             {
-                // If the rescue path already re-mapped this page, unmap it so the caller's
-                // fresh MapMemory has clean ground. Ignore failure — either it wasn't rescued
-                // (never re-mapped) or the backend refuses (which the caller's MapMemory will
-                // surface as its own error).
+                // Rescue-pending (already unmapped): drop the tracking so the reused range starts
+                // clean. Unmap defensively in case a backend mapping lingers; ignore failure.
                 _emulator.UnmapMemory(Page, 0x1000);
                 DecommittedPages.Remove(Page);
                 DecommittedProtection.Remove(Page);
@@ -1842,8 +1872,14 @@ namespace Brovan.Core.Emulation
             if (!_emulator.MapMemory(Page, 0x1000, Prot))
                 return false;
 
+            // The page is now a live backend mapping. Move it out of the rescue-eligible set
+            // and into RescuedPages so it is never re-mapped again (that would UC_ERR_MAP) but
+            // is still unmapped by ReclaimRescuedPages when its address is reused. Dropping it
+            // from all tracking here orphaned the mapping and later broke commits with
+            // UC_ERR_MAP -> STATUS_NO_MEMORY.
             DecommittedPages.Remove(Page);
             DecommittedProtection.Remove(Page);
+            RescuedPages.Add(Page);
             return true;
         }
 
