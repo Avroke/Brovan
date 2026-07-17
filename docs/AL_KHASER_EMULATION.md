@@ -1524,7 +1524,8 @@ the guest ntdll's `mov eax, imm32` stub prologues, now from `WindowsLibs/SysWOW6
 | `NtSetInformationProcess(ProcessTlsInformation)` WOW64 element size (0xC not 0x18) | ntdll deferred-TLS setup succeeds → **~9.93M** (`INFO_LENGTH_MISMATCH` cleared) |
 | `NtSetInformationVirtualMemory` + `NtQueryInformationProcess(ProcessMitigationPolicy)` → WOW64 | CFG registration + mitigation query succeed (advisory) → later-DLL init |
 | user32 win32k client-connect (`NtUserProcessConnect`, syscall 0x2000) + SHAREDINFO | user32 DllMain passes the connect → **~9.98M** |
-| *(open)* win32k per-thread CLIENTINFO + x86 registry (`NtOpenKey`) | current terminus — GUI subsystem, see frontier below |
+| WOW64 registry family (`NtOpenKey`/`NtQueryValueKey`/… ×13) | registry works on x86 (prereq for the detection phase) |
+| *(open)* gdi32full per-thread GDI `CLIENTINFO` (`TEB+0x60`) | current terminus — GDI client subsystem, see frontier below |
 
 #### Resolved this pass (each fix is a generic WOW64 fidelity correction)
 
@@ -1648,12 +1649,27 @@ SERVERINFO/handle-table the x64 CSR `HandleUserSrvConnect` builds) and returns
 `STATUS_SUCCESS`. user32 now passes the connect + the `test byte [psi],4` deref,
 advancing **~9.94M → ~9.98M** instructions.
 
-**Next frontier — win32k per-thread `CLIENTINFO` + x86 registry (`NtOpenKey`).** The
-run now faults deeper in win32k init at a NULL per-thread-client deref: `mov eax,
-fs:[18h]` (TEB) → `[TEB+0xFDC]` → `[+0x60]` (== 0) → `[0+0xF8]` → later `[+0x180094]`
-(a GDI shared-section offset). This is the client-side **`CLIENTINFO`** / GDI
-handle-cache the process shared section + TEB should point at — the next layer of the
-GUI-subsystem state after the SHAREDINFO, and the current fatal deref.
+**Next frontier — gdi32full's per-thread GDI `CLIENTINFO` (the current fatal deref).**
+Pinned precisely: the fault is in **`gdi32full.dll`** (the ~2.1 MB module the WOW64
+loader maps at `~0x10320000`; fault IP `0x1044AF1C`). Its per-thread GDI init reads
+`mov eax, fs:[18h]` (32-bit TEB, confirmed at `0x10016000`) → `mov ecx, [TEB+0xFDC]`
+(== 0, so the `jns`/`add` keeps the base at the TEB) → `mov eax, [TEB+0x60]` (== 0,
+the NULL) → `mov eax, [eax+0xF8]` (**faults**) → `cmp [eax+0x180094], …`. `TEB+0x60`
+is the per-thread GDI client-info pointer (`CLIENTINFO`/`pti`) that win32k sets on GDI
+thread-attach; it is NULL because Brovan never wires it for WOW64. The chain is a
+multi-level structure walk — `CLIENTINFO → [+0xF8] → [+0x180094]` — and `0x180094` is
+an index into the **GDI shared handle table** (0x10-byte x86 entries ⇒ ~98 K entries,
+a deliberately large reserve). The emulator already builds that table
+(`WinSyscallsHelper.EnsureGdiHandleTable` / `GdiHandleTableAddress`, used by the x64
+`HandleUserSrvConnect` path), so the remaining work is (a) allocate + zero a 32-bit
+`CLIENTINFO`, wire `TEB+0x60` (and likely `TEB+0x40` `Win32ThreadInfo`) to it during
+the WOW64 TEB/connect setup, and (b) populate the `CLIENTINFO` fields gdi32full walks
+(`[+0xF8]` → the GDI shared base, with a valid entry at `+0x180094`). This needs the
+exact 32-bit `CLIENTINFO` layout reverse-engineered from gdi32full — a bounded but
+non-trivial GDI-client-state piece; guessing the offsets would only move the fault a
+few dereferences deeper, so it wants a dedicated pass, not an incremental patch.
+
+The **x86 registry** sibling gap is now closed (see below).
 
 **Landed alongside — WOW64 registry syscalls.** The same DLL init was issuing a burst
 of `NtOpenKey` (SSN 0x12) returning `NOT_SUPPORTED` because the whole registry family
