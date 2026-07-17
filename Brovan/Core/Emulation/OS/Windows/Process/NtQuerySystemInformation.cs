@@ -505,8 +505,23 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                             if (Wow64)
                             {
-                                Instance._emulator.WriteMemory(SystemInformationPtr + 0x1C, (uint)Instance.BaseAddress);  // MinimumUserModeAddress
-                                Instance._emulator.WriteMemory(SystemInformationPtr + 0x20, (uint)Instance.MaxAddress);   // MaximumUserModeAddress
+                                // The two user-address bounds must describe the 32-bit *process* address space,
+                                // NOT the emulator's internal allocation window (Instance.BaseAddress/MaxAddress).
+                                // MaximumUserModeAddress in particular is load-bearing: ntdll's CFG-bitmap
+                                // reservation (LdrpProtectMrdata → RtlpAllocateVirtualMemoryEx) reads it back via
+                                // SystemEmulationBasicInformation, does `MaximumUserModeAddress + 1`, then derives
+                                // the bitmap size from that span. (uint)Instance.MaxAddress was 0xFFFFFFFF, whose
+                                // +1 overflows to 0 → a 0-byte bitmap reservation → NtAllocateVirtualMemoryEx
+                                // returns STATUS_INVALID_PARAMETER → ntdll fails process init with
+                                // STATUS_APP_INIT_FAILURE. Report the real Win32 bounds instead: floor 0x10000
+                                // (64 KB), ceiling 0x7FFEFFFF (2 GB − 64 KB), or 0xFFFEFFFF (4 GB − 64 KB) when
+                                // the image is large-address-aware — the extra 2 GB a WOW64 LAA process gets.
+                                bool LargeAddressAware = Instance._binary.PE != null &&
+                                    (Instance._binary.PE.Characteristics & System.Reflection.PortableExecutable.Characteristics.LargeAddressAware) != 0;
+                                uint MinimumUserModeAddress = 0x00010000;
+                                uint MaximumUserModeAddress = LargeAddressAware ? 0xFFFEFFFFu : 0x7FFEFFFFu;
+                                Instance._emulator.WriteMemory(SystemInformationPtr + 0x1C, MinimumUserModeAddress);      // MinimumUserModeAddress
+                                Instance._emulator.WriteMemory(SystemInformationPtr + 0x20, MaximumUserModeAddress);      // MaximumUserModeAddress
                                 Instance._emulator.WriteMemory(SystemInformationPtr + 0x24, 0x1u);                        // ActiveProcessorsAffinityMask
                                 Instance._emulator.WriteMemory(SystemInformationPtr + 0x28, (byte)Environment.ProcessorCount);
                             }

@@ -5410,6 +5410,17 @@ namespace Brovan.Core.Emulation.OS.Windows
             return HandleManager.GetObjectByHandle<WinSemaphore>(Handle);
         }
 
+        public WinHandle CreatePartitionHandle(string Name, AccessMask Permissions)
+        {
+            if (string.IsNullOrEmpty(Name))
+                Name = "SystemPartition";
+
+            WinPartition Partition = new WinPartition { Name = Name };
+            WinHandle Handle = HandleManager.AddHandle(Partition, Permissions);
+            AddWinHandle(Handle);
+            return Handle;
+        }
+
         public WinHandle CreateSectionHandle(string Name, ulong Size, uint Protection, uint Attributes, string Path, ulong BackingAddress, AccessMask Permissions)
         {
             if (string.IsNullOrEmpty(Name))

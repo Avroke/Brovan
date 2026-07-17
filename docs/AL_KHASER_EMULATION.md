@@ -1395,10 +1395,13 @@ process environment, dispatches WOW64 system calls through a synthetic
 `sysenter` trampoline with the correct SSNs, handles CPU/software exceptions
 through the x86 `KiUserExceptionDispatcher`, and runs ntdll's `LdrInitializeThunk`
 loader **deep into process initialisation** — mapping dependent DLL sections,
-querying image/memory/process/thread information, resolving the WOW64 transition,
-and dispatching real SEH — before terminating cleanly (no spin) at the current
-frontier below. The x64 cohort is unaffected (al-khaser_x64 still sweeps its
-detection suite, ≥ 240 GOOD probes).
+querying image/memory/process/thread information, synthesising the WOW64INFO block,
+reserving the CFG bitmap, opening the process memory partition and allocating the
+segment-heap arena, and dispatching real SEH — before terminating cleanly (no spin)
+at the current frontier below (ntdll heap-manager tree construction, ~22k guest
+instructions in, up from ~8k at the start of this pass). The x64 cohort is
+byte-for-byte unaffected by these x86 fixes (identical instruction trace,
+confirmed by an A/B run against the pre-change baseline).
 
 This whole subsection is the WOW64 model. **The design decision that makes it
 tractable: emulate a 32-bit process purely in `UC_MODE_32`** — one Unicorn
@@ -1499,22 +1502,66 @@ the guest ntdll's `mov eax, imm32` stub prologues, now from `WindowsLibs/SysWOW6
 | Unified args + loader-critical handlers | loader queries + maps DLL sections |
 | x86 exception dispatch | infinite no-op spin gone; SEH dispatches; clean terminus |
 | ProcessImageInformation / thread / memory classes | loader runs ~8k instrs deep into init |
+| WOW64INFO in TEB TlsSlots[10] | CPU-feature init deref fixed → ~20k instrs (CFG-bitmap reserve reached) |
+| SystemEmulationBasicInformation MaximumUserModeAddress | CFG-bitmap span computes non-zero → ~21.6k (segment-heap init reached) |
+| NtOpenPartition | memory partition opens → segment-heap arena allocates → ~22.1k (heap tree build reached) |
+
+#### Resolved this pass (each fix is a generic WOW64 fidelity correction)
+
+1. **WOW64INFO structure + `TEB.TlsSlots[WOW64_TLS_WOW64INFO]` (offset 0xE38).**
+   The earlier `mov eax, [eax]` fault at guest `0x4B32A880` (`eax == 0`) was
+   ntdll's CPU-feature/page-size init dereferencing `TlsSlots[10]`. On a real
+   WOW64 process `wow64.dll` allocates a process-wide `WOW64INFO` block and stores
+   its pointer in that slot (in *both* the 32- and 64-bit TEBs) *before* the 32-bit
+   ntdll runs; the pure-32-bit model has no `wow64.dll`, so the slot was NULL. Fixed
+   in `WindowsGuest.SetupWow64Info` (one block per process) + a per-TEB write in
+   `AllocateAndInitializeTEB`. Layout confirmed by disassembling `SysWOW64\ntdll`
+   (three read sites at RVA 0xAA872 / 0x9E5B4 / 0x5BE6E, cross-checked against the
+   x64 sibling at RVA 0xC5792 which NULL-guards the same slot): `NativeSystemPageSize`
+   @0x00 (0x1000 → ntdll bit-scans it to page-shift 12), `CpuFlags` @0x04 (bit 0x2
+   set → ntdll routes `RtlQueryPerformanceCounter` through the syscall transition
+   instead of the unimplemented `int 0x81` fast path), `NativeMachine`=0x8664 @0x20,
+   `EmulatedMachine`=0x014C @0x22.
+
+2. **`SystemEmulationBasicInformation` (`NtQuerySystemInformation` class 0x3E)
+   `MaximumUserModeAddress`.** ntdll's CFG-bitmap reservation reads this value back,
+   does `MaximumUserModeAddress + 1`, and derives the bitmap span from it. The WOW64
+   branch was returning `(uint)Instance.MaxAddress` = `0xFFFFFFFF` (the emulator's
+   *internal* 34-bit allocation ceiling truncated to 32 bits), whose `+1` overflows
+   to 0 → a 0-byte `NtAllocateVirtualMemoryEx` → `STATUS_INVALID_PARAMETER` →
+   `STATUS_APP_INIT_FAILURE`. Now reports the real Win32 process bounds: floor
+   `0x00010000` (64 KB), ceiling `0x7FFEFFFF` (2 GB − 64 KB), or `0xFFFEFFFF`
+   (4 GB − 64 KB) when the image is `IMAGE_FILE_LARGE_ADDRESS_AWARE`. Root-caused by
+   walking the CFG-bitmap call chain in ntdll (RVA 0xF2593 → 0xFE480 bitmap-size
+   math → 0xF5F86 span → 0xF09DD `NtQuerySystemInformation(0x3E)`).
+
+3. **`NtOpenPartition` (SSN 0x126).** ntdll's segment-heap init opens the process's
+   memory partition during startup. Unimplemented, it returned `STATUS_NOT_SUPPORTED`;
+   although the ntdll caller (RVA 0xB2FD2) tolerates the failure by branching around
+   the partition-setup path, the process is then left with no partition and heap init
+   aborts with `STATUS_NO_MEMORY` → `STATUS_APP_INIT_FAILURE`. Every process really
+   does belong to a partition (the system partition is the implicit default), so the
+   faithful behaviour is a valid handle. Added a `WinPartition` handle object
+   (`HandleType.PartitionHandle`) + `CreatePartitionHandle` + the `NtOpenPartition`
+   handler (bitness-agnostic via `GetArg64`/`WritePointer`).
 
 #### Current frontier (F5-next)
 
-The loader now terminates at an honest access-violation deep inside ntdll's
-process-init path: `mov eax, [eax]` at guest `0x4B32A880` with `eax == 0`. The
-faulting code reads `fs:[0x18]` (TEB.Self), confirms `[TEB+0x18] == TEB` (the
-"this is a 32-bit TEB" check — Self is at +0x18 on the x86 TEB, +0x30 on x64),
-then reads `[TEB+0xE38]` (= `TlsSlots[10]`, since `TlsSlots[64]` starts at TEB
-offset 0xE10 on x86) and dereferences it. That slot is zero in Brovan's TEB, so
-the deref faults. This is a loader/CRT per-thread-data (TLS) initialisation gap —
-a field the loader expects a prior init step to have populated. The `[TEB+0xFDC]`
-sign-checked `WowTebOffset`-style field (also 0 in our pure-32-bit model, since
-there is no coexisting 64-bit TEB) selects this branch. Identifying the exact
-producer of `TlsSlots[10]` (a reference x86 WOW64 TEB dump would settle it) is the
-next step; a couple of secondary handlers still return unimplemented on the way
-there (`NtQuerySystemInformation` class 0x73, `NtWow64IsProcessorFeaturePresent`
+The loader now reaches ntdll's **heap-manager tree construction** and hits a
+`__fastfail` (`int 0x29`, code `0x1D` = `FAST_FAIL_INVALID_BALANCED_TREE`) at
+guest `0x4B2DA37D` (`SysWOW64\ntdll` RVA 0x5A37D) after the segment heap has
+opened its partition and allocated its arena (two more `NtAllocateVirtualMemoryEx`
+calls succeed just before). The fast-fail is the shared balanced-tree validation
+helper (many `cmp <node>,<node>; jne 0x…A378` sites converge on it, with
+pointer-XOR encoding — `xor edx,eax` — characteristic of the segment heap's
+`RtlpHpVs*` free-chunk tree). Committed guest pages *are* zero-filled (Unicorn
+`uc_mem_map`), so this is not the usual emulator zero-fill gap — it is a deeper
+segment-heap-consistency question (arena layout / chunk-header or tree-cookie
+expectation, or whether a 32-bit WOW64 process should be selecting the segment
+heap at all vs the classic NT heap). This is the next investigation; it is an
+honest terminus (the guest itself executed the fast-fail), not an emulator spin.
+A couple of secondary handlers still return unimplemented on the way there
+(`NtQuerySystemInformation` class 0x73, `NtWow64IsProcessorFeaturePresent`
 SSN 0x1E9) but are not the fatal path.
 
 **Remaining WOW64 work (mechanical continuation):** the other ~70 `Nt*` handlers

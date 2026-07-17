@@ -983,7 +983,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         EtwRegistrationHandle = 14,
         SemaphoreHandle = 15,
         JobHandle = 16,
-        DebugObjectHandle = 17
+        DebugObjectHandle = 17,
+        PartitionHandle = 18
     }
 
     public sealed class WinToken : IHandleObject
@@ -998,6 +999,19 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong OwningThreadId;
         public string ObjectId => "Token";
         public HandleType ObjectType => HandleType.TokenHandle;
+    }
+
+    /// <summary>
+    /// A Windows memory partition object (NT "partition" — the container a process's committed memory is
+    /// charged against). Every process belongs to one; the system partition is the implicit default. ntdll's
+    /// segment-heap init opens it via NtOpenPartition during process startup, so the emulator hands back a
+    /// real handle rather than failing the open (which would abort heap init with STATUS_NO_MEMORY).
+    /// </summary>
+    public sealed class WinPartition : IHandleObject
+    {
+        public string Name;
+        public string ObjectId => string.IsNullOrEmpty(Name) ? "Partition" : Name;
+        public HandleType ObjectType => HandleType.PartitionHandle;
     }
 
     public class WinHandle

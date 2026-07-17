@@ -48,6 +48,18 @@ namespace Brovan.Core.Emulation.Guests
         // 0 for x64 guests (which use the real `syscall` instruction) and until it is set up.
         private ulong _wow64SyscallTrampoline;
 
+        // Guest address of the process-wide WOW64INFO structure (see SetupWow64Info). On a real WOW64
+        // process wow64.dll allocates this block and stores a pointer to it in every thread's TEB at
+        // TlsSlots[WOW64_TLS_WOW64INFO] (offset 0xE38 on the 32-bit TEB) BEFORE the 32-bit ntdll runs;
+        // ntdll's CPU-feature init then dereferences it (NativeSystemPageSize@0x00, CpuFlags@0x04,
+        // NativeMachine@0x20, EmulatedMachine@0x22) with no NULL guard. The pure-32-bit model has no
+        // wow64.dll, so Brovan synthesises the block once per process. 0 for x64 guests / until set up.
+        private ulong _wow64InfoPtr;
+        // 32-bit TEB offset of TlsSlots[WOW64_TLS_WOW64INFO]. TlsSlots is at TEB+0xE10 (64 * 4 bytes);
+        // WOW64_TLS_WOW64INFO == 10, so the slot sits at 0xE10 + 10*4 = 0xE38. (On the 64-bit TEB the
+        // same slot is TEB64+0x1480 + 10*8 = 0x14D0 — the offset ntdll's dual-TEB path reads.)
+        private const uint Wow64InfoTebSlotOffset32 = 0xE38;
+
         // Guest address of the 32-bit GDT used to give FS a per-thread base = TEB. MODE_32 Unicorn ignores the
         // FS_BASE pseudo-register, so the FS base must come from a real GDT descriptor (selector 0x53). Set up
         // lazily on the first 32-bit context load; the FS descriptor's base is rewritten per thread switch.
@@ -870,6 +882,14 @@ namespace Brovan.Core.Emulation.Guests
                     Instance._emulator.WriteMemory(Teb + 0xC0, (uint)_wow64SyscallTrampoline);
 
                 Instance._emulator.WriteMemory(Teb + 0xC4, (uint)0x0409u);                                 // CurrentLocale
+
+                // TlsSlots[WOW64_TLS_WOW64INFO] — a pointer to the process-wide WOW64INFO block. wow64.dll
+                // sets this on a real WOW64 process before the 32-bit ntdll runs; the pure-32-bit model
+                // populates it here so ntdll's CPU-feature init doesn't dereference a NULL slot. See
+                // SetupWow64Info for the structure layout and why each field matters.
+                if (_wow64InfoPtr != 0)
+                    Instance._emulator.WriteMemory(Teb + Wow64InfoTebSlotOffset32, (uint)_wow64InfoPtr);
+
                 return Teb;
             }
 
@@ -1417,7 +1437,10 @@ namespace Brovan.Core.Emulation.Guests
             WinHelper.AddModule(MainModule, true);
             LoadNtdll(Instance);
             if (Instance._binary.Architecture == BinaryArchitecture.x86)
+            {
                 SetupWow64SyscallTransition(Instance);
+                SetupWow64Info(Instance);
+            }
             if (UsesDirectBlobStartup)
                 InstallSyntheticLdrData(Instance);
             WinHelper.LdrTracker = new PebLdrTracker(Instance, WinHelper);
@@ -1551,6 +1574,43 @@ namespace Brovan.Core.Emulation.Guests
                 if (TransitionVa != 0)
                     Instance._emulator.WriteMemory(TransitionVa, (uint)_wow64SyscallTrampoline);
             }
+        }
+
+        /// <summary>
+        /// Allocates (once per process) the WOW64INFO structure and records its guest address in
+        /// <see cref="_wow64InfoPtr"/>. <see cref="AllocateAndInitializeTEB"/> then writes that pointer into
+        /// every 32-bit thread's TEB at TlsSlots[WOW64_TLS_WOW64INFO] (0xE38). On a real WOW64 process this is
+        /// wow64.dll's job, done before the 32-bit ntdll executes; the pure-32-bit model has no wow64.dll, so
+        /// without this the 32-bit ntdll's CPU-feature init dereferences a NULL TlsSlots[10] and raises an
+        /// access violation that fails process init (STATUS_APP_INIT_FAILURE).
+        ///
+        /// ntdll reads (SysWOW64\ntdll RVA 0xAA872 and 0x9E5B4, cross-checked against the x64 sibling at
+        /// RVA 0xC5792 which NULL-guards the same slot):
+        ///   +0x00 NativeSystemPageSize — bit-scanned into the cached page shift (0x1000 → shift 12).
+        ///   +0x04 CpuFlags — bit 0x2 gated: SET routes RtlQueryPerformanceCounter through the syscall
+        ///                    transition (NtQueryPerformanceCounter, which Brovan services); CLEAR takes the
+        ///                    legacy `int 0x81` WOW64 fast-syscall path Brovan does not implement.
+        ///   +0x20 NativeMachine   (USHORT) — matched against machine types by the x64 sibling.
+        ///   +0x22 EmulatedMachine (USHORT).
+        /// </summary>
+        private void SetupWow64Info(BinaryEmulator Instance)
+        {
+            if (_wow64InfoPtr != 0)
+                return;
+
+            const int Wow64InfoSize = 0x40;                 // >= 0x24 (last field EmulatedMachine@0x22); page-rounded by the allocator.
+            const ushort ImageFileMachineAmd64 = 0x8664;    // native machine of the x64 host running WOW64.
+            const ushort ImageFileMachineI386 = 0x014C;     // emulated machine of the 32-bit process.
+            const uint CpuFlagsUseSyscallQpc = 0x2;         // bit 0x2 → syscall QPC path (not the `int 0x81` fast path).
+            const uint NativeSystemPageSize = 0x1000;       // x64 host native page size = 4096 (ntdll bit-scans it → page shift 12).
+
+            ulong Block = Instance.MapUniqueAddress(Wow64InfoSize, MemoryProtection.ReadWrite);
+            Instance._emulator.WriteMemory(Block, new byte[Wow64InfoSize]);
+            Instance._emulator.WriteMemory(Block + 0x00, NativeSystemPageSize);          // NativeSystemPageSize (0x1000 → page shift 12)
+            Instance._emulator.WriteMemory(Block + 0x04, CpuFlagsUseSyscallQpc);         // CpuFlags
+            Instance._emulator.WriteMemory(Block + 0x20, ImageFileMachineAmd64, 2);      // NativeMachine
+            Instance._emulator.WriteMemory(Block + 0x22, ImageFileMachineI386, 2);       // EmulatedMachine
+            _wow64InfoPtr = Block;
         }
 
         /// <summary>
