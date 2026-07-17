@@ -1526,7 +1526,7 @@ the guest ntdll's `mov eax, imm32` stub prologues, now from `WindowsLibs/SysWOW6
 | user32 win32k client-connect (`NtUserProcessConnect`, syscall 0x2000) + SHAREDINFO | user32 DllMain passes the connect → **~9.98M** |
 | WOW64 registry family (`NtOpenKey`/`NtQueryValueKey`/… ×13) | registry works on x86 (prereq for the detection phase) |
 | gdi32full GDI shared handle table (`TEB+0x60`=PEB, `PEB+0xF8`=table) | gdi32full GDI init completes → **~11.15M** |
-| *(open)* ntdll `[0x14]` deref @ `0x4B2DF583` + win32k `0x1037` | current terminus — see frontier below |
+| *(open)* ntdll `RtlEnterCriticalSection` on a CS with `DebugInfo==0` | current terminus — guest-ntdll `RtlpAllocateDebugInfo` returns 0, see below |
 
 #### Resolved this pass (each fix is a generic WOW64 fidelity correction)
 
@@ -1667,13 +1667,22 @@ past gdi32full's `0x180094` client read. gdi32full's per-thread GDI init now com
 al-khaser advances **~9.98M → ~11.15M** instructions. x64 is untouched (its `TEB+0x60`
 was already the PEB; `PEB+0xF8` stays as it was).
 
-**Next frontier — ntdll fault at `0x4B2DF583` (`[0x14]` near-NULL deref).** With GDI
-init cleared the run reaches a fresh terminus: an unmapped read of `0x14` at ntdll RVA
-`0x5F583` — a `[ptr+0x14]` deref where `ptr ≈ 0`. Nearby the run also hits an
-unimplemented **win32k syscall `0x1037`** (a real `NtUser*`/`NtGdi*` the emulator's
-win32u scan didn't bind) and more `NtQuerySystemInformationEx` (0x161) /
-`NtQuerySystemInformation` class 0x73 `NOT_SUPPORTED`; which of these is the fatal one
-needs the usual caller-return-address pinpointing.
+**Next frontier — ntdll `RtlEnterCriticalSection` on a CS with `DebugInfo == 0`.** With
+GDI init cleared the run reaches a fresh terminus at ntdll RVA `0x5F583`
+(`inc dword [eax+0x14]`), inside `RtlEnterCriticalSection`: it loads `eax = CS->DebugInfo`
+and, when that is neither a valid pointer nor the `-1` "no-debug-info" sentinel,
+increments `DebugInfo->ContentionCount` (`+0x14`). The faulting CS (heap-resident,
+e.g. `0x105DAA40`) is otherwise fully initialised (`LockCount` set, `LockSemaphore`
+`-1`) but its `DebugInfo` is **0** — a value real ntdll never leaves on a CS (it is a
+valid `RTL_CRITICAL_SECTION_DEBUG*` or `-1`). Brovan runs the real 32-bit ntdll (no CS
+interception), so the guest's own `RtlpAllocateDebugInfo` returned 0 here — most likely
+the static `RtlpStaticDebugInfo[64]` pool exhausting after the ~hundreds of CSes the
+DLL-init wave creates, with the heap fallback not resolving under the emulator. Next
+step: trace `RtlpAllocateDebugInfo`'s allocation path (static-array index + the
+`RtlpDebugInfoFreeList`/heap fallback) and find why it yields 0 — a guest-ntdll heap
+interaction, not a missing syscall. Nearby non-fatal gaps: an unimplemented win32k
+syscall `0x1037` and more `NtQuerySystemInformationEx` (0x161) /
+`NtQuerySystemInformation` class 0x73 `NOT_SUPPORTED`.
 
 The **x86 registry** sibling gap is now closed (see below).
 
