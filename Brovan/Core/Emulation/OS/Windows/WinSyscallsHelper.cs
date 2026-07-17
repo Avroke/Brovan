@@ -3187,7 +3187,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!WriteZeroMemory(Monitor, (uint)UserPrimaryMonitorSize))
                 return 0;
 
-            (int Width, int Height) = VirtualPrimaryMonitorSize();
+            (int Width, int Height) = ScreenResolution();
 
             UserPrimaryMonitorInfo MonitorInfo = new UserPrimaryMonitorInfo
             {
@@ -3212,15 +3212,55 @@ namespace Brovan.Core.Emulation.OS.Windows
             return UserPrimaryMonitorAddress;
         }
 
-        // The guest's primary monitor is a FIXED 1920x1080 virtual display, never the host's
-        // real screen. Reflecting the analyst machine's actual resolution (via GetSystemMetrics)
-        // would (a) leak a host-specific value into the guest — non-deterministic across analyst
-        // machines, violating the run-over-run reproducibility contract — and (b) disagree with
-        // the fixed 1920x1080 bounds every other screen-space surface uses (GetCursorPos in
-        // NtUserCallTwoParam, GetDeviceCaps HORZRES). 1080p is the single most common desktop
-        // resolution, so it is a realistic, coherent, host-independent SSOT.
-        private static (int Width, int Height) VirtualPrimaryMonitorSize()
+        // Effective guest screen resolution — the single SSOT read by every screen-space
+        // surface (primary-monitor MONITORINFO here, GetCursorPos bounds in NtUserCallTwoParam,
+        // GetDeviceCaps HORZRES) so they can never disagree.
+        //
+        // DEFAULT is a fixed 1920x1080 virtual display: host-independent and reproducible
+        // run-over-run (a fingerprint must not leak the analyst machine's real resolution).
+        // The dynamic / host resolution is OPT-IN via the BROVAN_SCREEN_RESOLUTION env var:
+        //   "host" / "dynamic"  -> reflect the real host monitor (GetSystemMetrics; meaningful
+        //                          on a Windows host, e.g. InteractiveGui — non-deterministic
+        //                          by nature, which is why it is not the default)
+        //   "<W>x<H>"           -> an explicit fixed resolution (e.g. "2560x1440"; deterministic)
+        // Anything else (or unset) -> the 1920x1080 default.
+        public static (int Width, int Height) ScreenResolution()
         {
+            string spec = Environment.GetEnvironmentVariable("BROVAN_SCREEN_RESOLUTION");
+            if (string.IsNullOrWhiteSpace(spec))
+                return (1920, 1080);
+
+            spec = spec.Trim();
+
+            if (spec.Equals("host", StringComparison.OrdinalIgnoreCase) ||
+                spec.Equals("dynamic", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    if (OperatingSystem.IsWindows())
+                    {
+                        int Width = NativeWinImports.GetSystemMetrics(SmCxScreen);
+                        int Height = NativeWinImports.GetSystemMetrics(SmCyScreen);
+                        if (Width > 0 && Height > 0)
+                            return (Width, Height);
+                    }
+                }
+                catch
+                {
+                }
+                return (1920, 1080);
+            }
+
+            int sep = spec.IndexOfAny(new[] { 'x', 'X' });
+            if (sep > 0 && sep < spec.Length - 1)
+            {
+                var culture = System.Globalization.CultureInfo.InvariantCulture;
+                if (int.TryParse(spec.AsSpan(0, sep), System.Globalization.NumberStyles.Integer, culture, out int cw) &&
+                    int.TryParse(spec.AsSpan(sep + 1), System.Globalization.NumberStyles.Integer, culture, out int ch) &&
+                    cw > 0 && ch > 0)
+                    return (cw, ch);
+            }
+
             return (1920, 1080);
         }
 

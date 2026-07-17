@@ -23,9 +23,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         // OS build (derived from the bundled user32 stub, an OS ABI constant).
         private const ulong RoutineGetCursorPos = 0x7F;
 
-        private const long ScreenWidth = 1920;
-        private const long ScreenHeight = 1080;
-
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
             if (Instance._binary.Architecture != BinaryArchitecture.x64)
@@ -44,10 +41,14 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
 
             long Now = Instance.EmulatedTickCount64;
+            // Screen bounds come from the shared SSOT (default 1920x1080, opt-in dynamic/host
+            // via BROVAN_SCREEN_RESOLUTION) so the cursor stays coherent with the reported
+            // monitor / device-caps metrics.
+            (int ScreenWidth, int ScreenHeight) = WinSysHelper.ScreenResolution();
             // Lissajous over two coprime-ish periods so the path never sits still and
             // never trivially repeats. X sweeps ~0.34 px/ms, Y ~0.25 px/ms — human pace.
-            long X = TriangleWave(Now, 9000, ScreenWidth / 10, ScreenWidth * 9 / 10);
-            long Y = TriangleWave(Now, 7000, ScreenHeight / 10, ScreenHeight * 9 / 10);
+            long X = TriangleWave(Now, 9000, ScreenWidth / 10, ScreenWidth * 9L / 10);
+            long Y = TriangleWave(Now, 7000, ScreenHeight / 10, ScreenHeight * 9L / 10);
 
             Instance._emulator.WriteMemory(Param1 + 0x00, (uint)X, 4);
             Instance._emulator.WriteMemory(Param1 + 0x04, (uint)Y, 4);
