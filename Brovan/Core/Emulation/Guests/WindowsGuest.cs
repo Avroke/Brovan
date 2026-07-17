@@ -1157,6 +1157,12 @@ namespace Brovan.Core.Emulation.Guests
             Dictionary<string, string> Env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
                 { "PROCESSOR_ARCHITECTURE", Instance._binary.Architecture == BinaryArchitecture.x64 ? "AMD64" : "x86" },
+                // W^X double-mapped executable memory (two VAs — one RX, one RW — sharing one
+                // backing) is not emulable under the single-address memory model; the .NET runtime
+                // uses it for JIT code by default. Tell any .NET guest to fall back to a single RWX
+                // code mapping (which Brovan runs correctly) so coreclr can JIT + execute. Ignored by
+                // non-.NET guests. See docs/DOTNET_NATIVE_CLR_EMULATION.md (F-WXMAP).
+                { "DOTNET_EnableWriteXorExecute", "0" },
                 { "OS", "Windows_NT" },
                 { "NUMBER_OF_PROCESSORS", "8" },
                 { "TEMP", @$"C:\Users\{Username}\AppData\Local\Temp" },

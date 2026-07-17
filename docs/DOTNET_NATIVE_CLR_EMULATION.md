@@ -305,8 +305,8 @@ Format volontairement calqué sur la table de progression d'`AL_KHASER_EMULATION
 | **J0 — Spike JIT** ✅ **FAIT (GO, jambe Unicorn)** | Prouver que le backend exécute du code écrit puis exécuté à l'exécution, avec bascule RW→RX. | **Fait** via `scripts/jit_spike_j0.py` sur Unicorn 2.1.4 : 5/5 tests JIT-critiques verts (§5.d). **Correctif pré-requis identifié** : `remove_cache` sur écritures hôte de code (§5.d). **Reste** : rejouer la jambe **KVM** sur un hôte `/dev/kvm`. |
 | **J1 — Provisioning** 🟡 **partiel** | Déposer le runtime cible dans `WindowsLibs` + framework dans le VFS ; résolution de chemins OK. | Le loader guest mappe `clr.dll`/`clrjit.dll` (ou `coreclr.dll`) sans `STATUS_DLL_NOT_FOUND` ; modules visibles dans la LDR list. **Mesuré (§8bis)** : Brovan **construit et tourne sur hôte Linux**, émule un PE natif de bout en bout ; mais le bundle deps ne contient **aucun runtime CLR** → à ajouter. Un publish **self-contained** (runtime app-local) est mappé et exécuté par l'apphost. |
 | **J2 — Bind d'entrée** ✅ **FAIT (.NET Core)** | .NET Framework : l'import `mscoree!_CorExeMain` bind. .NET Core : l'apphost natif résout son chemin et charge la chaîne host. | **Mesuré (§8bis.2)** : après le fix `NtQueryFullAttributesFile`, l'apphost self-contained résout `pal::realpath` puis charge **`hostfxr.dll` → `hostpolicy.dll` → `coreclr.dll`**. |
-| **J3 — Survie init CLR** 🟡 **profondément avancé, root cause suivante isolée** | Le CLR initialise GC/TLS/heaps sans faute non gérée. | **Mesuré (§8bis.2)** : blocage 2 To **corrigé** (réserve sparse) → l'init tourne **~28 M instructions** (×4,7). Root cause du fail-fast **`0xC0000005`** suivant **isolée** : le **double-mapping W^X** du code coreclr (2 vues RX+RW, base collapsée par Brovan). Contournement mesuré : `DOTNET_EnableWriteXorExecute=0` (→ chaîne W^X-off : gros reserve **corrigé**, puis page de garde de pile). |
-| **J4 — Première méthode JIT-ée** | `clrjit` compile et exécute au moins une méthode managée. | Bascule RW→RX observée + exécution du code produit ; RIP dans une page JIT. |
+| **J3 — Survie init CLR** ✅ **FAIT** | Le CLR initialise GC/TLS/heaps sans faute non gérée. | **Mesuré (§8bis.2-3)** : trois blocages corrigés — réserve GC 2 To (sparse), gros reserve VirtualAlloc (espace haut), **modèle de pile** (réserve+garde) — plus le contournement W^X (`DOTNET_EnableWriteXorExecute=0`). `coreclr_initialize` **réussit**. |
+| **J4 — Première méthode JIT-ée** ✅ **ATTEINT** | `clrjit` compile et exécute au moins une méthode managée. | **Mesuré (§8bis.3)** : **`clrjit.dll` + `System.Private.CoreLib.dll` chargés**, ~**116 M instructions** de code managé exécuté. Terminus : **exception managée** non gérée (`0xE0434352`) pendant le démarrage managé → frontière J5. |
 | **J5 — `Main()` managé** | Exécution du point d'entrée managé. | Effet de bord observable d'un `Console.WriteLine("...")` capté par `NtWriteFile`/console. |
 | **J6 — Terminaison propre** | Sortie via l'`ExitProcess` du CLR. | Statut de sortie honnête ; trace syscalls exploitable. |
 | **J7 — Robustesse** | Étendre au-delà du « hello world » (exceptions managées, threads, P/Invoke, réseau). | Un corpus de petits managés variés atteint J5/J6. |
@@ -474,6 +474,39 @@ poursuivre : dérouler la chaîne W^X-off, ou provisionner un runtime **.NET
 Framework** (chaîne plus courte, sans regions/double-map) pour un chemin J3-J5
 potentiellement plus direct.
 
+### 8bis.3 — Percée J3→J4 : modèle de pile fidèle → JIT chargé, code managé exécuté
+
+La chaîne W^X-off a été déroulée jusqu'à **J4**. Après le contournement W^X
+(`DOTNET_EnableWriteXorExecute=0`, intégré dans l'env guest) et le fix gros-reserve,
+la frontière **F-STACKGUARD** a été **corrigée** :
+
+**Root cause (mesurée).** Les diagnostics montrent que coreclr commit une garde de
+pile à `StackLimit - 0x5000` (ex. `0x1017B000`, juste sous la pile à `0x10180000`),
+et que `AllocateThreadStack` = `MapUniqueAddress` mappait la pile en **un seul bloc
+committé sans rien en dessous** ⇒ le commit de garde tombait sur du non-mappé.
+Appelants confirmés `clr!…` (mise en place de la garde de pile de coreclr).
+
+**Fix (livré).** `AllocateThreadStack` modélise la pile à la Windows :
+**réserve** `[base, base+taille+headroom)`, **commit** seulement la pile utile en
+haut, laissant un **headroom réservé** (1 MiB) sous `StackLimit`. Le commit de
+garde du guest passe alors par le chemin reserve→commit de `CommitMemory`. Gate :
+la pile utile vue par le guest est **inchangée** (RSP toujours dans
+`[StackLimit, StackBase)`), fallback sur l'ancien mapping si le placement échoue —
+**PE natif témoin identique** (non-régression vérifiée).
+
+**Résultat mesuré.** `coreclr_initialize` **réussit**, puis **`clrjit.dll` +
+`System.Private.CoreLib.dll` sont chargés** et **~116 M instructions** (×4 vs 28 M)
+de code managé JIT-é s'exécutent. **J3 franchi, J4 atteint.**
+
+**Nouvelle frontière J5 (managée).** Terminus : `RaiseException(0xE0434352)` =
+**exception managée .NET non gérée** pendant le démarrage managé (avant que
+`Main`/`Console.WriteLine` ne produise sa sortie). Syscalls non implémentés vus au
+passage : `NtOpenEvent` (SSN 0x40), `NtCreateNamedPipeFile` (SSN 0xB4, pipe de
+diagnostics coreclr) — candidats (souvent non-fatals côté coreclr), à confirmer.
+**Prochain pas** : identifier le type de l'exception managée (tracer l'objet de
+`RaiseException`, ou fournir les syscalls manquants et re-mesurer) pour atteindre
+**J5** (`Main` managé + sortie observable).
+
 ### Reproduction
 
 ```bash
@@ -575,18 +608,16 @@ n'est qu'une question de *quelle enveloppe de bootstrap* attaquer en premier.
   → collision → l'écriture tombe sur la page RX. Contournement propre mesuré :
   `DOTNET_EnableWriteXorExecute=0` (mapping unique RWX). Émuler le vrai aliasing
   2 VA/1 backing sous Unicorn est l'alternative lourde (§8bis.2).
-- **F-STACKGUARD — modèle de pile : entièrement-mappée vs réserve+garde (frontière
-  J4, mode W^X-off).** coreclr commit une garde (`PAGE_GUARD|PAGE_READWRITE`, 5
-  pages) à `0x1017B000` (adresse basse, dans un gap entre DLL) — `CommitMemory`
-  répond « no region ». **Root confirmé** : `AllocateThreadStack` = `MapUniqueAddress`,
-  donc Brovan mappe les piles **entièrement**, alors que Windows **réserve** la pile
-  et ne commit que le haut + une garde ; `TryHandleGuardPageViolation` sait *effacer*
-  une garde déjà committée mais **n'agrandit pas** la pile à la demande. coreclr, qui
-  gère lui-même sa garde de pile, commit dans la partie « réservée-non-committée »
-  qui n'existe pas chez Brovan. **Fix = modèle de pile fidèle** (réserve + commit du
-  haut + croissance sur faute) — changement substantiel touchant **toutes** les piles
-  (natif inclus), donc à faire prudemment. *(Appelant coreclr exact non confirmé — le
-  rip capturé est le stub syscall ntdll ; tracer l'adresse de retour au besoin.)*
+- **F-STACKGUARD — modèle de pile réserve+garde — ✅ RÉSOLU.** coreclr committait une
+  garde à `StackLimit - 0x5000` sur du non-mappé car `AllocateThreadStack` mappait la
+  pile en un seul bloc committé. Corrigé : `AllocateThreadStack` **réserve** la pile
+  + un headroom (1 MiB) et ne **commit** que le haut, laissant le bas réservé pour la
+  garde du guest (chemin reserve→commit de `CommitMemory`). Pile utile inchangée pour
+  le natif ; débloque le chargement de `clrjit` + l'exécution managée (§8bis.3).
+- **F-CLRMANAGED — exception managée non gérée au démarrage (frontière J5 active).**
+  Après J4, `RaiseException(0xE0434352)` (exception .NET) pendant le démarrage managé,
+  avant la sortie de `Main`. Cause à identifier ; syscalls non implémentés candidats :
+  `NtOpenEvent` (0x40), `NtCreateNamedPipeFile` (0xB4). Bloque J5 (§8bis.3).
 - **F-FRAMEWORK — surface BCL réelle.** Selon ce que l'assembly touche, le CLR
   charge de plus en plus d'assemblies système ⇒ plus de fichiers VFS + plus de
   syscalls. La couverture croît avec le corpus, pas d'un coup.

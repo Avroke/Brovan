@@ -1851,8 +1851,40 @@ namespace Brovan.Core.Emulation
             StopAfterSyntheticInstruction(IP + 3);
         }
 
+        // Growth/guard headroom mapped BELOW StackLimit for every thread stack. Windows reserves a
+        // stack larger than its committed part and lets the owner place a PAGE_GUARD page just below
+        // StackLimit (the low watermark) to catch/grow on overflow; the .NET runtime manages exactly
+        // such a guard during init (coreclr Thread stack setup commits a guard at StackLimit - a few
+        // pages). Brovan otherwise maps a stack as one fully-committed block with nothing below, so
+        // that guard commit lands on unmapped space and fails. Committing a modest headroom below the
+        // usable stack makes the guard commit succeed with no change to the usable stack seen by
+        // native guests (their RSP still lives in [StackLimit, StackBase) exactly as before).
+        private const ulong ThreadStackGuardHeadroom = 0x00100000UL; // 1 MiB
+
         internal ulong AllocateThreadStack(ulong StackSize)
         {
+            ulong Total = AlignToPageSize(StackSize + ThreadStackGuardHeadroom);
+
+            // Model the stack the Windows way: RESERVE the whole [base, base+Total) range, then COMMIT
+            // only the usable stack at the top, leaving the lower headroom reserved-but-uncommitted so
+            // a guest (coreclr) can commit its own PAGE_GUARD page just below StackLimit. Using the
+            // reserve->commit path (instead of MapUniqueAddress, whose regions are not flagged
+            // reserved/committed) is what lets CommitMemory accept that guard-page commit.
+            const uint PageReadWrite = 0x04;
+            ulong Candidate = AlignToPageSize(BaseAddress);
+            for (int Guard = 0; Guard < 0x200000 && Candidate + Total < MaxAddress; Guard++)
+            {
+                if (!IsRegionInUse(Candidate, Total) && ReserveMemory(Candidate, Total, PageReadWrite))
+                {
+                    ulong StackLimit = Candidate + ThreadStackGuardHeadroom;
+                    if (CommitMemory(StackLimit, StackSize, PageReadWrite))
+                        return StackLimit;
+                    break; // reserved but couldn't commit — fall back
+                }
+                Candidate = AlignToPageSize(Candidate + Total);
+            }
+
+            // Fallback: legacy fully-mapped stack (no headroom) if the reserve+commit path can't place it.
             return MapUniqueAddress(StackSize, MemoryProtection.ReadWrite);
         }
 
