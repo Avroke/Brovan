@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -39,10 +40,18 @@ namespace Brovan.Core.Emulation
         private readonly List<int> _freeSlotIds = new();
         private readonly Dictionary<ulong, InstalledSlot> _activeSlots = new();
 
-        private readonly SortedDictionary<ulong, MappedPage> _mappedPages = new();
+        private readonly Dictionary<ulong, MappedPage> _mappedPages = new();
         private readonly Dictionary<IntPtr, BackingAllocation> _backingAllocations = new();
         private readonly HashSet<ulong> _trappedPages = new();
         private readonly Dictionary<ulong, IntPtr> _pageTableViews = new();
+
+        private ulong[] _sortedPageKeys = Array.Empty<ulong>();
+        private bool _sortedPageKeysDirty = true;
+        private bool _mappingsDirty;
+        private ulong _lastLookupPageBase = ulong.MaxValue;
+        private MappedPage _lastLookupPage;
+        private readonly Dictionary<ulong, InstalledSlot> _desiredSlots = new();
+        private readonly List<ulong> _staleSlotKeys = new();
         private ulong _pml4Gpa;
         private ulong _nextInternalGpa = KvmConstants.InternalPageTableBase;
 
@@ -75,6 +84,15 @@ namespace Brovan.Core.Emulation
         private readonly List<InterruptHookEntry> _interruptHooks = new();
         private readonly List<IntPtr> _liveHookHandles = new();
 
+        private bool _hasCpuIdHook;
+        private bool _hasRdtscHook;
+        private bool _hasRdtscpHook;
+        private bool _hasInvalidHook;
+        private bool _scanPreRunInstructions;
+
+        private static readonly long MmioRefreshIntervalTicks = Stopwatch.Frequency / 4000;
+        private long _lastMmioRefreshTimestamp;
+
         private int _disposed;
         private int _disposing;
         private volatile bool _stopRequested;
@@ -102,7 +120,7 @@ namespace Brovan.Core.Emulation
             public int LivePages;
         }
 
-        private sealed class InstalledSlot
+        private struct InstalledSlot
         {
             public int Id;
             public ulong Size;
@@ -144,12 +162,14 @@ namespace Brovan.Core.Emulation
             R8, R9, R10, R11, R12, R13, R14, R15, Rflags
         }
 
-        private sealed class GpRegisterAccess
+        private struct GpRegisterAccess
         {
             public GpRegisterName Name;
-            public int Offset;
-            public int Width = sizeof(ulong);
+            public byte Offset;
+            public byte Width;
             public bool ZeroExtend32;
+
+            public readonly bool IsValid => Width != 0;
         }
 
         public Kvm(Arch arch, Mode mode)
@@ -166,6 +186,7 @@ namespace Brovan.Core.Emulation
             InitializeVirtualProcessorState();
             InitializeSyscallTrapPage();
             InitializeExceptionHandling();
+            RebuildMappings();
             FlushRegisterCache();
         }
 
@@ -212,7 +233,7 @@ namespace Brovan.Core.Emulation
                         OwnedBacking = backing,
                         Permissions = perm,
                     };
-                    _mappedPages[guest] = page;
+                    SetMappedPage(guest, page);
                     EnsureVirtualMapping(guest);
                 }
 
@@ -227,7 +248,7 @@ namespace Brovan.Core.Emulation
                 if (!_mappedPages.TryGetValue(guest, out MappedPage page))
                 {
                     page = new MappedPage();
-                    _mappedPages[guest] = page;
+                    SetMappedPage(guest, page);
                 }
 
                 if (page.HostPage == IntPtr.Zero)
@@ -267,7 +288,7 @@ namespace Brovan.Core.Emulation
                 if (_mappedPages.TryGetValue(guest, out MappedPage page))
                 {
                     ReleaseBacking(page);
-                    _mappedPages.Remove(guest);
+                    RemoveMappedPage(guest);
                 }
             }
 
@@ -287,7 +308,7 @@ namespace Brovan.Core.Emulation
         {
             if (DisposedCheck()) return false;
 
-            if (write == null || write == null ||
+            if (read == null || write == null ||
                 (address & KvmConstants.PageMask) != 0 || (size & KvmConstants.PageMask) != 0 || size == 0)
             {
                 _error = KvmErrors.InvalidArgument;
@@ -598,18 +619,14 @@ namespace Brovan.Core.Emulation
                 int bytesRead;
                 if (encoding == Encoding.Unicode || encoding == Encoding.BigEndianUnicode)
                 {
-                    bytesRead = 0;
-                    for (int i = 0; i + 1 < length; i += 2)
-                    {
-                        if (buffer[i] == 0x00 && buffer[i + 1] == 0x00) break;
-                        bytesRead += 2;
-                    }
+                    ReadOnlySpan<char> units = MemoryMarshal.Cast<byte, char>(buffer.AsSpan(0, length & ~1));
+                    int terminator = units.IndexOf('\0');
+                    bytesRead = (terminator >= 0 ? terminator : units.Length) * 2;
                     if (bytesRead == 0) return string.Empty;
-                    if ((bytesRead & 1) != 0) bytesRead--;
                 }
                 else
                 {
-                    int terminatorIndex = Array.IndexOf(buffer, (byte)0, 0, length);
+                    int terminatorIndex = buffer.AsSpan(0, length).IndexOf((byte)0);
                     bytesRead = terminatorIndex >= 0 ? terminatorIndex : length;
                     if (bytesRead == 0) return string.Empty;
                 }
@@ -633,16 +650,15 @@ namespace Brovan.Core.Emulation
             }
 
             GpRegisterAccess access = ClassifyGpRegister(register);
-            if (access == null)
+            if (!access.IsValid)
             {
                 _error = KvmErrors.InvalidArgument;
                 return false;
             }
 
-            LinuxKvmRegisters regs = GetRegisters();
-            ref ulong target = ref GetGpRegisterPointer(ref regs, access.Name);
+            ref ulong target = ref GetGpRegisterPointer(ref GetRegistersRef(), access.Name);
             target = WriteGpRegisterField(target, access, value);
-            SetRegisters(regs);
+            _regsDirty = true;
             _error = KvmErrors.Ok;
             return true;
         }
@@ -654,12 +670,11 @@ namespace Brovan.Core.Emulation
             if (DisposedCheck()) return false;
 
             GpRegisterAccess access = ClassifyGpRegister(register);
-            if (access == null) { _error = KvmErrors.InvalidArgument; return false; }
+            if (!access.IsValid) { _error = KvmErrors.InvalidArgument; return false; }
 
-            LinuxKvmRegisters regs = GetRegisters();
-            ref ulong target = ref GetGpRegisterPointer(ref regs, access.Name);
+            ref ulong target = ref GetGpRegisterPointer(ref GetRegistersRef(), access.Name);
             target = access.ZeroExtend32 ? value : WriteGpRegisterField(target, access, value);
-            SetRegisters(regs);
+            _regsDirty = true;
             _error = KvmErrors.Ok;
             return true;
         }
@@ -671,13 +686,12 @@ namespace Brovan.Core.Emulation
             if (DisposedCheck()) return false;
 
             GpRegisterAccess access = ClassifyGpRegister(register);
-            if (access == null) { _error = KvmErrors.InvalidArgument; return false; }
+            if (!access.IsValid) { _error = KvmErrors.InvalidArgument; return false; }
 
-            LinuxKvmRegisters regs = GetRegisters();
-            ref ulong target = ref GetGpRegisterPointer(ref regs, access.Name);
+            ref ulong target = ref GetGpRegisterPointer(ref GetRegistersRef(), access.Name);
             int shift = access.Offset * 8;
             target = (target & ~(0xFFUL << shift)) | ((ulong)value << shift);
-            SetRegisters(regs);
+            _regsDirty = true;
             _error = KvmErrors.Ok;
             return true;
         }
@@ -710,13 +724,12 @@ namespace Brovan.Core.Emulation
             }
 
             GpRegisterAccess access = ClassifyGpRegister(register);
-            if (access == null) { _error = KvmErrors.InvalidArgument; return 0; }
+            if (!access.IsValid) { _error = KvmErrors.InvalidArgument; return 0; }
 
-            LinuxKvmRegisters regs = GetRegisters();
-            ulong value = GetGpRegisterPointer(ref regs, access.Name);
+            ulong value = GetGpRegisterPointer(ref GetRegistersRef(), access.Name);
             _error = KvmErrors.Ok;
-            int shiftBits = (int)access.Offset * 8;
-            int widthBits = (int)access.Width * 8;
+            int shiftBits = access.Offset * 8;
+            int widthBits = access.Width * 8;
             if (widthBits >= sizeof(ulong) * 8) return value >> shiftBits;
             return (value >> shiftBits) & ((1UL << widthBits) - 1);
         }
@@ -734,11 +747,12 @@ namespace Brovan.Core.Emulation
         {
             if (DisposedCheck()) return false;
 
+            if (_mappingsDirty) RebuildMappings();
+
             ClearTrapFlag();
 
-            LinuxKvmRegisters regs = GetRegisters();
-            regs.Rip = start;
-            SetRegisters(regs);
+            GetRegistersRef().Rip = start;
+            _regsDirty = true;
 
             FlushRegisterCache();
             _stopRequested = false;
@@ -748,9 +762,8 @@ namespace Brovan.Core.Emulation
 
             if (_singleStepRequested)
             {
-                regs = GetRegisters();
-                regs.Rflags |= 0x100UL;
-                SetRegisters(regs);
+                GetRegistersRef().Rflags |= 0x100UL;
+                _regsDirty = true;
                 FlushRegisterCache();
             }
 
@@ -776,14 +789,18 @@ namespace Brovan.Core.Emulation
                     {
                         int errno = Marshal.GetLastWin32Error();
                         if (errno == KvmNative.ErrnoEintr)
+                        {
+                            // KVM never clears immediate_exit; leaving it set makes every further
+                            // KVM_RUN return -EINTR immediately and spins the loop forever.
+                            if (!_stopRequested) run.ImmediateExit = 0;
                             continue;
+                        }
 
                         _error = KvmErrors.InternalError;
                         throw new KvmException("KVM_RUN failed", errno);
                     }
 
                     run = ref GetRunRef();
-
                     switch (run.ExitReason)
                     {
                         case KvmConstants.ExitHlt:
@@ -816,6 +833,7 @@ namespace Brovan.Core.Emulation
                             return true;
                         case KvmConstants.ExitIntr:
                             if (_stopRequested) { _error = KvmErrors.Ok; return true; }
+                            run.ImmediateExit = 0;
                             continue;
                         case KvmConstants.ExitShutdown:
                             _error = KvmErrors.Exception;
@@ -960,6 +978,7 @@ namespace Brovan.Core.Emulation
             else
             {
                 _instructionHooks.Add(entry);
+                RefreshInstructionHookFlags();
             }
             return PinHookEntry(entry);
         }
@@ -968,14 +987,10 @@ namespace Brovan.Core.Emulation
         {
             if (callback == null) return IntPtr.Zero;
             if (DisposedCheck()) return IntPtr.Zero;
-            if (NoHooks && instruction != BackendInstructionHook.Invalid)
-            {
-                _error = KvmErrors.Ok;
-                return IntPtr.Zero;
-            }
 
             InstructionHookEntry entry = new InstructionHookEntry { Type = instruction, BoolCallback = callback };
             _instructionHooks.Add(entry);
+            RefreshInstructionHookFlags();
             return PinHookEntry(entry);
         }
 
@@ -1000,6 +1015,7 @@ namespace Brovan.Core.Emulation
                     case InstructionHookEntry ins:
                         _instructionHooks.Remove(ins);
                         if (ReferenceEquals(_syscallHook, ins)) _syscallHook = null;
+                        RefreshInstructionHookFlags();
                         break;
                 }
 
@@ -1020,6 +1036,7 @@ namespace Brovan.Core.Emulation
             _instructionHooks.Clear();
             _interruptHooks.Clear();
             _syscallHook = null;
+            RefreshInstructionHookFlags();
 
             if (_trappedPages.Count > 0 && !Disposing)
                 RefreshTrappedPages();
@@ -1038,7 +1055,7 @@ namespace Brovan.Core.Emulation
             while (remaining > 0)
             {
                 ulong pageBase = current & ~KvmConstants.PageMask;
-                if (!_mappedPages.TryGetValue(pageBase, out MappedPage page) || page == null || page.HostPage == IntPtr.Zero)
+                if (!TryLookupPage(pageBase, out _))
                     return false;
                 ulong pageEnd = pageBase + KvmConstants.PageSize;
                 ulong chunk = pageEnd - current;
@@ -1067,6 +1084,8 @@ namespace Brovan.Core.Emulation
                     FreeBackingMemory(kv.Key, kv.Value.Size);
                 _backingAllocations.Clear();
                 _mappedPages.Clear();
+                _lastLookupPageBase = ulong.MaxValue;
+                _lastLookupPage = null;
 
                 if (_internalPoolPtr != IntPtr.Zero)
                 {
@@ -1147,10 +1166,10 @@ namespace Brovan.Core.Emulation
 
         private void ClearTrapFlag()
         {
-            LinuxKvmRegisters regs = GetRegisters();
+            ref LinuxKvmRegisters regs = ref GetRegistersRef();
             if ((regs.Rflags & 0x100UL) == 0) return;
             regs.Rflags &= ~0x100UL;
-            SetRegisters(regs);
+            _regsDirty = true;
             FlushRegisterCache();
         }
 
@@ -1485,14 +1504,13 @@ namespace Brovan.Core.Emulation
                     OwnedBacking = IntPtr.Zero,
                     Permissions = permissions,
                 };
-                _mappedPages[pageGpa] = page;
+                SetMappedPage(pageGpa, page);
                 _pageTableViews[pageGpa] = page.HostPage;
 
                 if (mapIntoGuest)
                     EnsureVirtualMapping(pageGpa);
             }
 
-            RebuildMappings();
             return baseGpa;
         }
 
@@ -1540,22 +1558,76 @@ namespace Brovan.Core.Emulation
             }
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private bool TryLookupPage(ulong pageBase, out MappedPage page)
+        {
+            if (pageBase == _lastLookupPageBase)
+            {
+                page = _lastLookupPage;
+                return true;
+            }
+
+            if (_mappedPages.TryGetValue(pageBase, out page) && page != null && page.HostPage != IntPtr.Zero)
+            {
+                _lastLookupPageBase = pageBase;
+                _lastLookupPage = page;
+                return true;
+            }
+
+            page = null;
+            return false;
+        }
+
+        private void SetMappedPage(ulong guestAddress, MappedPage page)
+        {
+            _mappedPages[guestAddress] = page;
+            _sortedPageKeysDirty = true;
+            _mappingsDirty = true;
+            _lastLookupPageBase = ulong.MaxValue;
+            _lastLookupPage = null;
+        }
+
+        private void RemoveMappedPage(ulong guestAddress)
+        {
+            if (!_mappedPages.Remove(guestAddress)) return;
+            _sortedPageKeysDirty = true;
+            _mappingsDirty = true;
+            _lastLookupPageBase = ulong.MaxValue;
+            _lastLookupPage = null;
+        }
+
+        private ulong[] GetSortedPageKeys()
+        {
+            if (!_sortedPageKeysDirty) return _sortedPageKeys;
+
+            int count = _mappedPages.Count;
+            if (_sortedPageKeys.Length < count)
+                _sortedPageKeys = new ulong[Math.Max(count, _sortedPageKeys.Length * 2)];
+
+            _mappedPages.Keys.CopyTo(_sortedPageKeys, 0);
+            Array.Sort(_sortedPageKeys, 0, count);
+            _sortedPageKeysDirty = false;
+            return _sortedPageKeys;
+        }
+
         private void RebuildMappings()
         {
+            _mappingsDirty = false;
 
-            Dictionary<ulong, InstalledSlot> desired = new Dictionary<ulong, InstalledSlot>();
+            ulong[] sortedKeys = GetSortedPageKeys();
+            int keyCount = _mappedPages.Count;
+            bool anyTrapped = _trappedPages.Count != 0;
 
-            ulong[] sortedKeys = new ulong[_mappedPages.Count];
-            _mappedPages.Keys.CopyTo(sortedKeys, 0);
+            _desiredSlots.Clear();
 
-            for (int i = 0; i < sortedKeys.Length;)
+            for (int i = 0; i < keyCount;)
             {
                 ulong runAddress = sortedKeys[i];
                 if (!_mappedPages.TryGetValue(runAddress, out MappedPage page)
                     || page == null
                     || page.HostPage == IntPtr.Zero
                     || page.Permissions == KvmMemoryPermission.None
-                    || _trappedPages.Contains(runAddress))
+                    || (anyTrapped && _trappedPages.Contains(runAddress)))
                 {
                     i++;
                     continue;
@@ -1566,19 +1638,18 @@ namespace Brovan.Core.Emulation
                 ulong runSize = KvmConstants.PageSize;
 
                 int j = i + 1;
-                while (j < sortedKeys.Length)
+                while (j < keyCount)
                 {
+                    if (sortedKeys[j] != runAddress + runSize) break;
                     if (!_mappedPages.TryGetValue(sortedKeys[j], out MappedPage next) || next == null) break;
                     if (next.Permissions != page.Permissions) break;
-                    if (sortedKeys[j] != runAddress + runSize) break;
-                    if (_trappedPages.Contains(sortedKeys[j])) break;
-                    long nextHostLong = next.HostPage.ToInt64();
-                    if (nextHostLong != runHostBaseLong + (long)runSize) break;
+                    if (anyTrapped && _trappedPages.Contains(sortedKeys[j])) break;
+                    if (next.HostPage.ToInt64() != runHostBaseLong + (long)runSize) break;
                     runSize += KvmConstants.PageSize;
                     j++;
                 }
 
-                desired[runAddress] = new InstalledSlot
+                _desiredSlots[runAddress] = new InstalledSlot
                 {
                     Size = runSize,
                     Host = new IntPtr(runHostBaseLong),
@@ -1587,25 +1658,26 @@ namespace Brovan.Core.Emulation
                 i = j;
             }
 
-            List<ulong> toRemove = new List<ulong>();
+            _staleSlotKeys.Clear();
             foreach (KeyValuePair<ulong, InstalledSlot> kv in _activeSlots)
             {
-                if (!desired.TryGetValue(kv.Key, out InstalledSlot want)
+                if (!_desiredSlots.TryGetValue(kv.Key, out InstalledSlot want)
                     || want.Size != kv.Value.Size
                     || want.Host != kv.Value.Host
                     || want.Flags != kv.Value.Flags)
                 {
                     DeleteMemslot(kv.Value.Id);
-                    toRemove.Add(kv.Key);
+                    _staleSlotKeys.Add(kv.Key);
                 }
                 else
                 {
-                    desired.Remove(kv.Key);
+                    _desiredSlots.Remove(kv.Key);
                 }
             }
-            foreach (ulong k in toRemove) _activeSlots.Remove(k);
+            for (int i = 0; i < _staleSlotKeys.Count; i++)
+                _activeSlots.Remove(_staleSlotKeys[i]);
 
-            foreach (KeyValuePair<ulong, InstalledSlot> kv in desired)
+            foreach (KeyValuePair<ulong, InstalledSlot> kv in _desiredSlots)
             {
                 int slot = AllocateSlotId();
                 SetMemslot(slot, kv.Key, kv.Value.Size, kv.Value.Host, kv.Value.Flags);
@@ -1659,6 +1731,12 @@ namespace Brovan.Core.Emulation
 
         private void RefreshMmioBackedRegions()
         {
+            if (_mmioRegions.Count == 0) return;
+
+            long now = Stopwatch.GetTimestamp();
+            if (now - _lastMmioRefreshTimestamp < MmioRefreshIntervalTicks) return;
+            _lastMmioRefreshTimestamp = now;
+
             for (int i = 0; i < _mmioRegions.Count; i++)
                 RefreshMmioRegion(_mmioRegions[i]);
         }
@@ -1679,19 +1757,44 @@ namespace Brovan.Core.Emulation
 
         private bool HandlePreRunInstruction()
         {
+            if (!_scanPreRunInstructions) return false;
+
             ulong rip = ReadRegister(Registers.UC_X86_REG_RIP);
             Span<byte> opcode = stackalloc byte[3];
             if (!TryReadMemoryInternal(rip, opcode)) return false;
 
-            if (opcode[0] == 0x0F && opcode[1] == 0xA2)
+            if (opcode[0] != 0x0F) return false;
+
+            if (_hasCpuIdHook && opcode[1] == 0xA2)
                 return HandleInstructionHook(BackendInstructionHook.CpuId, 2);
-            if (opcode[0] == 0x0F && opcode[1] == 0x31)
+            if (_hasRdtscHook && opcode[1] == 0x31)
                 return HandleInstructionHook(BackendInstructionHook.Rdtsc, 2);
-            if (opcode[0] == 0x0F && opcode[1] == 0x01 && opcode[2] == 0xF9)
+            if (_hasRdtscpHook && opcode[1] == 0x01 && opcode[2] == 0xF9)
                 return HandleInstructionHook(BackendInstructionHook.Rdtscp, 3);
-            if (opcode[0] == 0x0F && opcode[1] == 0x0B)
+            if (_hasInvalidHook && opcode[1] == 0x0B)
                 return HandleInvalidInstructionHook();
             return false;
+        }
+
+        private void RefreshInstructionHookFlags()
+        {
+            _hasCpuIdHook = false;
+            _hasRdtscHook = false;
+            _hasRdtscpHook = false;
+            _hasInvalidHook = false;
+
+            for (int i = 0; i < _instructionHooks.Count; i++)
+            {
+                switch (_instructionHooks[i].Type)
+                {
+                    case BackendInstructionHook.CpuId: _hasCpuIdHook = true; break;
+                    case BackendInstructionHook.Rdtsc: _hasRdtscHook = true; break;
+                    case BackendInstructionHook.Rdtscp: _hasRdtscpHook = true; break;
+                    case BackendInstructionHook.Invalid: _hasInvalidHook = true; break;
+                }
+            }
+
+            _scanPreRunInstructions = _hasCpuIdHook || _hasRdtscHook || _hasRdtscpHook || _hasInvalidHook;
         }
 
         private unsafe bool TryReadMemoryInternal(ulong address, Span<byte> buffer)
@@ -1703,7 +1806,7 @@ namespace Brovan.Core.Emulation
             while (remaining > 0)
             {
                 ulong pageBase = current & ~KvmConstants.PageMask;
-                if (!_mappedPages.TryGetValue(pageBase, out MappedPage page) || page == null || page.HostPage == IntPtr.Zero)
+                if (!TryLookupPage(pageBase, out MappedPage page))
                     return false;
 
                 ulong pageOffset = current - pageBase;
@@ -1729,7 +1832,7 @@ namespace Brovan.Core.Emulation
             while (remaining > 0)
             {
                 ulong pageBase = current & ~KvmConstants.PageMask;
-                if (!_mappedPages.TryGetValue(pageBase, out MappedPage page) || page == null || page.HostPage == IntPtr.Zero)
+                if (!TryLookupPage(pageBase, out MappedPage page))
                     return false;
 
                 ulong pageOffset = current - pageBase;
@@ -1770,7 +1873,6 @@ namespace Brovan.Core.Emulation
                 }
             }
             FlushRegisterCache();
-            InvalidateRegisterCache();
 
             if (handled && skip)
             {
@@ -1796,7 +1898,6 @@ namespace Brovan.Core.Emulation
                 else if (entry.BoolCallback != null) { if (entry.BoolCallback()) consumed = true; }
             }
             FlushRegisterCache();
-            InvalidateRegisterCache();
 
             if (consumed && ReadRegister(Registers.UC_X86_REG_RIP) == rip)
                 AdvanceRip(2);
@@ -1970,7 +2071,6 @@ namespace Brovan.Core.Emulation
                 }
 
                 FlushRegisterCache();
-                InvalidateRegisterCache();
                 return false;
             }
 
@@ -1979,7 +2079,6 @@ namespace Brovan.Core.Emulation
                 _interruptHooks[i].Callback(exception);
 
             FlushRegisterCache();
-            InvalidateRegisterCache();
             return false;
         }
 
@@ -2003,19 +2102,22 @@ namespace Brovan.Core.Emulation
 
             if (ExceptionHasErrorCode(vector))
             {
-                byte[] ecBytes = ReadMemory(frameAddress, sizeof(ulong));
-                if (ecBytes.Length == 8) errorCode = BitConverter.ToUInt64(ecBytes, 0);
+                Span<byte> ecBytes = stackalloc byte[sizeof(ulong)];
+                ecBytes.Clear();
+                TryReadMemoryInternal(frameAddress, ecBytes);
+                errorCode = BitConverter.ToUInt64(ecBytes);
                 frameAddress += sizeof(ulong);
             }
 
-            byte[] frameBytes = ReadMemory(frameAddress, 40);
-            if (frameBytes.Length != 40) return;
+            Span<byte> frameBytes = stackalloc byte[40];
+            frameBytes.Clear();
+            TryReadMemoryInternal(frameAddress, frameBytes);
 
-            ulong frameRip = BitConverter.ToUInt64(frameBytes, 0);
-            ulong frameCs = BitConverter.ToUInt64(frameBytes, 8);
-            ulong frameRflags = BitConverter.ToUInt64(frameBytes, 16);
-            ulong frameRsp = BitConverter.ToUInt64(frameBytes, 24);
-            ulong frameSs = BitConverter.ToUInt64(frameBytes, 32);
+            ulong frameRip = BitConverter.ToUInt64(frameBytes);
+            ulong frameCs = BitConverter.ToUInt64(frameBytes.Slice(8));
+            ulong frameRflags = BitConverter.ToUInt64(frameBytes.Slice(16));
+            ulong frameRsp = BitConverter.ToUInt64(frameBytes.Slice(24));
+            ulong frameSs = BitConverter.ToUInt64(frameBytes.Slice(32));
 
             regs.Rip = frameRip;
             if (vector == 3) regs.Rip -= 1;
@@ -2091,7 +2193,6 @@ namespace Brovan.Core.Emulation
             else if (_syscallHook.BoolCallback != null) _syscallHook.BoolCallback();
 
             FlushRegisterCache();
-            InvalidateRegisterCache();
 
             regs = GetRegisters();
             if (regs.Rip == preSyscallRip)
@@ -2109,9 +2210,8 @@ namespace Brovan.Core.Emulation
 
         private void AdvanceRip(ulong amount)
         {
-            LinuxKvmRegisters regs = GetRegisters();
-            regs.Rip += amount;
-            SetRegisters(regs);
+            GetRegistersRef().Rip += amount;
+            _regsDirty = true;
         }
 
         private ulong GetMsr(uint msr)
@@ -2143,20 +2243,21 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        private LinuxKvmRegisters GetRegisters()
+        private ref LinuxKvmRegisters GetRegistersRef()
         {
-            lock (_vcpuLock)
+            if (!_regsValid)
             {
-                if (_regsValid) return _regsCache;
-
-                LinuxKvmRegisters r = new LinuxKvmRegisters();
-                if (KvmNative.ioctl(_vcpuFd, KvmConstants.KvmIoGetRegisters, ref r) < 0)
-                    throw new KvmException("KVM_GET_REGS failed", Marshal.GetLastWin32Error());
-                _regsCache = r;
+                lock (_vcpuLock)
+                {
+                    if (KvmNative.ioctl(_vcpuFd, KvmConstants.KvmIoGetRegisters, ref _regsCache) < 0)
+                        throw new KvmException("KVM_GET_REGS failed", Marshal.GetLastWin32Error());
+                }
                 _regsValid = true;
-                return r;
             }
+            return ref _regsCache;
         }
+
+        private LinuxKvmRegisters GetRegisters() => GetRegistersRef();
 
         private void SetRegisters(LinuxKvmRegisters regs)
         {
@@ -2168,20 +2269,21 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        private LinuxKvmSpecialRegisters GetSpecialRegisters()
+        private ref LinuxKvmSpecialRegisters GetSpecialRegistersRef()
         {
-            lock (_vcpuLock)
+            if (!_sregsValid)
             {
-                if (_sregsValid) return _sregsCache;
-
-                LinuxKvmSpecialRegisters s = new LinuxKvmSpecialRegisters();
-                if (KvmNative.ioctl(_vcpuFd, KvmConstants.KvmIoGetSpecialRegisters, ref s) < 0)
-                    throw new KvmException("KVM_GET_SREGS failed", Marshal.GetLastWin32Error());
-                _sregsCache = s;
+                lock (_vcpuLock)
+                {
+                    if (KvmNative.ioctl(_vcpuFd, KvmConstants.KvmIoGetSpecialRegisters, ref _sregsCache) < 0)
+                        throw new KvmException("KVM_GET_SREGS failed", Marshal.GetLastWin32Error());
+                }
                 _sregsValid = true;
-                return s;
             }
+            return ref _sregsCache;
         }
+
+        private LinuxKvmSpecialRegisters GetSpecialRegisters() => GetSpecialRegistersRef();
 
         private void SetSpecialRegisters(LinuxKvmSpecialRegisters sregs)
         {
@@ -2299,9 +2401,8 @@ namespace Brovan.Core.Emulation
 
             if (!IsSregRegister(register)) return false;
 
-            LinuxKvmSpecialRegisters s = GetSpecialRegisters();
-            if (!TryApplySregWrite(ref s, register, value)) return false;
-            SetSpecialRegisters(s);
+            if (!TryApplySregWrite(ref GetSpecialRegistersRef(), register, value)) return false;
+            _sregsDirty = true;
             return true;
         }
 
@@ -2319,8 +2420,7 @@ namespace Brovan.Core.Emulation
                 return false;
             }
 
-            LinuxKvmSpecialRegisters s = GetSpecialRegisters();
-            return TryApplySregRead(ref s, register, out value);
+            return TryApplySregRead(ref GetSpecialRegistersRef(), register, out value);
         }
 
         private static bool IsSregRegister(Registers register) => register switch
@@ -2506,7 +2606,7 @@ namespace Brovan.Core.Emulation
                 case Registers.UC_X86_REG_FLAGS:
                 case Registers.UC_X86_REG_EFLAGS:
                 case Registers.UC_X86_REG_RFLAGS: return new GpRegisterAccess { Name = GpRegisterName.Rflags, Offset = 0, Width = sizeof(ulong) };
-                default: return null;
+                default: return default;
             }
         }
 
@@ -2517,7 +2617,7 @@ namespace Brovan.Core.Emulation
             if (accessSize <= 0) return false;
 
             ulong pageBase = address & ~KvmConstants.PageMask;
-            if (!_mappedPages.TryGetValue(pageBase, out MappedPage page) || page == null || page.HostPage == IntPtr.Zero)
+            if (!TryLookupPage(pageBase, out MappedPage page))
                 return false;
 
             ulong accessEnd = address + (ulong)accessSize;
