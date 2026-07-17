@@ -1491,7 +1491,18 @@ namespace Brovan.Core.Emulation.Guests
             static byte[] Wz(string s) => Encoding.Unicode.GetBytes(s + "\0");
 
             byte[] EnvBlock = BuildEnvironment(Instance, out ulong envSize);
-            ulong HeaderSize = 0x2A0;
+            // Full fixed size of the 32-bit RTL_USER_PROCESS_PARAMETERS header. It must cover EVERY trailing
+            // field — RedirectionDllName@0x2A4, HeapPartitionName@0x2AC, DefaultThreadpoolCpuSetMasks@0x2B4,
+            // DefaultThreadpoolThreadMaximum@0x2BC, HeapMemoryTypeMask@0x2C0 (through ~0x2C4 on current builds) —
+            // so the zero-fill below leaves them all NULL (their correct default) and the inline string buffers
+            // that follow don't overwrite them. Previously 0x2A0, which stopped short of HeapPartitionName: the
+            // CurrentDirectory buffer (written at HeaderSize) bled a path string into HeapPartitionName.Buffer
+            // (0x2B0). ntdll's RtlpHpShouldEnableSegmentHeap reads a non-NULL HeapPartitionName.Buffer as "this
+            // process was launched into a memory partition" and switches the process heap to the segment heap —
+            // whose RtlpHpVs free-chunk RB-tree then FAST_FAIL_INVALID_BALANCED_TREE'd during heap init. A classic
+            // 32-bit process has an empty HeapPartitionName and uses the NT heap; sizing the header correctly
+            // restores that. 0x300 gives margin beyond the last known field and keeps the 16-byte alignment.
+            ulong HeaderSize = 0x300;
             ulong TotalSize = HeaderSize + (ulong)Wz(CurrentDir).Length + (ulong)Wz(ImagePath).Length + (ulong)Wz(CommandLine).Length + (ulong)Wz(WindowTitle).Length + (ulong)Wz(DesktopInfo).Length + envSize;
             TotalSize = BinaryEmulator.AlignUp(TotalSize, 0x10);
 
