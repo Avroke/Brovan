@@ -162,34 +162,90 @@ C'est le risque central de la Voie A. Le JIT écrit des octets x86-64 dans une
 page, puis les exécute. Trois sous-problèmes :
 
 1. **Code auto-modifiant (SMC).** Après que le JIT a écrit du code, le backend
-   doit ne pas exécuter une traduction périmée. **Unicorn/TCG invalide
-   nativement les translation blocks** quand une page traduite est écrite (SMC
-   supporté par QEMU) — donc le chemin JIT est exécutable *en principe* sans
-   plomberie nouvelle. `UnicornBinding/Unicorn.cs` expose déjà `FlushTlb`
-   (`UC_CTL_TLB_FLUSH`, l.1278) et le dimensionnement du buffer TCG
-   (`UC_CTL_TCG_BUFFER_SIZE`, l.1307). **À valider tôt** par un spike (cf.
-   Jalon 0) : une génération JIT massive peut provoquer un *churn* de
-   retraduction coûteux ; mesurer, et augmenter le buffer TCG si besoin.
-   Backend **KVM** : SMC natif (vrai matériel), pas de souci de cache.
+   doit ne pas exécuter une traduction périmée. **Mesuré au spike J0 (§5.d) :**
+   Unicorn/TCG invalide correctement les translation blocks pour les écritures
+   **pilotées par le guest** (le cas du JIT : le compilateur JIT s'exécute comme
+   du code guest qui écrit dans le tas de code puis y saute) — validé par T2 +
+   T3b. **Exception mesurée** : une écriture **côté hôte** (`uc_mem_write`, ex.
+   un handler syscall ou le mapping d'image) sur une page **déjà exécutée/mise
+   en cache** n'est **pas** auto-invalidée en 2.1.4 → octets périmés ré-exécutés
+   (T3a). Mitigation **validée** : `uc_ctl_remove_cache(begin, end)` sur la plage
+   écrite (T4). `UnicornBinding/Unicorn.cs` n'expose aujourd'hui que `FlushTlb`
+   (`UC_CTL_TLB_FLUSH`, l.1278) et le buffer TCG (`UC_CTL_TCG_BUFFER_SIZE`,
+   l.1307) — **il manque `remove_cache`** (voir le correctif requis en §5.d).
+   Backend **KVM** : SMC natif (vrai matériel), pas de cache TCG.
 2. **Transitions de protection RW→RX.** Le JIT alloue en `PAGE_READWRITE` (ou
    RWX), écrit, puis bascule en `PAGE_EXECUTE_READ` via
    `NtProtectVirtualMemory`. Handler déjà présent
    (`Process/NtProtectVirtualMemory.cs`) ; la table de protections
-   `WinSyscallsHelper.cs:2427-2459` couvre déjà `PAGE_EXECUTE*`. **Vérifier**
-   que le changement de protection propage bien au backend et invalide le cache
-   de la plage (sinon : exécuter les octets pré-écriture).
+   `WinSyscallsHelper.cs:2427-2459` couvre déjà `PAGE_EXECUTE*`. **Mesuré (T1)** :
+   le flip RW→RX exécute bien les octets fraîchement écrits, et exécuter la page
+   **avant** le flip faute correctement (NX appliqué — W^X réel, pas RWX
+   permanent). **Attention (mesuré)** : `uc_mem_protect` **ne flush pas** le
+   cache TCG ; le flip fonctionne pour une émission neuve (page NX jamais mise en
+   cache), mais une séquence RX→RW→(écriture hôte)→RX sur une page déjà exécutée
+   exige un `remove_cache` explicite (idem point 1).
 3. **Write-watch / barrières GC.** Le GC .NET utilise `MEM_WRITE_WATCH`
    (`NtAllocateVirtualMemory` + `NtGetWriteWatch`/`NtResetWriteWatch`) pour le
    card-marking de la génération éphémère. Brovan a déjà un `WriteWatchManager`
    (`BinaryEmulator.cs:363`). **À confirmer** : la précision par page attendue
-   par le GC.
+   par le GC. (Hors périmètre du spike J0.)
 
 > Note FAQ (`FAQ.md`) : sous Unicorn il faut **désactiver Control Flow Guard**
 > pour l'hôte. C'est cohérent avec le fait que le JIT génère des cibles
 > d'appel dynamiques ; à garder en tête pour le code JIT du guest.
 
-Si (1)–(3) tiennent, exécuter du code managé JIT-é est *le même problème* que
-faire tourner un packer qui décompresse-puis-saute — chose que Brovan fait déjà.
+### 5.d — Résultats mesurés du spike J0
+
+Harnais : **`scripts/jit_spike_j0.py`** (reproductible : `python3
+scripts/jit_spike_j0.py`). Il pilote **le moteur natif identique** à celui de
+`UnicornBackend` (Unicorn **2.1.4**, mêmes primitives `uc_mem_map` /
+`uc_mem_write` / `uc_mem_protect` / `uc_emu_start` — l'enum `MemoryProtection` de
+Brovan **est** `UC_PROT_*`, passé tel quel). x86-64.
+
+| Test | Ce qu'il prouve | Résultat |
+|---|---|---|
+| **T0** sanity RWX | encodages corrects ; code écrit à l'exécution s'exécute | **PASS** |
+| **T1** RW→RX (W^X fidèle) | NX appliqué avant flip ; octets frais exécutés après flip = chemin `NtProtectVirtualMemory` | **PASS** |
+| **T2** code émis par le guest | des instructions guest écrivent du code (`rep movsb`) puis `call` dedans | **PASS** |
+| **T3b** SMC intra-run | le guest patche du code déjà exécuté puis le rappelle dans le même run | **PASS** |
+| **T4** écriture hôte + `remove_cache` | mitigation de l'écriture hôte sur code caché | **PASS** |
+| T3a écriture hôte brute | *caractérisation* : sans `remove_cache`, octets périmés ré-exécutés | STALE (attendu) |
+
+**Verdict J0 (jambe Unicorn) : GO.** Les 5 tests JIT-critiques passent — la
+capacité d'exécuter du code produit à l'exécution (émission, W^X RW→RX, codegen
+guest + auto-modification) est validée sur le moteur exact de Brovan.
+
+**Correctif requis dans Brovan (pré-requis avant J3+).** Ajouter au binding
+Unicorn un `RemoveCache(begin, end)` et l'appeler sur **toute écriture hôte
+(`WriteMemory`) qui touche une plage exécutable** (handlers syscall, application
+de relocations, hooks). Modèle exact sur le `FlushTlb` existant
+(`UnicornBinding/Unicorn.cs:1278`) mais avec `UC_CTL_TB_REMOVE_CACHE = 9`, sens
+écriture, **2 arguments** `(begin, end)` :
+
+```csharp
+// control = UC_CTL_TB_REMOVE_CACHE(9) | (argc=2 << 26) | (UC_CTL_IO_WRITE(1) << 30)
+public bool RemoveCache(ulong begin, ulong end) {
+    const int UC_CTL_TB_REMOVE_CACHE = 9, UC_CTL_IO_WRITE = 1;
+    int control = UC_CTL_TB_REMOVE_CACHE | (2 << 26) | (UC_CTL_IO_WRITE << 30);
+    _error = uc_ctl2_ulong(_uc, control, begin, end);   // nouveau P/Invoke uc_ctl à 2 args u64
+    return _error == UCErrors.Ok;
+}
+```
+
+Portée : c'est un **bug de correction latent, indépendant du .NET** — il touche
+aussi le malware natif auto-modifiant écrit via un chemin hôte. Le rendre correct
+sert tout l'émulateur, pas seulement la Voie A. (`uc_mem_protect` ne flush pas non
+plus : mêmes appels `remove_cache` sur les transitions de protection de pages déjà
+exécutées.)
+
+**Jambe KVM non testée ici** : pas de `/dev/kvm` dans l'environnement. Sur KVM le
+SMC est natif (vrai CPU) donc a priori non problématique, mais **la jambe KVM du
+J0 doit être rejouée sur un hôte KVM** pour clôturer le jalon.
+
+Sous réserve du correctif ci-dessus, exécuter du code managé JIT-é est *le même
+problème* que faire tourner un packer qui décompresse-puis-saute — chose que
+Brovan fait déjà.
 
 ---
 
@@ -246,7 +302,7 @@ Format volontairement calqué sur la table de progression d'`AL_KHASER_EMULATION
 
 | Jalon | But | Critère de réussite observable |
 |---|---|---|
-| **J0 — Spike JIT** | Prouver que le backend exécute du code écrit puis exécuté à l'exécution, avec bascule RW→RX. | Un micro-PE natif de test qui écrit un `ret`/petit stub en page RW, `NtProtectVirtualMemory`→RX, saute dedans, revient. Vert sous Unicorn **et** KVM. **Débloque ou tue la Voie A avant tout investissement runtime.** |
+| **J0 — Spike JIT** ✅ **FAIT (GO, jambe Unicorn)** | Prouver que le backend exécute du code écrit puis exécuté à l'exécution, avec bascule RW→RX. | **Fait** via `scripts/jit_spike_j0.py` sur Unicorn 2.1.4 : 5/5 tests JIT-critiques verts (§5.d). **Correctif pré-requis identifié** : `remove_cache` sur écritures hôte de code (§5.d). **Reste** : rejouer la jambe **KVM** sur un hôte `/dev/kvm`. |
 | **J1 — Provisioning** | Déposer le runtime cible dans `WindowsLibs` + framework dans le VFS ; résolution de chemins OK. | Le loader guest mappe `clr.dll`/`clrjit.dll` (ou `coreclr.dll`) sans `STATUS_DLL_NOT_FOUND` ; modules visibles dans la LDR list. |
 | **J2 — Bind d'entrée** | .NET Framework : l'import `mscoree!_CorExeMain` bind et le premier saut atteint mscoree. | Passé le stub d'entrypoint ; RIP dans mscoree/clr. |
 | **J3 — Survie init CLR** | Le CLR initialise GC/TLS/heaps sans faute non gérée. | Franchit l'init sans `0xC0000005` ; premier appel au JIT observé. |
@@ -311,9 +367,11 @@ n'est qu'une question de *quelle enveloppe de bootstrap* attaquer en premier.
 
 ## 11. Risques & frontières honnêtes
 
-- **F-JIT — churn de retraduction (Unicorn).** SMC fonctionne, mais une vague de
-  JIT peut retraduire beaucoup ; risque de lenteur, pas de correction. Mesurer
-  à J0, envisager KVM pour les runs lourds, ajuster le buffer TCG.
+- **F-JIT — SMC + churn de retraduction (Unicorn).** SMC guest **validé au J0**
+  (§5.d) ; correction seulement à ajouter pour les écritures **hôte** de code
+  (`remove_cache`, §5.d). Reste un risque de **lenteur** si une vague de JIT
+  retraduit beaucoup : mesurer sur cas réel, envisager KVM pour les runs lourds,
+  ajuster le buffer TCG. Rejouer la jambe **KVM** du J0 sur un hôte `/dev/kvm`.
 - **F-PERF — lenteur globale.** JIT + GC à travers un émulateur d'instructions =
   ordres de grandeur plus lent qu'un vrai process. Acceptable pour l'analyse ;
   à borner par les budgets d'instructions/temps existants.
