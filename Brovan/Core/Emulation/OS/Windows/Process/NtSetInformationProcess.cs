@@ -91,8 +91,18 @@ namespace Brovan.Core.Emulation.OS.Windows
             const uint ProcessTlsReplaceIndex = 0;
             const uint ProcessTlsReplaceVector = 1;
             const uint ThreadTlsInformationFlagsAssigned = 2;
+
+            // PROCESS_TLS_INFORMATION is a four-ULONG header (0x10, identical on both bitnesses) followed by a
+            // THREAD_TLS_INFORMATION[] whose element width tracks the guest pointer size. x64:
+            // Flags(4)+pad(4)+TlsData(8)+ThreadId(8) = 0x18; WOW64 x86: Flags(4)+TlsData(4)+ThreadId(4) = 0xC —
+            // ntdll's LdrpQueueDeferredTlsData pushes ProcessInformationLength = 0x10 + count*0xC for a 32-bit
+            // process, so the previous hardcoded x64 0x18 element size rejected every WOW64 call with
+            // STATUS_INFO_LENGTH_MISMATCH (len 0x1C < 0x10+0x18). The TLS vector slots are likewise pointer-sized.
+            int Ptr = Instance.GuestPointerSize;
             const uint HeaderSize = 0x10;
-            const uint EntrySize = 0x18;
+            uint EntryTlsDataOffset = (uint)Ptr;                        // 4-byte Flags, then the pointer (aligned)
+            uint EntryThreadIdOffset = EntryTlsDataOffset + (uint)Ptr;
+            uint EntrySize = EntryThreadIdOffset + (uint)Ptr;           // x86 → 0xC, x64 → 0x18
 
             if (ProcessInformation == 0)
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -135,7 +145,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     continue;
 
                 ulong EntryAddress = ThreadDataAddress + ((ulong)ThreadDataIndex * EntrySize);
-                if (!TryReadThreadTlsInformation(Instance, EntryAddress, out uint EntryFlags, out ulong TlsData, out ulong ThreadId))
+                if (!TryReadThreadTlsInformation(Instance, EntryAddress, EntryTlsDataOffset, EntryThreadIdOffset, out uint EntryFlags, out ulong TlsData, out ulong ThreadId))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                 if (EntryFlags != 0)
@@ -145,12 +155,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                 {
                     case ProcessTlsReplaceIndex:
                         {
-                            ulong TlsEntryAddress = TlsVector + ((ulong)TlsIndexOrPreviousCount * 8UL);
-                            if (!Instance.IsRegionMapped(TlsEntryAddress, 8))
+                            ulong TlsEntryAddress = TlsVector + ((ulong)TlsIndexOrPreviousCount * (ulong)Ptr);
+                            if (!Instance.IsRegionMapped(TlsEntryAddress, (ulong)Ptr))
                                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                            ulong OldTlsData = Instance.ReadMemoryULong(TlsEntryAddress);
-                            if (!Instance._emulator.WriteMemory(TlsEntryAddress, TlsData))
+                            ulong OldTlsData = Instance.ReadPointer(TlsEntryAddress);
+                            if (!Instance.WritePointer(TlsEntryAddress, TlsData))
                                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                             TlsData = OldTlsData;
@@ -160,7 +170,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     case ProcessTlsReplaceVector:
                         {
                             ulong NewTlsVector = TlsData;
-                            ulong CopySize = (ulong)TlsIndexOrPreviousCount * 8UL;
+                            ulong CopySize = (ulong)TlsIndexOrPreviousCount * (ulong)Ptr;
 
                             if (NewTlsVector == 0)
                                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -170,8 +180,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                             for (uint VectorIndex = 0; VectorIndex < TlsIndexOrPreviousCount; VectorIndex++)
                             {
-                                ulong OldTlsEntry = Instance.ReadMemoryULong(TlsVector + ((ulong)VectorIndex * 8UL));
-                                if (!Instance._emulator.WriteMemory(NewTlsVector + ((ulong)VectorIndex * 8UL), OldTlsEntry))
+                                ulong OldTlsEntry = Instance.ReadPointer(TlsVector + ((ulong)VectorIndex * (ulong)Ptr));
+                                if (!Instance.WritePointer(NewTlsVector + ((ulong)VectorIndex * (ulong)Ptr), OldTlsEntry))
                                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
                             }
 
@@ -185,7 +195,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
 
                 EntryFlags = ThreadTlsInformationFlagsAssigned;
-                if (!WriteThreadTlsInformation(Instance, EntryAddress, EntryFlags, TlsData, ThreadId))
+                if (!WriteThreadTlsInformation(Instance, EntryAddress, EntryTlsDataOffset, EntryThreadIdOffset, EntrySize, EntryFlags, TlsData, ThreadId))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                 ThreadDataIndex++;
@@ -219,53 +229,54 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Threads;
         }
 
-        private bool TryReadThreadTlsInformation(BinaryEmulator Instance, ulong EntryAddress, out uint Flags, out ulong TlsData, out ulong ThreadId)
+        private bool TryReadThreadTlsInformation(BinaryEmulator Instance, ulong EntryAddress, uint TlsDataOffset, uint ThreadIdOffset, out uint Flags, out ulong TlsData, out ulong ThreadId)
         {
             Flags = 0;
             TlsData = 0;
             ThreadId = 0;
 
-            if (!Instance.IsRegionMapped(EntryAddress, 0x18))
+            if (!Instance.IsRegionMapped(EntryAddress, ThreadIdOffset + (ulong)Instance.GuestPointerSize))
                 return false;
 
             Flags = Instance.ReadMemoryUInt(EntryAddress + 0x0);
-            TlsData = Instance.ReadMemoryULong(EntryAddress + 0x8);
-            ThreadId = Instance.ReadMemoryULong(EntryAddress + 0x10);
+            TlsData = Instance.ReadPointer(EntryAddress + TlsDataOffset);
+            ThreadId = Instance.ReadPointer(EntryAddress + ThreadIdOffset);
             return true;
         }
 
-        private bool WriteThreadTlsInformation(BinaryEmulator Instance, ulong EntryAddress, uint Flags, ulong TlsData, ulong ThreadId)
+        private bool WriteThreadTlsInformation(BinaryEmulator Instance, ulong EntryAddress, uint TlsDataOffset, uint ThreadIdOffset, uint EntrySize, uint Flags, ulong TlsData, ulong ThreadId)
         {
-            if (!Instance.IsRegionMapped(EntryAddress, 0x18))
+            if (!Instance.IsRegionMapped(EntryAddress, EntrySize))
                 return false;
 
             if (!Instance._emulator.WriteMemory(EntryAddress + 0x0, Flags))
                 return false;
 
-            if (!Instance._emulator.WriteMemory(EntryAddress + 0x8, TlsData))
+            if (!Instance.WritePointer(EntryAddress + TlsDataOffset, TlsData))
                 return false;
 
-            return Instance._emulator.WriteMemory(EntryAddress + 0x10, ThreadId);
+            return Instance.WritePointer(EntryAddress + ThreadIdOffset, ThreadId);
         }
 
-        const ulong TebThreadLocalStoragePointerOffset = 0x58;
+        // TEB.ThreadLocalStoragePointer: 0x2C in the 32-bit (WOW64) TEB, 0x58 in the 64-bit TEB.
+        private static ulong TebThreadLocalStoragePointerOffset(BinaryEmulator Instance) => Instance.GuestPointerSize == 4 ? 0x2CUL : 0x58UL;
 
         private ulong GetThreadTlsVector(BinaryEmulator Instance, EmulatedThread Thread)
         {
-            ulong TlsVectorAddress = WinEmulatedThread.GetState(Thread).Teb + TebThreadLocalStoragePointerOffset;
-            if (!Instance.IsRegionMapped(TlsVectorAddress, 8))
+            ulong TlsVectorAddress = WinEmulatedThread.GetState(Thread).Teb + TebThreadLocalStoragePointerOffset(Instance);
+            if (!Instance.IsRegionMapped(TlsVectorAddress, (ulong)Instance.GuestPointerSize))
                 return 0;
 
-            return Instance.ReadMemoryULong(TlsVectorAddress);
+            return Instance.ReadPointer(TlsVectorAddress);
         }
 
         private bool SetThreadTlsVector(BinaryEmulator Instance, EmulatedThread Thread, ulong TlsVector)
         {
-            ulong TlsVectorAddress = WinEmulatedThread.GetState(Thread).Teb + TebThreadLocalStoragePointerOffset;
-            if (!Instance.IsRegionMapped(TlsVectorAddress, 8))
+            ulong TlsVectorAddress = WinEmulatedThread.GetState(Thread).Teb + TebThreadLocalStoragePointerOffset(Instance);
+            if (!Instance.IsRegionMapped(TlsVectorAddress, (ulong)Instance.GuestPointerSize))
                 return false;
 
-            return Instance._emulator.WriteMemory(TlsVectorAddress, TlsVector);
+            return Instance.WritePointer(TlsVectorAddress, TlsVector);
         }
     }
 }

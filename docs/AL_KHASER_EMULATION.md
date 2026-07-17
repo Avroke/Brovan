@@ -1600,16 +1600,33 @@ already points at BSSD), and `PEB+0x248` = section base. Server view == client v
 descriptor's absolute BSSD pointer resolves to itself. x64 guests reach BSSD through
 the CSR port connect reply instead, so this is WOW64-only and leaves x64 untouched.
 
-**Next frontier — `NtSetInformationProcess` `STATUS_INFO_LENGTH_MISMATCH`.** The
-`0xC0000004` terminus correlates with a single `NtSetInformationProcess` (SSN 0x1C)
-returning `INFO_LENGTH_MISMATCH` immediately before the hard error. The two handler
-paths that yield that status are `ProcessInstrumentationCallback` (accepts only the
-x64 buffer sizes 8/16) and `ProcessTlsInformation`; the WOW64 caller passes a 32-bit
-buffer size that neither accepts. Next step: pin the exact info class + buffer length
-the 32-bit caller uses and teach the handler the WOW64 sizes. Secondary
-still-unimplemented syscalls seen in the run (`0x1E9` `NtWow64IsProcessorFeaturePresent`,
-hammered in a loop but non-fatal; `NtSetInformationVirtualMemory` 0x19E;
-`NtQuerySystemInformation` classes 0x73 / 0xC5) are not on this fatal path.
+**Resolved next — `NtSetInformationProcess(ProcessTlsInformation)` WOW64 sizing.**
+The `0xC0000004` terminus was ntdll's `LdrpQueueDeferredTlsData` calling
+`NtSetInformationProcess(ProcessTlsInformation, len=0x1C)` and the handler rejecting
+it: the handler hardcoded the x64 `THREAD_TLS_INFORMATION` element size (0x18) so
+`0x1C < 0x10 + 0x18` gave `INFO_LENGTH_MISMATCH`. Disassembling the ntdll caller
+(`imul eax, count, 0xC; add eax, 0x10; push eax`) confirmed the WOW64 element is
+`Flags(4)+NewTlsData(4)+ThreadId(4) = 0xC`, and the TEB TLS-vector slots are 4-byte.
+Fix: the handler now derives every width from `GuestPointerSize` — element size
+`0xC`/`0x18`, field offsets, `TEB.ThreadLocalStoragePointer` at `0x2C`/`0x58`, and
+pointer-sized vector reads/writes (`ReadPointer`/`WritePointer`). x64 is byte-identical
+(Ptr=8 reproduces the former 0x18/0x58/8 constants). al-khaser advances **6.31M →
+~9.93M** instructions.
+
+**Next frontier — later-DLL DllMain `DLL_INIT_FAILED` again (mitigation / CFG).**
+With TLS fixed the run drives deep into a subsequent DLL's `DllMain` and terminates
+back at `DLL_INIT_FAILED` (`0xC0000142`). The closest signals are
+`NtQueryInformationProcess(ProcessMitigationPolicy 0x34)` returning `NOT_SUPPORTED`
+(the x86 handler doesn't implement that class) and a burst of
+`NtSetInformationVirtualMemory (0x19E)` returning `NOT_SUPPORTED` (CFG call-target
+registration). Both are x86 gaps: next step is to give the x86
+`NtQueryInformationProcess` the `ProcessMitigationPolicy` class (realistic
+policy words) and make `NtSetInformationVirtualMemory` a realistic success for the
+WOW64 VM-information classes, then confirm which one the failing DllMain treats as
+fatal. Other still-unimplemented syscalls in the run (`0x1E9`
+`NtWow64IsProcessorFeaturePresent` hammered in a loop but non-fatal;
+`NtQuerySystemInformationEx` 0x161; `NtQueryInformationThread` 0x25) are not
+(yet) on the fatal path.
 
 **Remaining WOW64 work (mechanical continuation):** the other x64-gated `Nt*`
 handlers still return unimplemented for x86 — each needs the same treatment (unify
