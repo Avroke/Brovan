@@ -1,9 +1,7 @@
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
-using System.Threading;
 
 namespace Brovan.Core.Emulation.OS.SharedHelpers
 {
@@ -58,31 +56,6 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             foreach (IntPtr brush in _brushCache.Values)
                 DeleteObject(brush);
             _brushCache.Clear();
-        }
-
-        private static int _pendingHostRepaint;
-
-        public static bool ConsumePendingHostRepaint()
-        {
-            return Interlocked.Exchange(ref _pendingHostRepaint, 0) != 0;
-        }
-
-        private static readonly ConcurrentQueue<(uint Message, ulong WParam, ulong LParam)> _pendingHostInput = new();
-
-        public static bool TryDequeuePendingHostInput(out uint Message, out ulong WParam, out ulong LParam)
-        {
-            if (_pendingHostInput.TryDequeue(out var Item))
-            {
-                Message = Item.Message;
-                WParam = Item.WParam;
-                LParam = Item.LParam;
-                return true;
-            }
-
-            Message = 0;
-            WParam = 0;
-            LParam = 0;
-            return false;
         }
 
         private readonly IntPtr _instanceHandle;
@@ -770,7 +743,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             {
                 if (msg == WM_CLOSE)
                 {
-                    _pendingHostInput.Enqueue((msg, 0UL, 0UL));
+                    HostEventQueue.Enqueue(msg, 0UL, 0UL);
                     Close();
                     return IntPtr.Zero;
                 }
@@ -789,14 +762,14 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 }
 
                 if (msg == WM_PAINT || msg == WM_SIZE || msg == WM_SHOWWINDOW)
-                    Interlocked.Exchange(ref _pendingHostRepaint, 1);
+                    HostEventQueue.MarkRepaint();
 
                 if (msg == WM_MOUSEMOVE || msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP ||
                     msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP ||
                     msg == WM_KEYDOWN || msg == WM_KEYUP || msg == WM_CHAR ||
                     msg == WM_SYSKEYDOWN || msg == WM_SYSKEYUP)
                 {
-                    _pendingHostInput.Enqueue((msg, unchecked((ulong)(long)wParam), unchecked((ulong)(long)lParam)));
+                    HostEventQueue.Enqueue(msg, unchecked((ulong)(long)wParam), unchecked((ulong)(long)lParam));
                 }
 
                 return DefWindowProcW(_hwnd, msg, wParam, lParam);

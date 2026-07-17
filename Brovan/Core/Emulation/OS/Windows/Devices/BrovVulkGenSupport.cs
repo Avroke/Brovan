@@ -221,10 +221,31 @@ namespace Brovan.Core.Emulation.OS.Windows
         public IntPtr Lookup(uint id, string type)
         {
             if (id == 0)
+            {
+                // A dispatchable handle is the object a command operates on and is never VK_NULL_HANDLE
+                if (IsDispatchable(type))
+                    throw new InvalidOperationException($"BrovVulk generic: null dispatchable handle ({type}).");
+
                 return IntPtr.Zero;
+            }
             if (_handles.TryGetValue(id, out (IntPtr Ptr, string Type) e) && e.Type == type)
                 return e.Ptr;
             throw new InvalidOperationException($"BrovVulk generic: bad handle id {id} (expected {type}).");
+        }
+
+        private static bool IsDispatchable(string type)
+        {
+            switch (type)
+            {
+                case "VkInstance":
+                case "VkPhysicalDevice":
+                case "VkDevice":
+                case "VkQueue":
+                case "VkCommandBuffer":
+                    return true;
+                default:
+                    return false;
+            }
         }
 
         public void Forget(uint id)

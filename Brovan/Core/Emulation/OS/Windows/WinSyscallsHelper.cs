@@ -1075,11 +1075,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Vals[3] = Emulator._emulator.ReadRegister(Registers.UC_X86_REG_R9);
                 Vals[4] = Emulator._emulator.ReadRegister(Registers.UC_X86_REG_RSP);
             }
-            _argCacheR10  = Vals[0];
-            _argCacheRDX  = Vals[1];
-            _argCacheR8   = Vals[2];
-            _argCacheR9   = Vals[3];
-            _argCacheRSP  = Vals[4];
+            _argCacheR10 = Vals[0];
+            _argCacheRDX = Vals[1];
+            _argCacheR8 = Vals[2];
+            _argCacheR9 = Vals[3];
+            _argCacheRSP = Vals[4];
             _argCacheValid = true;
         }
 

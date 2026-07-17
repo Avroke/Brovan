@@ -103,7 +103,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         uint l = r.ReadU32();
                         if (l > 0)
                         {
-                            IntPtr s = st.Alloc(CheckedBytes(l, 1));
+                            IntPtr s = st.Alloc(CheckedBytes(l, 1) + 1);
                             r.CopyInto(s, l);
                             *(IntPtr*)fp = s;
                         }
@@ -120,7 +120,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                             for (uint k = 0; k < n; k++)
                             {
                                 uint l = r.ReadU32();
-                                IntPtr s = st.Alloc(CheckedBytes(Math.Max(l, 1u), 1));
+                                IntPtr s = st.Alloc(CheckedBytes(l, 1) + 1);
                                 if (l > 0) r.CopyInto(s, l);
                                 *(IntPtr*)(arr + (int)(k * 8)) = s;
                             }
