@@ -1,0 +1,380 @@
+# Émulation native des PE .NET/MSIL — Voie A (CLR réel)
+
+Document de conception. Objectif : exécuter un exécutable managé (.NET Framework
+ou .NET Core/5+) dans Brovan **sans ajouter de second moteur**, en chargeant le
+**vrai CLR** (coreclr/clrjit, ou clr/clrjit/mscoree) comme n'importe quelle autre
+DLL système et en laissant son JIT produire du x86-64 que le backend
+Unicorn/KVM exécute — exactement comme un vrai process .NET sur Windows.
+
+Ce document décrit **la Voie A uniquement**. La Voie B (interpréteur CIL dédié +
+shims BCL, façon Avroke.Emulator) est mentionnée seulement comme repli au §13.
+
+> **Statut : conception / non implémenté.** Aucune ligne de la Voie A n'existe
+> aujourd'hui. Ce fichier fixe l'analyse, les points d'accroche réels et un plan
+> par étapes mesurables pour que le travail soit repris sans re-dériver le
+> contexte (même esprit que `docs/AL_KHASER_EMULATION.md`).
+
+---
+
+## 0. TL;DR
+
+- **Faisable ?** Oui, et c'est la voie la plus cohérente avec l'ADN de Brovan
+  (« on exécute le vrai binaire jusqu'à la frontière syscall »). Le CLR n'est
+  architecturalement qu'une DLL native de plus, mappée par le loader ntdll du
+  guest et exécutée par le backend.
+- **Coût ?** Élevé. On fait transiter des millions d'instructions de CLR init +
+  JIT + GC à travers l'émulateur, on dépend de l'exécution de **code produit à
+  l'exécution** (JIT), et il faut embarquer le runtime + le framework managé.
+  C'est un objectif long terme, pas un patch.
+- **Ce qui joue en notre faveur :** (1) le versant **statique** .NET est déjà
+  fait (détection COR20 + métadonnées + IL par méthode) ; (2) le modèle
+  **real-DLL → syscall** est déjà en place avec **217 handlers `Nt*`**, un vrai
+  loader ntdll, PEB/TEB/ApiSetMap, relocations et SEH ; (3) embarquer une vraie
+  DLL supplémentaire dans `WindowsLibs` est un **pattern déjà établi** (le
+  runtime VC++ et les tables NLS y sont déjà, cf. `AL_KHASER_EMULATION.md`) ;
+  (4) le backend Unicorn/TCG gère nativement le **code auto-modifiant** (SMC),
+  prérequis du JIT.
+- **Le vrai pivot technique** n'est pas « comprendre le MSIL » (le CLR s'en
+  charge) mais **survivre au bootstrap du CLR** : assez de syscalls `Nt*`, TLS,
+  gestion des exceptions, et exécution fiable des pages JIT (RW→RX).
+
+---
+
+## 1. Rappel : le modèle d'exécution de Brovan
+
+Brovan est un émulateur **CPU natif x86-64** (backends Unicorn et KVM,
+`Core/Emulation/Backends/`). Son environnement Windows est **fidèle par
+exécution du code réel**, pas par stubs synthétiques :
+
+| Élément | Où | Ce qu'il fait |
+|---|---|---|
+| Chargement image principale | `Guests/WindowsGuest.cs::Initialize` (l.104) | mappe le PE par sections, applique les relocations, prépare PEB/TEB/ProcessParameters (`PrepareWinEnvironment`, l.1240) |
+| Loader ntdll **réel** | `WindowsGuest.cs::LoadNtdll` (l.1558) | mappe la **vraie** `ntdll.dll` depuis `WindowsLibs`, puis résout `LdrInitializeThunk` / `RtlUserThreadStart` (l.870/881) |
+| DLL dépendantes | pilotées par le loader **du guest** | seule ntdll est mappée au bootstrap ; kernel32/user32/… sont chargées par le **vrai `LdrInitializeThunk`** via `NtOpenFile`/`NtCreateSection`/`NtMapViewOfSection`, résolus depuis `WindowsLibs` |
+| Mapping d'un module | `BinaryEmulator.WindowsBridge.cs::MapPeImageBySections` (l.1334) | mappe n'importe quel PE par sections + relocations (`ApplyPERelocations`) |
+| Frontière d'interception | `BinaryEmulator.cs` hook `Syscall` (l.387) | le code natif réel des DLL s'exécute **jusqu'à l'instruction `syscall`**, servie par les 217 handlers `Nt*` |
+| Surface syscall | `Core/Emulation/OS/Windows/**/Nt*.cs` | 217 handlers (`NtAllocateVirtualMemory`, `NtProtectVirtualMemory`, `NtCreateSection`, `NtMapViewOfSection`, `NtCreateThreadEx`, `NtContinue`, …) |
+| Provisioning DLL/données | `WindowsLibs/` (`GeneralHelper.cs:159`) + VFS `VirtualFS/` (`GeneralHelper.cs:922`) | vraies DLL système, `SysWOW64/`, `.nls`, runtime VC++, `apisetmap.bin` |
+
+**Conséquence directe pour le .NET :** pour faire tourner du managé, on n'écrit
+pas un CLR — on **fournit le vrai** et on laisse le loader du guest le charger,
+puis on colmate ce que son bootstrap exerce. C'est la même mécanique qui a permis
+à al-khaser d'atteindre ~24 M d'instructions.
+
+---
+
+## 2. Ce que Brovan sait déjà faire du .NET (statique)
+
+À réutiliser, pas à refaire :
+
+- Détection : `BinaryFile.cs:319/341` — `OptionalHeader.DataDirectory[14]`
+  (COM descriptor) ⇒ `PE.DotNetStatus = DotNetStatus.DotNet`. Signature
+  métadonnées `BSJB` absente ⇒ `ModifiedDotNet` (l.398).
+- En-tête CLR : `IMAGE_COR20_HEADER` (`BinaryHelpers.cs:195`), lu en l.390.
+- Métadonnées : `ParseDotNetFunctions()` (`BinaryFile.cs:1719`) via
+  `System.Reflection.Metadata` — types, méthodes, champs, propriétés, **et le
+  bytecode IL par méthode** (tiny/fat header, `CodeSize`, locals).
+- UI : commande `bininfo dotnet` (`EmulationMenu.cs:1952`).
+
+Ce que Brovan **ne** fait pas : exécuter. Aujourd'hui il n'existe **aucun**
+garde-fou runtime sur `DotNetStatus` — un PE .NET est traité comme un PE natif et
+l'exécution saute sur son `AddressOfEntryPoint`. `mscoree`/`clr`/`coreclr` ne
+sont **ni fournis ni gérés** (aucune référence dans le code). Résultat concret :
+
+- **.NET Framework x86 legacy** : l'entrypoint est le stub `jmp [__CorExeMain]`
+  (IAT → `mscoree.dll!_CorExeMain`). `mscoree` étant absent de `WindowsLibs`, le
+  bind d'import ou le premier `jmp` échoue → `[MISS]`/faute quasi immédiate.
+- **.NET Core / AnyCPU** : l'assembly managé ne peut pas s'auto-démarrer
+  nativement ; il n'y a pas de code natif utile à l'entrypoint.
+
+Donc : **zéro exécution MSIL aujourd'hui**, seulement du parsing.
+
+---
+
+## 3. Ce qu'« exécuter du .NET nativement » implique réellement
+
+Un PE managé ne contient pas de code natif « métier » : son corps est du
+**CIL/MSIL**, compilé à la volée par le JIT du CLR. Le CLR est un gros composant
+natif (init, chargeur d'assemblies, **JIT qui écrit du code exécutable en
+mémoire**, GC avec son propre gestionnaire mémoire + write-barriers, TLS, EH
+managé au-dessus du SEH natif, threading). Deux chaînes de bootstrap distinctes :
+
+### 3.a .NET Framework (CLR « monolithique », v4.0.30319)
+
+```
+app.exe (managé)
+  └─ entrypoint natif = jmp [mscoree!_CorExeMain]        (x86 ; x64 : shim COR)
+       └─ mscoree.dll  (shim très fin)  → mscoreei.dll   → sélectionne la version
+            └─ clr.dll  (le runtime)     charge mscorlib.dll (GAC), init GC/TLS
+                 └─ clrjit.dll  JIT: CIL → x86-64 en mémoire RW→RX
+                      └─ exécute Main() managé
+```
+Dépendances : `mscoree.dll`, `mscoreei.dll`, `clr.dll`, `clrjit.dll`,
+`mscorlib.dll` (+ le GAC / `C:\Windows\Microsoft.NET\Framework[64]\v4.0.30319\`).
+Avantage : self-contained, chaîne courte, entrypoint classique.
+
+### 3.b .NET Core / 5+ (host + coreclr)
+
+```
+app.exe (apphost natif — lanceur généré, pas managé)
+  └─ hostfxr.dll   lit app.runtimeconfig.json, localise le framework
+       └─ hostpolicy.dll  lit app.deps.json, construit la TPA list
+            └─ coreclr.dll  init GC/TLS, charge System.Private.CoreLib.dll
+                 └─ clrjit.dll  JIT: CIL → x86-64
+                      └─ exécute Main() managé
+```
+Dépendances : `apphost`/`app.exe`, `hostfxr.dll`, `hostpolicy.dll`,
+`coreclr.dll`, `clrjit.dll`, `System.Private.CoreLib.dll` + le dossier framework
+`Microsoft.NETCore.App/<ver>/` **et** les fichiers `*.runtimeconfig.json` /
+`*.deps.json` dans le VFS. Le host fait beaucoup de résolution
+fichiers/JSON avant même que coreclr démarre.
+
+> Pour une assembly managée « nue » (`app.dll`), le lanceur est `dotnet.exe`
+> (lui-même un apphost). Le cas « single-file publish » ajoute une extraction de
+> bundle — **hors périmètre du premier jalon**.
+
+---
+
+## 4. Pourquoi la Voie A colle à l'architecture
+
+Le point décisif : **Brovan exécute le vrai `LdrInitializeThunk` de ntdll**. Le
+chargement des DLL dépendantes n'est pas codé côté hôte — c'est le loader du
+guest qui, à partir des imports, appelle les syscalls de mapping. Donc :
+
+- mapper le CLR = **aucun code hôte spécifique** : on dépose les DLL du runtime
+  dans `WindowsLibs`, le loader du guest les mappe via `NtCreateSection` +
+  `NtMapViewOfSection` (`Files/NtCreateSection.cs`, `Files/NtMapViewOfSection.cs`)
+  comme il mappe déjà kernel32 ;
+- le CLR s'exécute comme du code natif normal, intercepté seulement aux
+  `syscall` ;
+- la **cohérence** (PEB/TEB, ApiSetMap, versions Windows, SEH, threads) est déjà
+  celle d'un vrai process.
+
+En une phrase : *du point de vue de Brovan, coreclr est « juste une DLL de plus »
+et Main() managé est « juste du code JIT-é ».* Tout le travail est de rendre ce
+chemin **survivable**.
+
+---
+
+## 5. Le pivot technique n°1 : exécuter le code produit par le JIT
+
+C'est le risque central de la Voie A. Le JIT écrit des octets x86-64 dans une
+page, puis les exécute. Trois sous-problèmes :
+
+1. **Code auto-modifiant (SMC).** Après que le JIT a écrit du code, le backend
+   doit ne pas exécuter une traduction périmée. **Unicorn/TCG invalide
+   nativement les translation blocks** quand une page traduite est écrite (SMC
+   supporté par QEMU) — donc le chemin JIT est exécutable *en principe* sans
+   plomberie nouvelle. `UnicornBinding/Unicorn.cs` expose déjà `FlushTlb`
+   (`UC_CTL_TLB_FLUSH`, l.1278) et le dimensionnement du buffer TCG
+   (`UC_CTL_TCG_BUFFER_SIZE`, l.1307). **À valider tôt** par un spike (cf.
+   Jalon 0) : une génération JIT massive peut provoquer un *churn* de
+   retraduction coûteux ; mesurer, et augmenter le buffer TCG si besoin.
+   Backend **KVM** : SMC natif (vrai matériel), pas de souci de cache.
+2. **Transitions de protection RW→RX.** Le JIT alloue en `PAGE_READWRITE` (ou
+   RWX), écrit, puis bascule en `PAGE_EXECUTE_READ` via
+   `NtProtectVirtualMemory`. Handler déjà présent
+   (`Process/NtProtectVirtualMemory.cs`) ; la table de protections
+   `WinSyscallsHelper.cs:2427-2459` couvre déjà `PAGE_EXECUTE*`. **Vérifier**
+   que le changement de protection propage bien au backend et invalide le cache
+   de la plage (sinon : exécuter les octets pré-écriture).
+3. **Write-watch / barrières GC.** Le GC .NET utilise `MEM_WRITE_WATCH`
+   (`NtAllocateVirtualMemory` + `NtGetWriteWatch`/`NtResetWriteWatch`) pour le
+   card-marking de la génération éphémère. Brovan a déjà un `WriteWatchManager`
+   (`BinaryEmulator.cs:363`). **À confirmer** : la précision par page attendue
+   par le GC.
+
+> Note FAQ (`FAQ.md`) : sous Unicorn il faut **désactiver Control Flow Guard**
+> pour l'hôte. C'est cohérent avec le fait que le JIT génère des cibles
+> d'appel dynamiques ; à garder en tête pour le code JIT du guest.
+
+Si (1)–(3) tiennent, exécuter du code managé JIT-é est *le même problème* que
+faire tourner un packer qui décompresse-puis-saute — chose que Brovan fait déjà.
+
+---
+
+## 6. Inventaire des dépendances à fournir
+
+### 6.a Dans `WindowsLibs/` (mappées par le loader guest)
+
+- **Cible .NET Framework (recommandée en premier, cf. §10) :** `mscoree.dll`,
+  `mscoreei.dll`, `clr.dll`, `clrjit.dll`, `mscorlib.dll`, + toute DLL VC++ dont
+  clr dépend (déjà partiellement présentes). Bitness cohérent (x64 → pas de
+  SysWOW64 ; x86 → `SysWOW64/` + **WOW64**, cf. Frontière F-WOW).
+- **Cible .NET Core :** `hostfxr.dll`, `hostpolicy.dll`, `coreclr.dll`,
+  `clrjit.dll`, `System.Private.CoreLib.dll`.
+
+### 6.b Dans le VFS `VirtualFS/C/` (ouvertes par le CLR via `NtCreateFile`)
+
+- **Framework :** l'arbre `C:\Windows\Microsoft.NET\Framework64\v4.0.30319\` (ou
+  `Framework\`) + le GAC (`C:\Windows\assembly\` / `Microsoft.NET\assembly\`)
+  pour les assemblies de la BCL réellement touchées.
+- **Core :** `Microsoft.NETCore.App/<ver>/` (les `System.*.dll` chargées) + les
+  `*.runtimeconfig.json` / `*.deps.json` **à côté de l'image** (Brovan adosse
+  déjà l'image dans le C: virtuel via `SeedGuestImageFile`, `WindowsGuest.cs:181`).
+
+> **Provisioning = pattern établi.** `WindowsLibs` embarque déjà le runtime VC++
+> réel et les tables NLS (`AL_KHASER_EMULATION.md`). Ajouter le runtime .NET est
+> la même opération à plus grande échelle. Documenter le **hash/version** des
+> binaires déposés (reproductibilité, règle « pas de valeurs magiques
+> spécifiques à un échantillon »).
+
+---
+
+## 7. Points d'accroche précis dans le code
+
+| # | Fichier / symbole | Modification |
+|---|---|---|
+| H1 | `Guests/WindowsGuest.cs::Initialize` (l.104) / `PrepareWinEnvironment` (l.1240) | Après mapping de l'image, si `Binary.PE.DotNetStatus == DotNet`, **basculer sur le chemin de bootstrap managé** au lieu de démarrer le thread sur l'entrypoint natif brut. |
+| H2 | `WindowsGuest.cs::CreateInitialThread` (l.756) | Pour un .NET Framework legacy : le premier thread démarre déjà sur l'entrypoint = stub `_CorExeMain` ; il faut juste que l'import `mscoree` **résolve** (⇒ DLL présente). Pour .NET Core : la cible d'exécution est **l'apphost natif**, pas l'assembly managé — router vers l'apphost. |
+| H3 | `WindowsLibs` + `GeneralHelper.cs::TryResolveFromWindowsLibs` (l.2924) | S'assurer que `mscoree.dll`/`clr.dll`/`clrjit.dll`/`coreclr.dll`/`hostfxr.dll`/… se résolvent (System32 + éventuellement chemins framework). |
+| H4 | `Files/NtCreateSection.cs`, `Files/NtMapViewOfSection.cs` | Vérifier le mapping *image* (SEC_IMAGE) des grosses DLL runtime + de `System.Private.CoreLib.dll`. |
+| H5 | `Process/NtProtectVirtualMemory.cs`, `Process/NtAllocateVirtualMemory.cs` | Chemin RW→RX du JIT (§5.2) ; propagation au backend + invalidation cache. |
+| H6 | `BinaryEmulator.cs` hook `Syscall` (l.387) + `OS/Windows/**/Nt*.cs` | Compléter les syscalls que le bootstrap CLR exerce et qui manquent (§9). |
+| H7 | `EmulationMenu` | Nouvelles commandes de diagnostic (ex. `dotnet run`, état du bootstrap CLR, dernière frontière atteinte). |
+| H8 | Verdict/statut | Ne **jamais** router un échec de bootstrap CLR vers un statut « propre » factice : exposer honnêtement `[MISS]`/faute/dernier syscall (cohérent avec la discipline verdict d'Avroke). |
+
+Aucun de ces points ne demande un « moteur MSIL » : ce sont des extensions du
+chemin natif existant.
+
+---
+
+## 8. Plan d'implémentation par jalons (mesurable)
+
+Format volontairement calqué sur la table de progression d'`AL_KHASER_EMULATION.md`
+(instructions atteintes = métrique de progrès, terminus = état franchi).
+
+| Jalon | But | Critère de réussite observable |
+|---|---|---|
+| **J0 — Spike JIT** | Prouver que le backend exécute du code écrit puis exécuté à l'exécution, avec bascule RW→RX. | Un micro-PE natif de test qui écrit un `ret`/petit stub en page RW, `NtProtectVirtualMemory`→RX, saute dedans, revient. Vert sous Unicorn **et** KVM. **Débloque ou tue la Voie A avant tout investissement runtime.** |
+| **J1 — Provisioning** | Déposer le runtime cible dans `WindowsLibs` + framework dans le VFS ; résolution de chemins OK. | Le loader guest mappe `clr.dll`/`clrjit.dll` (ou `coreclr.dll`) sans `STATUS_DLL_NOT_FOUND` ; modules visibles dans la LDR list. |
+| **J2 — Bind d'entrée** | .NET Framework : l'import `mscoree!_CorExeMain` bind et le premier saut atteint mscoree. | Passé le stub d'entrypoint ; RIP dans mscoree/clr. |
+| **J3 — Survie init CLR** | Le CLR initialise GC/TLS/heaps sans faute non gérée. | Franchit l'init sans `0xC0000005` ; premier appel au JIT observé. |
+| **J4 — Première méthode JIT-ée** | `clrjit` compile et exécute au moins une méthode managée. | Bascule RW→RX observée + exécution du code produit ; RIP dans une page JIT. |
+| **J5 — `Main()` managé** | Exécution du point d'entrée managé. | Effet de bord observable d'un `Console.WriteLine("...")` capté par `NtWriteFile`/console. |
+| **J6 — Terminaison propre** | Sortie via l'`ExitProcess` du CLR. | Statut de sortie honnête ; trace syscalls exploitable. |
+| **J7 — Robustesse** | Étendre au-delà du « hello world » (exceptions managées, threads, P/Invoke, réseau). | Un corpus de petits managés variés atteint J5/J6. |
+
+Chaque jalon documente le **dernier syscall/instruction atteint** (comme la
+table al-khaser) pour reprise sans re-analyse.
+
+---
+
+## 9. Surface syscall probablement à compléter
+
+Le bootstrap CLR est gourmand en primitives mémoire, threading, TLS et
+exceptions. À auditer/compléter (beaucoup existent déjà) :
+
+- **Mémoire / sections :** `NtAllocateVirtualMemory(Ex)`, `NtProtectVirtualMemory`,
+  `NtFreeVirtualMemory`, `NtQueryVirtualMemory`, `NtCreateSection`,
+  `NtMapViewOfSection`, `NtUnmapViewOfSection`, write-watch
+  (`NtGetWriteWatch`/`NtResetWriteWatch`) — pierre angulaire du GC.
+- **Threads / TLS / sync :** `NtCreateThreadEx`, `NtContinue(Ex)`,
+  `NtSetInformationThread`, TEB slots / `TlsBitmap`, worker factory
+  (`NtCreateWorkerFactory` déjà présent) — le CLR crée le finalizer thread + le
+  thread pool tôt. ⚠️ voir le **bug scheduler MLFQ** signalé dans `IDEAS.md`
+  (apps multi-thread qui sortent) : à traiter, le CLR est multi-thread par
+  nature.
+- **Exceptions :** dispatch SEH/VEH x64 (`.pdata`/`.xdata`) — le CLR pose des
+  handlers très tôt ; cf. `docs/SEH_WER_DISPATCH_INVESTIGATION.md`.
+- **Fichiers / config :** `NtCreateFile`/`NtOpenFile`/`NtReadFile`/`NtQuery*File`
+  pour lire assemblies BCL + (Core) `*.runtimeconfig.json`/`*.deps.json`.
+- **Divers :** horloges/perf counters, `NtQuerySystemInformation`, registre
+  (clés .NET Framework sous `HKLM\SOFTWARE\Microsoft\.NETFramework`).
+
+Méthode : lancer, observer le premier `[MISS]`/faute, implémenter, recommencer —
+la boucle exacte qui a fait progresser al-khaser de 37 k à 24 M d'instructions.
+
+---
+
+## 10. Cible recommandée en premier
+
+**Recommandation : .NET Framework 4.x, en x64, comme premier jalon** — mais à
+**confirmer par le spike J0/J1** (esprit « les métriques sont des signaux »).
+
+Raisons :
+
+- chaîne de bootstrap **plus courte et self-contained** (§3.a) : pas de
+  résolution hostfxr/hostpolicy + JSON avant de démarrer le runtime ;
+- entrypoint **classique** (`_CorExeMain`), donc J2 est net ;
+- x64 d'abord pour **éviter WOW64** (Brovan n'implémente pas WOW64, cf. Frontière
+  F-WOW et `AL_KHASER_EMULATION.md` : « al-khaser x86 ne tourne pas ») ; les
+  assemblies AnyCPU s'exécutent en x64 sur un OS x64.
+
+.NET Core/5+ vient **ensuite** : plus représentatif du malware .NET moderne, mais
+il faut d'abord faire survivre hostfxr/hostpolicy (résolution de framework,
+parsing `.deps.json`/`.runtimeconfig.json`, TPA list) avant même coreclr. Le
+gros de l'effort runtime (JIT, GC, EH) est commun aux deux cibles, donc l'ordre
+n'est qu'une question de *quelle enveloppe de bootstrap* attaquer en premier.
+
+---
+
+## 11. Risques & frontières honnêtes
+
+- **F-JIT — churn de retraduction (Unicorn).** SMC fonctionne, mais une vague de
+  JIT peut retraduire beaucoup ; risque de lenteur, pas de correction. Mesurer
+  à J0, envisager KVM pour les runs lourds, ajuster le buffer TCG.
+- **F-PERF — lenteur globale.** JIT + GC à travers un émulateur d'instructions =
+  ordres de grandeur plus lent qu'un vrai process. Acceptable pour l'analyse ;
+  à borner par les budgets d'instructions/temps existants.
+- **F-WOW — pas de WOW64.** Les assemblies **x86** (ou marquées 32-bit-required)
+  nécessitent WOW64, absent. Rester **x64/AnyCPU** tant que WOW64 n'est pas
+  traité. C'est une frontière connue et documentée côté al-khaser.
+- **F-THREAD — scheduler MLFQ.** Bug connu (`IDEAS.md`) sur le multi-thread ; le
+  CLR est intrinsèquement multi-thread (finalizer, thread pool). Probable
+  prérequis.
+- **F-FRAMEWORK — surface BCL réelle.** Selon ce que l'assembly touche, le CLR
+  charge de plus en plus d'assemblies système ⇒ plus de fichiers VFS + plus de
+  syscalls. La couverture croît avec le corpus, pas d'un coup.
+- **F-VERSION — couplage build.** clr/coreclr sont sensibles à la version de
+  Windows annoncée (`WindowsVersionInfo` dans le PEB) et à leurs propres
+  dépendances. Épingler des versions cohérentes de runtime et documenter les
+  hash.
+- **F-SINGLEFILE — bundles.** Publish single-file / self-contained (extraction
+  de bundle, `apphost` embarquant le payload) : hors périmètre du premier jalon.
+- **F-DÉTECTION — furtivité.** Un malware .NET peut sonder l'environnement CLR
+  (versions runtime, chemins framework, présence du debugger managé). La
+  cohérence doit s'étendre au runtime managé, pas seulement au natif (règle
+  « ne pas être détecté »).
+
+---
+
+## 12. Critères de succès & tests
+
+- **Fonctionnel :** un « hello world » managé (Framework puis Core) atteint J5
+  (effet observable) puis J6 (sortie propre), les deux backends.
+- **Non-régression :** aucun impact sur le chemin natif existant (le branchement
+  H1 est gardé par `DotNetStatus == DotNet`).
+- **Verdict honnête :** un échec de bootstrap reste un `[MISS]`/faute traçable,
+  jamais un faux « propre » (H8).
+- **Repro :** documenter les binaires runtime déposés (version + hash) et les
+  fichiers VFS, comme la section *Reproduction* d'`AL_KHASER_EMULATION.md`.
+- **Diagnostic :** commande menu affichant la dernière frontière de bootstrap
+  atteinte + le dernier syscall, pour piloter l'itération J-par-J.
+
+---
+
+## 13. Repli : Voie B (interpréteur CIL)
+
+Si la Voie A bute durablement (F-JIT/F-PERF/F-THREAD rédhibitoires), le repli est
+un **interpréteur CIL dédié** consommant les métadonnées + l'IL **déjà extraits**
+(`BinaryFile.cs:1719`), avec des shims BCL, façon `MSIL/` d'Avroke.Emulator
+(~65 shims / 1500+ API). C'est un **moteur séparé** (pas la philosophie
+real-DLL de Brovan) et un modèle de fidélité **différent** (on émule le
+comportement de la BCL, pas le vrai framework), mais bien plus tractable pour
+livrer vite de l'analyse comportementale. Les deux voies **partagent** le versant
+statique existant et peuvent coexister (statique maintenant, dynamique ensuite).
+Détail hors périmètre de ce document.
+
+---
+
+## 14. Interaction avec l'existant — à ne pas casser
+
+- Le versant **statique** (§2) reste inchangé et sert de base aux deux voies.
+- Le branchement runtime (H1) est **strictement gardé** par
+  `DotNetStatus == DotNet` : un PE natif suit exactement le chemin actuel.
+- Provisioning runtime = **extension** de `WindowsLibs`/VFS, pas de code hôte
+  spécifique à un échantillon (règles « genericité » et « pas de valeurs
+  magiques »).
+- Toute nouvelle branche de terminaison respecte la **discipline de verdict** :
+  honnêteté sur les frontières (H8).
