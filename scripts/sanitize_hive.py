@@ -30,9 +30,33 @@ import sys
 # Extend this table as further hive-resident VM tells are confirmed (e.g. ACPI
 # OEM ids), keeping the length-preserving invariant.
 REPLACEMENTS = [
-    # Hyper-V / Azure synthetic disk product id (Msft "Virtual Disk"). 12 chars.
-    # "WDC_WD10EZEX" is a real Western Digital Blue 1 TB model -> no VM marker.
-    ("Virtual_Disk", "WDC_WD10EZEX"),
+    # Hyper-V / Azure synthetic disk. The disk surfaces in two id forms that must stay
+    # INTERNALLY COHERENT after rewriting: the device-instance path
+    # `SCSI\Disk&Ven_Msft&Prod_Virtual_Disk` and the hardware/compatible id
+    # `SCSI\DiskMsft____Virtual_Disk____`. Rewriting only the product (the previous
+    # single "Virtual_Disk"->"WDC_WD10EZEX" rule) left the `Ven_Msft` / `Msft____`
+    # Microsoft synthetic-VENDOR marker in place, producing the impossible pairing
+    # "Ven_Msft & Prod_WDC..." (a Microsoft vendor never ships a Western Digital
+    # product) -- itself a VM tell. A real SATA/ATA disk enumerates with an EMPTY
+    # SCSI vendor (`Ven_&Prod_<model>` / 8 blanks -> `________` in the padded id), so
+    # both forms are rewritten to an empty vendor + a real WD Blue 1 TB model. All
+    # replacements stay byte-length preserving (26 / 24 / 12 chars).
+    # -- ORDER MATTERS: longest/most-specific first, so the disk's vendor+product are
+    #    rewritten together before the generic vendor rule can nibble the shared prefix.
+    ("Ven_Msft&Prod_Virtual_Disk", "Ven_&Prod_WDC_WD10EZEX-08W"),  # instance path (26)
+    ("Msft____Virtual_Disk____", "________WDC_WD10EZEX____"),        # hardware/compat id (24)
+    ("Virtual_Disk", "WDC_WD10EZEX"),                                # product-only fallback (12)
+    # Generic Microsoft synthetic-VENDOR marker in the padded 8-char SCSI vendor field.
+    # After the disk-specific rules above have run, the only remaining `Msft____` are on
+    # the other Hyper-V synthetic storage devices (PMEM disk, synthetic DVD-ROM); emptying
+    # their vendor removes the "Msft" tell uniformly. `________` = an 8-blank ATA vendor.
+    # The byte pattern is storage-id specific, so there is no non-device collateral.
+    ("Msft____", "________"),                                        # generic vendor (8)
+    # KNOWN RESIDUAL (untouched -- no probe currently reads them, and a desktop would not
+    # carry these synthetic devices at all, so there is no coherent length-preserving
+    # consumer-hardware PRODUCT substitute to fabricate. Revisit only if a sample keys on
+    # them): `VirtualPMEM_Disk`, `Virtual_DVD-ROM_` product ids and the `Msft Virtual Disk`
+    # friendly-name / device-description strings.
 ]
 
 
