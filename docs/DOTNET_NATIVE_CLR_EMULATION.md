@@ -305,7 +305,7 @@ Format volontairement calqué sur la table de progression d'`AL_KHASER_EMULATION
 | **J0 — Spike JIT** ✅ **FAIT (GO, jambe Unicorn)** | Prouver que le backend exécute du code écrit puis exécuté à l'exécution, avec bascule RW→RX. | **Fait** via `scripts/jit_spike_j0.py` sur Unicorn 2.1.4 : 5/5 tests JIT-critiques verts (§5.d). **Correctif pré-requis identifié** : `remove_cache` sur écritures hôte de code (§5.d). **Reste** : rejouer la jambe **KVM** sur un hôte `/dev/kvm`. |
 | **J1 — Provisioning** 🟡 **partiel** | Déposer le runtime cible dans `WindowsLibs` + framework dans le VFS ; résolution de chemins OK. | Le loader guest mappe `clr.dll`/`clrjit.dll` (ou `coreclr.dll`) sans `STATUS_DLL_NOT_FOUND` ; modules visibles dans la LDR list. **Mesuré (§8bis)** : Brovan **construit et tourne sur hôte Linux**, émule un PE natif de bout en bout ; mais le bundle deps ne contient **aucun runtime CLR** → à ajouter. Un publish **self-contained** (runtime app-local) est mappé et exécuté par l'apphost. |
 | **J2 — Bind d'entrée** ✅ **FAIT (.NET Core)** | .NET Framework : l'import `mscoree!_CorExeMain` bind. .NET Core : l'apphost natif résout son chemin et charge la chaîne host. | **Mesuré (§8bis.2)** : après le fix `NtQueryFullAttributesFile`, l'apphost self-contained résout `pal::realpath` puis charge **`hostfxr.dll` → `hostpolicy.dll` → `coreclr.dll`**. |
-| **J3 — Survie init CLR** 🟡 **atteint, frontière nette** | Le CLR initialise GC/TLS/heaps sans faute non gérée. | **Mesuré (§8bis.2)** : `coreclr_initialize` s'exécute puis échoue `HRESULT 0x80070008` (ERROR_NOT_ENOUGH_MEMORY) sur une **section `SEC_RESERVE` de 2 To** (`global_region_allocator` du GC .NET 8). Frontière = **réservation d'espace d'adressage >4 Go sparse** dans le modèle mémoire de Brovan (`NtCreateSection` plafonne à `uint.MaxValue`). |
+| **J3 — Survie init CLR** 🟡 **profondément avancé** | Le CLR initialise GC/TLS/heaps sans faute non gérée. | **Mesuré (§8bis.2)** : le blocage 2 To est **corrigé** (réservation `SEC_RESERVE` sparse) → `coreclr_initialize` passe la réservation GC, commit/utilise le heap regions, et l'init tourne **~28 M instructions** (×4,7). **Nouvelle frontière** : fail-fast **`0xC0000005`** (AV interne coreclr) plus loin dans l'init, avant le 1er JIT (`clrjit` pas encore chargé). |
 | **J4 — Première méthode JIT-ée** | `clrjit` compile et exécute au moins une méthode managée. | Bascule RW→RX observée + exécution du code produit ; RIP dans une page JIT. |
 | **J5 — `Main()` managé** | Exécution du point d'entrée managé. | Effet de bord observable d'un `Console.WriteLine("...")` capté par `NtWriteFile`/console. |
 | **J6 — Terminaison propre** | Sortie via l'`ExitProcess` du CLR. | Statut de sortie honnête ; trace syscalls exploitable. |
@@ -397,20 +397,41 @@ identique. Aligné sur `IDEAS.md` #1 (« ajouter des syscalls »).
 `hostfxr.dll` → `hostpolicy.dll` → **`coreclr.dll`** (confirmé par les `Loaded …`)
 et appelle `coreclr_initialize`. **J2 franchi, J3 atteint.**
 
-**Nouvelle frontière J3 (diagnostiquée, non corrigée).** `coreclr_initialize`
-échoue `0x80070008` (`ERROR_NOT_ENOUGH_MEMORY`). Diagnostic (log temporaire sur
+**Blocage J3 #1 : la réservation GC 2 To — CORRIGÉ.** `coreclr_initialize`
+échouait `0x80070008` (`ERROR_NOT_ENOUGH_MEMORY`). Diagnostic (log temporaire sur
 le chemin `STATUS_NO_MEMORY`) : `NtCreateSection` avec **`Size = 0x20000000000`
 (2 To)** — la réservation d'espace d'adressage du `global_region_allocator` du
-GC .NET 8 (feature *regions*). Brovan la rejette (`Size > uint.MaxValue`), et
-`MapUniqueAddress` allouerait de toute façon un buffer réel. Le cap
-`System.GC.HeapHardLimit` ne réduit **pas** cette réservation (elle est intrinsèque
-au GC regions). **Fix requis = support des réservations `SEC_RESERVE` >4 Go
-sparses** (adresse réservée sans backing, commit/pagination à la demande) dans le
-modèle mémoire + backend de Brovan — une vraie fonctionnalité, pas un stub, hors
-périmètre de cette passe (risque de cascade sur le chemin natif validé). C'est le
-**prochain pas concret** pour J4-J5. NB : le .NET **Framework** (heap CLR classique,
-sans réservation regions 2 To) pourrait franchir J3 sans cette fonctionnalité —
-piste alternative une fois son runtime provisionné.
+GC .NET 8 (feature *regions*). Brovan la rejetait (`Size > uint.MaxValue`) et
+`MapUniqueAddress` aurait alloué un buffer réel ; `System.GC.HeapHardLimit` ne
+réduit **pas** cette réservation (intrinsèque au GC regions).
+
+**Fix (livré).** Le modèle mémoire de Brovan supporte déjà les réservations
+paresseuses : `ReserveMemory` n'inscrit que des **métadonnées** (pas de
+`uc_mem_map`), et `CommitMemory` mappe seulement les pages committées à la demande.
+Le fix exploite ça : nouveau `ReserveSparseSection(Size, Protect)`
+(`BinaryEmulator.WindowsBridge.cs`) qui réserve une grosse plage (>4 Go) en
+métadonnées à une **base haute** (16 To), sans backing. `NtCreateSection` route les
+sections non-image `Size > uint.MaxValue` vers ce chemin (au lieu de rejeter) ;
+`NtMapViewOfSection` **saute le `uc_mem_protect`** sur la vue sparse (mémoire non
+committée) et renvoie la base réservée ; les commits ultérieurs
+(`NtAllocateVirtualMemory(MEM_COMMIT)` → `CommitMemory`) mappent page par page.
+**Gate étroit** : seul le cas `Size > uint.MaxValue` — qui échouait déjà — change,
+donc **zéro régression** sur les sections ≤4 Go (PE natif témoin identique).
+
+**Effet mesuré.** Plus de rejet 2 To : `coreclr_initialize` réserve, commit et
+**utilise** le heap regions, et l'init progresse de **6 M → ~28 M instructions**
+(×4,7) avant la frontière suivante.
+
+**Blocage J3 #2 (nouveau, diagnostiqué, non corrigé).** À ~28 M instructions,
+coreclr fait un **fail-fast `NtTerminateProcess(0xC0000005)`** — une AV interne
+qu'il attrape lui-même, **avant** le premier JIT (`clrjit` pas encore chargé). Le
+syscall win32u **`0x1037`** non implémenté vu très tôt (ligne 862/66267, init CRT)
+est **incident** et sans rapport. Trouver l'accès fautif racine (instruction /
+adresse) est le **prochain pas concret** pour J4 : candidats — une valeur de
+syscall que coreclr n'attend pas, une arête du modèle mémoire (TLS / heap
+exécutable JIT), ou un chemin d'init exigeant plus de fidélité. NB : le .NET
+**Framework** (heap CLR classique, sans regions 2 To) reste une piste alternative
+une fois son runtime provisionné.
 
 ### Reproduction
 
@@ -500,11 +521,15 @@ n'est qu'une question de *quelle enveloppe de bootstrap* attaquer en premier.
   prérequis à J4+. *(NB : la worker factory vue au J2 avant le fix §8bis.2
   n'était **pas** ce bug — fausse piste ; le blocage réel était un syscall
   manquant. F-THREAD n'a donc pas encore été atteint empiriquement.)*
-- **F-GCRESERVE — réservation d'espace d'adressage >4 Go (frontière J3 active).**
-  Le GC regions .NET 8 réserve ~2 To via `NtCreateSection`/`SEC_RESERVE` ;
-  `NtCreateSection` de Brovan plafonne à `uint.MaxValue` et `MapUniqueAddress`
-  alloue un backing réel. Fix = sections/reserves sparses paginées à la demande.
-  Bloque `coreclr_initialize` (§8bis.2).
+- **F-GCRESERVE — réservation d'espace d'adressage >4 Go — ✅ RÉSOLU.**
+  Le GC regions .NET 8 réserve ~2 To via `NtCreateSection`/`SEC_RESERVE`.
+  Corrigé par `ReserveSparseSection` (réserve métadonnées à base haute, commit à la
+  demande) ; gate étroit sur `Size > uint.MaxValue`, zéro régression. `coreclr_initialize`
+  franchit désormais la réservation (§8bis.2).
+- **F-CLRINIT-AV — AV interne coreclr à ~28 M instructions (frontière J3/J4 active).**
+  Après la réservation GC, `coreclr_initialize` fait un fail-fast
+  `NtTerminateProcess(0xC0000005)` avant le 1er JIT. Cause racine non encore
+  isolée (accès fautif à tracer). Bloque J4 (§8bis.2).
 - **F-FRAMEWORK — surface BCL réelle.** Selon ce que l'assembly touche, le CLR
   charge de plus en plus d'assemblies système ⇒ plus de fichiers VFS + plus de
   syscalls. La couverture croît avec le corpus, pas d'un coup.

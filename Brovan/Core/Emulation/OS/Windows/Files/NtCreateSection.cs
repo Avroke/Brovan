@@ -74,20 +74,32 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
             }
 
-            if (Size > uint.MaxValue)
-                return NTSTATUS.STATUS_NO_MEMORY;
-
             ulong BackingAddress = 0;
             if (!IsImage)
             {
-                BackingAddress = Instance.MapUniqueAddress((uint)Size, MemoryProtection.ReadWrite);
-                if (BackingAddress == 0)
-                    return NTSTATUS.STATUS_NO_MEMORY;
-
-                if (Data != null && Data.Length != 0)
+                if (Size > uint.MaxValue)
                 {
-                    if (!Instance.WriteMemory(BackingAddress, Data))
-                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                    // Large reserve that cannot be host-backed up front — the canonical case is
+                    // the .NET 8 GC "regions" allocator reserving ~2 TiB of address space
+                    // (SEC_RESERVE). Reserve the range as metadata only; the guest commits
+                    // sub-ranges on demand via NtAllocateVirtualMemory(MEM_COMMIT) → CommitMemory,
+                    // which maps only the touched pages. No Data path here: a > 4 GiB section is
+                    // never a file-backed data blob.
+                    BackingAddress = Instance.ReserveSparseSection(Size, SectionPageProtection);
+                    if (BackingAddress == 0)
+                        return NTSTATUS.STATUS_NO_MEMORY;
+                }
+                else
+                {
+                    BackingAddress = Instance.MapUniqueAddress((uint)Size, MemoryProtection.ReadWrite);
+                    if (BackingAddress == 0)
+                        return NTSTATUS.STATUS_NO_MEMORY;
+
+                    if (Data != null && Data.Length != 0)
+                    {
+                        if (!Instance.WriteMemory(BackingAddress, Data))
+                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                    }
                 }
             }
 

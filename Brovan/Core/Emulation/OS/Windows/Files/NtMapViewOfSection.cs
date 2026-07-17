@@ -248,7 +248,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
 
             MemoryProtection Protection = Instance.WinHelper.ConvertWinProtectToInternal(Win32Protect);
-            Instance._emulator.SetMemoryProtection(ReturnedBase, ReturnedSize, Protection);
+
+            // A large sparse-reserve section (Size > 4 GiB — the .NET GC regions case) has no host
+            // pages mapped yet: it is reserved address space, committed sub-range by sub-range on
+            // demand. uc_mem_protect over the whole (multi-TiB) view would fail on unmapped memory,
+            // so skip it — protection is applied per page at commit time (CommitMemory).
+            if (Section.Size <= uint.MaxValue)
+                Instance._emulator.SetMemoryProtection(ReturnedBase, ReturnedSize, Protection);
 
             if (!Instance._emulator.WriteMemory(BaseAddressPtr, ReturnedBase, 8))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;

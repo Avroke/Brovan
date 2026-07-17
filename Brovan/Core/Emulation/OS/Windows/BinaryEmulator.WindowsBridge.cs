@@ -1489,6 +1489,39 @@ namespace Brovan.Core.Emulation
             return Module;
         }
 
+        /// <summary>
+        /// Reserves a large (&gt; 4 GiB) address-space range as metadata only, with no host
+        /// backing — the sparse counterpart of <see cref="MapUniqueAddress"/>, for SEC_RESERVE
+        /// sections whose size cannot be host-backed up front (the .NET 8 GC "regions" allocator
+        /// reserves ~2 TiB via NtCreateSection). The guest commits sub-ranges on demand through
+        /// NtAllocateVirtualMemory(MEM_COMMIT) → <see cref="CommitMemory"/>, which maps only the
+        /// pages actually touched. Returns the reserved base, or 0 if no free hole was found.
+        /// </summary>
+        public ulong ReserveSparseSection(ulong Size, uint Protect)
+        {
+            Size = AlignUp(Size, PageSize);
+            if (Size == 0)
+                return 0;
+
+            // Search the high user-mode VA space, well above the ~32 GiB window MapUniqueAddress
+            // manages, so a huge reserve never collides with image/heap/stack allocations.
+            const ulong SparseSearchBase = 0x0000_1000_0000_0000UL; // 16 TiB
+            const ulong SparseSearchCeil = 0x0000_7FF0_0000_0000UL; // just under the x64 user ceiling
+            const ulong Step = 0x0000_0001_0000_0000UL;             // 4 GiB stride
+
+            for (ulong Candidate = SparseSearchBase; Candidate + Size <= SparseSearchCeil; Candidate += Step)
+            {
+                if (!IsRegionInUse(Candidate, Size))
+                {
+                    if (ReserveMemory(Candidate, Size, Protect))
+                        return Candidate;
+                    return 0;
+                }
+            }
+
+            return 0;
+        }
+
         public bool ReserveMemory(ulong BaseAddress, ulong Size, uint Protect)
         {
             Size = AlignUp(Size, PageSize);
