@@ -305,7 +305,7 @@ Format volontairement calqué sur la table de progression d'`AL_KHASER_EMULATION
 | **J0 — Spike JIT** ✅ **FAIT (GO, jambe Unicorn)** | Prouver que le backend exécute du code écrit puis exécuté à l'exécution, avec bascule RW→RX. | **Fait** via `scripts/jit_spike_j0.py` sur Unicorn 2.1.4 : 5/5 tests JIT-critiques verts (§5.d). **Correctif pré-requis identifié** : `remove_cache` sur écritures hôte de code (§5.d). **Reste** : rejouer la jambe **KVM** sur un hôte `/dev/kvm`. |
 | **J1 — Provisioning** 🟡 **partiel** | Déposer le runtime cible dans `WindowsLibs` + framework dans le VFS ; résolution de chemins OK. | Le loader guest mappe `clr.dll`/`clrjit.dll` (ou `coreclr.dll`) sans `STATUS_DLL_NOT_FOUND` ; modules visibles dans la LDR list. **Mesuré (§8bis)** : Brovan **construit et tourne sur hôte Linux**, émule un PE natif de bout en bout ; mais le bundle deps ne contient **aucun runtime CLR** → à ajouter. Un publish **self-contained** (runtime app-local) est mappé et exécuté par l'apphost. |
 | **J2 — Bind d'entrée** ✅ **FAIT (.NET Core)** | .NET Framework : l'import `mscoree!_CorExeMain` bind. .NET Core : l'apphost natif résout son chemin et charge la chaîne host. | **Mesuré (§8bis.2)** : après le fix `NtQueryFullAttributesFile`, l'apphost self-contained résout `pal::realpath` puis charge **`hostfxr.dll` → `hostpolicy.dll` → `coreclr.dll`**. |
-| **J3 — Survie init CLR** 🟡 **profondément avancé** | Le CLR initialise GC/TLS/heaps sans faute non gérée. | **Mesuré (§8bis.2)** : le blocage 2 To est **corrigé** (réservation `SEC_RESERVE` sparse) → `coreclr_initialize` passe la réservation GC, commit/utilise le heap regions, et l'init tourne **~28 M instructions** (×4,7). **Nouvelle frontière** : fail-fast **`0xC0000005`** (AV interne coreclr) plus loin dans l'init, avant le 1er JIT (`clrjit` pas encore chargé). |
+| **J3 — Survie init CLR** 🟡 **profondément avancé, root cause suivante isolée** | Le CLR initialise GC/TLS/heaps sans faute non gérée. | **Mesuré (§8bis.2)** : blocage 2 To **corrigé** (réserve sparse) → l'init tourne **~28 M instructions** (×4,7). Root cause du fail-fast **`0xC0000005`** suivant **isolée** : le **double-mapping W^X** du code coreclr (2 vues RX+RW, base collapsée par Brovan). Contournement mesuré : `DOTNET_EnableWriteXorExecute=0` (→ chaîne W^X-off : gros reserve **corrigé**, puis page de garde de pile). |
 | **J4 — Première méthode JIT-ée** | `clrjit` compile et exécute au moins une méthode managée. | Bascule RW→RX observée + exécution du code produit ; RIP dans une page JIT. |
 | **J5 — `Main()` managé** | Exécution du point d'entrée managé. | Effet de bord observable d'un `Console.WriteLine("...")` capté par `NtWriteFile`/console. |
 | **J6 — Terminaison propre** | Sortie via l'`ExitProcess` du CLR. | Statut de sortie honnête ; trace syscalls exploitable. |
@@ -422,16 +422,44 @@ donc **zéro régression** sur les sections ≤4 Go (PE natif témoin identique)
 **utilise** le heap regions, et l'init progresse de **6 M → ~28 M instructions**
 (×4,7) avant la frontière suivante.
 
-**Blocage J3 #2 (nouveau, diagnostiqué, non corrigé).** À ~28 M instructions,
-coreclr fait un **fail-fast `NtTerminateProcess(0xC0000005)`** — une AV interne
-qu'il attrape lui-même, **avant** le premier JIT (`clrjit` pas encore chargé). Le
-syscall win32u **`0x1037`** non implémenté vu très tôt (ligne 862/66267, init CRT)
-est **incident** et sans rapport. Trouver l'accès fautif racine (instruction /
-adresse) est le **prochain pas concret** pour J4 : candidats — une valeur de
-syscall que coreclr n'attend pas, une arête du modèle mémoire (TLS / heap
-exécutable JIT), ou un chemin d'init exigeant plus de fidélité. NB : le .NET
-**Framework** (heap CLR classique, sans regions 2 To) reste une piste alternative
-une fois son runtime provisionné.
+**Blocage J3 #2 : le double-mapping W^X — ROOT CAUSE ISOLÉE.** À ~28 M
+instructions coreclr fait un fail-fast `NtTerminateProcess(0xC0000005)`. Le hook
+mémoire de Brovan donne l'accès fautif racine :
+`write (protected) addr=0x100000000010 rip=coreclr+0x172373`. Diagnostics
+temporaires (dump région à la faute + attributs section/vue) :
+
+- La section 2 To est `SEC_RESERVE`, `prot=PAGE_EXECUTE_READWRITE`.
+- coreclr en mappe **deux vues à la même base** (`0x100000000000`), l'une RWX, l'autre RW.
+- La page fautive est `committed=True prot=PAGE_EXECUTE_READ` : coreclr **écrit** sur une page **RX**.
+
+C'est le **`ExecutableAllocator` double-mappé (W^X) de coreclr** : il mappe la même
+section à **deux adresses** — une vue **RX** (exécution) et une vue **RW** (écriture
+du code JIT) partageant le stockage. Le `NtMapViewOfSection` de Brovan renvoie la
+**même base** pour les deux → elles se collapsent, et l'écriture via la « vue RW »
+tombe sur la page RX → faute. Émuler l'aliasing mémoire (2 VA, 1 backing) est très
+dur sous Unicorn (`uc_mem_map` alloue un backing hôte distinct par plage).
+
+**Le contournement propre : désactiver W^X.** `DOTNET_EnableWriteXorExecute=0`
+(variable d'env guest) fait basculer coreclr sur un mapping **unique RWX** pour le
+code — pas de double-map, pas d'aliasing — exactement ce que le modèle mémoire de
+Brovan supporte (et que le spike J0 a validé). **Mesuré** : le double-map disparaît
+(0 faute), coreclr progresse plus loin, révélant la **chaîne** de gaps mémoire du
+mode W^X-off :
+
+1. Le code allocator réserve alors de grosses plages via `VirtualAlloc(MEM_RESERVE,
+   base=NULL)` → `FindFreeBaseAddress` de Brovan (fenêtre ~128 Go) échoue.
+   **Corrigé (livré)** : `FindFreeBaseAddress` route les réserves >16 Go vers
+   l'espace sparse haut (pendant du fix section ; `NtAllocateVirtualMemory{,Ex}`).
+2. Frontière suivante : commit d'une **page de garde de pile**
+   (`Base≈0x1017B000 size=0x5000 prot=PAGE_GUARD|PAGE_READWRITE`) sur une région
+   non-réservée → `CommitMemory` refuse. À traiter ensuite.
+
+**Voie recommandée pour J4-J5** : intégrer proprement `DOTNET_EnableWriteXorExecute=0`
+(injection d'env guest, idéalement gated sur détection .NET), puis dérouler la
+chaîne W^X-off (page de garde, etc.). Alternative de fond : émuler le vrai
+double-mapping (aliasing 2 VA/1 backing) — beaucoup plus lourd. NB : le .NET
+**Framework** (heap CLR classique, sans regions 2 To ni W^X double-map par défaut)
+reste une piste alternative une fois son runtime provisionné.
 
 ### Reproduction
 
@@ -522,14 +550,22 @@ n'est qu'une question de *quelle enveloppe de bootstrap* attaquer en premier.
   n'était **pas** ce bug — fausse piste ; le blocage réel était un syscall
   manquant. F-THREAD n'a donc pas encore été atteint empiriquement.)*
 - **F-GCRESERVE — réservation d'espace d'adressage >4 Go — ✅ RÉSOLU.**
-  Le GC regions .NET 8 réserve ~2 To via `NtCreateSection`/`SEC_RESERVE`.
-  Corrigé par `ReserveSparseSection` (réserve métadonnées à base haute, commit à la
-  demande) ; gate étroit sur `Size > uint.MaxValue`, zéro régression. `coreclr_initialize`
-  franchit désormais la réservation (§8bis.2).
-- **F-CLRINIT-AV — AV interne coreclr à ~28 M instructions (frontière J3/J4 active).**
-  Après la réservation GC, `coreclr_initialize` fait un fail-fast
-  `NtTerminateProcess(0xC0000005)` avant le 1er JIT. Cause racine non encore
-  isolée (accès fautif à tracer). Bloque J4 (§8bis.2).
+  Le GC regions / code allocator réserve ~2 To (via `NtCreateSection`/`SEC_RESERVE`
+  **et** via `VirtualAlloc(MEM_RESERVE, base=NULL)`). Corrigé par
+  `ReserveSparseSection` (sections) **+** la branche « espace haut » de
+  `FindFreeBaseAddress` (`NtAllocateVirtualMemory{,Ex}`) : réserve métadonnées à
+  base haute (16 To), commit à la demande. Gate étroit (>uint.MaxValue / >16 Go),
+  zéro régression (§8bis.2).
+- **F-WXMAP — double-mapping W^X du code coreclr (frontière J3/J4 active).**
+  Root cause du fail-fast `0xC0000005` : coreclr mappe sa section de code à **deux
+  VA** (RX exécution + RW écriture, backing partagé) ; Brovan renvoie la même base
+  → collision → l'écriture tombe sur la page RX. Contournement propre mesuré :
+  `DOTNET_EnableWriteXorExecute=0` (mapping unique RWX). Émuler le vrai aliasing
+  2 VA/1 backing sous Unicorn est l'alternative lourde (§8bis.2).
+- **F-STACKGUARD — commit de page de garde sur région non-réservée (frontière J4,
+  mode W^X-off).** coreclr commit une garde de pile (`PAGE_GUARD|PAGE_READWRITE`)
+  sur une région que `CommitMemory` ne voit pas comme réservée. Prochaine étape de
+  la chaîne W^X-off (§8bis.2).
 - **F-FRAMEWORK — surface BCL réelle.** Selon ce que l'assembly touche, le CLR
   charge de plus en plus d'assemblies système ⇒ plus de fichiers VFS + plus de
   syscalls. La couverture croît avec le corpus, pas d'un coup.
