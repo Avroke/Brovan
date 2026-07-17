@@ -12,9 +12,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
-
+            // Bitness-agnostic: args via GetArg64 (delegates to GetArg32 in WOW64); FILE_BASIC_INFORMATION is
+            // 0x28 on both bitnesses. OBJECT_ATTRIBUTES has 4-byte fields on x86 / 8-byte on x64 — read branches.
             ulong ObjectAttributesPtr = Instance.WinHelper.GetArg64(0);
             ulong FileInformationPtr = Instance.WinHelper.GetArg64(1);
 
@@ -24,13 +23,27 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.IsRegionMapped(FileInformationPtr, FileBasicInformationSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (!Instance.WinHelper.TryReadObjectAttributesName64(ObjectAttributesPtr, out OBJECT_ATTRIBUTES64 Attributes, out string Name, out string FullName, out NTSTATUS ObjectNameStatus))
-                return ObjectNameStatus;
+            ulong RootDirectory;
+            string Name;
+            string FullName;
+            NTSTATUS ObjectNameStatus;
+            if (Instance._binary.Architecture == BinaryArchitecture.x64)
+            {
+                if (!Instance.WinHelper.TryReadObjectAttributesName64(ObjectAttributesPtr, out OBJECT_ATTRIBUTES64 Attributes, out Name, out FullName, out ObjectNameStatus))
+                    return ObjectNameStatus;
+                RootDirectory = Attributes.RootDirectory;
+            }
+            else
+            {
+                if (!Instance.WinHelper.TryReadObjectAttributesName32((uint)ObjectAttributesPtr, out uint RootDirectory32, out _, out Name, out FullName, out ObjectNameStatus))
+                    return ObjectNameStatus;
+                RootDirectory = RootDirectory32;
+            }
 
             if (string.IsNullOrEmpty(Name))
                 return NTSTATUS.STATUS_OBJECT_NAME_INVALID;
 
-            string EmulatedPath = Instance.WinHelper.ResolveWindowsFilePath(FullName, Attributes.RootDirectory);
+            string EmulatedPath = Instance.WinHelper.ResolveWindowsFilePath(FullName, RootDirectory);
             if (string.IsNullOrEmpty(EmulatedPath))
                 return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
 
