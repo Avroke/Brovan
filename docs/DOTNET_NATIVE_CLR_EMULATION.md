@@ -304,8 +304,8 @@ Format volontairement calqué sur la table de progression d'`AL_KHASER_EMULATION
 |---|---|---|
 | **J0 — Spike JIT** ✅ **FAIT (GO, jambe Unicorn)** | Prouver que le backend exécute du code écrit puis exécuté à l'exécution, avec bascule RW→RX. | **Fait** via `scripts/jit_spike_j0.py` sur Unicorn 2.1.4 : 5/5 tests JIT-critiques verts (§5.d). **Correctif pré-requis identifié** : `remove_cache` sur écritures hôte de code (§5.d). **Reste** : rejouer la jambe **KVM** sur un hôte `/dev/kvm`. |
 | **J1 — Provisioning** 🟡 **partiel** | Déposer le runtime cible dans `WindowsLibs` + framework dans le VFS ; résolution de chemins OK. | Le loader guest mappe `clr.dll`/`clrjit.dll` (ou `coreclr.dll`) sans `STATUS_DLL_NOT_FOUND` ; modules visibles dans la LDR list. **Mesuré (§8bis)** : Brovan **construit et tourne sur hôte Linux**, émule un PE natif de bout en bout ; mais le bundle deps ne contient **aucun runtime CLR** → à ajouter. Un publish **self-contained** (runtime app-local) est mappé et exécuté par l'apphost. |
-| **J2 — Bind d'entrée** 🟡 **atteint (natif)** | .NET Framework : l'import `mscoree!_CorExeMain` bind et le premier saut atteint mscoree. .NET Core : l'apphost natif charge hostfxr. | **Mesuré (§8bis)** : l'apphost self-contained exécute **6,0 M instructions** de bootstrap natif (15 DLL système mappées, thread-pool Win32, CPUID) mais **termine avant** de charger `hostfxr`/`coreclr` — corrèle avec F-THREAD (scheduler MLFQ) et/ou la résolution app-local. |
-| **J3 — Survie init CLR** | Le CLR initialise GC/TLS/heaps sans faute non gérée. | Franchit l'init sans `0xC0000005` ; premier appel au JIT observé. |
+| **J2 — Bind d'entrée** ✅ **FAIT (.NET Core)** | .NET Framework : l'import `mscoree!_CorExeMain` bind. .NET Core : l'apphost natif résout son chemin et charge la chaîne host. | **Mesuré (§8bis.2)** : après le fix `NtQueryFullAttributesFile`, l'apphost self-contained résout `pal::realpath` puis charge **`hostfxr.dll` → `hostpolicy.dll` → `coreclr.dll`**. |
+| **J3 — Survie init CLR** 🟡 **atteint, frontière nette** | Le CLR initialise GC/TLS/heaps sans faute non gérée. | **Mesuré (§8bis.2)** : `coreclr_initialize` s'exécute puis échoue `HRESULT 0x80070008` (ERROR_NOT_ENOUGH_MEMORY) sur une **section `SEC_RESERVE` de 2 To** (`global_region_allocator` du GC .NET 8). Frontière = **réservation d'espace d'adressage >4 Go sparse** dans le modèle mémoire de Brovan (`NtCreateSection` plafonne à `uint.MaxValue`). |
 | **J4 — Première méthode JIT-ée** | `clrjit` compile et exécute au moins une méthode managée. | Bascule RW→RX observée + exécution du code produit ; RIP dans une page JIT. |
 | **J5 — `Main()` managé** | Exécution du point d'entrée managé. | Effet de bord observable d'un `Console.WriteLine("...")` capté par `NtWriteFile`/console. |
 | **J6 — Terminaison propre** | Sortie via l'`ExitProcess` du CLR. | Statut de sortie honnête ; trace syscalls exploitable. |
@@ -354,26 +354,63 @@ Windows + Unicorn 2.1.4. Objectif : mesurer où en est concrètement la Voie A.
 | Cas | Observation |
 |---|---|
 | **PE managé .NET Framework** (net48, x64) | Brovan **détecte .NET** puis affiche : *« doesn't currently support emulating .NET CIL instructions → treated as a normal PE »* → exécute l'entrypoint natif (stub `mscoree`). Le **loader ntdll bootstrappe** (centaines de syscalls) mais **stalle** : `mscoree`/`clr`/`clrjit` **absents du bundle** (J1 non provisionné). |
-| **Self-contained .NET Core** (net8, `win-x64`, runtime app-local complet : `coreclr.dll`/`clrjit.dll`/`hostfxr.dll`/`hostpolicy.dll`/`System.Private.CoreLib.dll` + framework, 187 fichiers) | L'apphost natif tourne **6 016 096 instructions** : mappe 15 DLL système réelles (ntdll, kernel32, kernelbase, user32, win32u, gdi32(full), ucrtbase, msvcp_win, shell32, advapi32, msvcrt, sechost, rpcrt4), lève des workers **thread-pool Win32** (`NtWorkerFactoryWorkerReady`), fait la détection **CPUID** (leaf 0/1/7). Puis **termine avant** de charger `hostfxr`/`hostpolicy`/`coreclr`/`clrjit` (0 référence) : thread `7977` terminé `0x80008085`, `NtTerminateProcess → ACCESS_DENIED`. |
+| **Self-contained .NET Core** (net8, `win-x64`, runtime app-local complet : `coreclr.dll`/`clrjit.dll`/`hostfxr.dll`/`hostpolicy.dll`/`System.Private.CoreLib.dll` + framework, 187 fichiers) | **1re passe** : l'apphost tourne ~6 M instructions, mappe 15 DLL système, mais **échoue à résoudre son propre chemin** (`CoreHostCurHostFindFailure` 0x80008085) — cause **diagnostiquée et corrigée**, voir §8bis.2. **Après fix** : charge `hostfxr`→`hostpolicy`→`coreclr` et atteint J3. |
+
+> ⚠️ La lecture initiale « termine avant hostfxr, corrèle avec F-THREAD » était
+> une **fausse piste** : la worker factory Win32 vue au terminus est le pool
+> loader/CRT bénin, pas le blocage. La vraie cause est isolée en §8bis.2.
 
 ### Lecture
 
 - Le **stack d'émulation est validé** : un vrai process Windows natif s'exécute
-  intégralement. La Voie A ne bute donc pas sur le socle, mais sur les couches
-  .NET, exactement comme prévu.
+  intégralement. La Voie A ne bute pas sur le socle, mais sur les couches .NET.
 - **J1** : le seul manque est le **provisioning du runtime CLR** (le bundle n'en
   contient pas). Le publish self-contained le fournit app-local et Brovan le
-  mappe — donc la voie « fournir le vrai CLR » est mécaniquement ouverte.
-- **J2** : l'apphost self-contained ne franchit pas encore le pont vers
-  `hostfxr`/`coreclr`. Sa terminaison **au milieu d'activité multi-thread**
-  (worker factory + thread `0x80008085`) pointe vers la frontière **F-THREAD**
-  (bug scheduler MLFQ signalé dans `IDEAS.md` — « apps multi-thread qui sortent,
-  2 threads en attente jamais Ready ») et/ou la résolution app-local de
-  `hostfxr` par l'apphost. Départager les deux (tracer l'ouverture de fichier
-  `hostfxr.dll` vs l'état du scheduler à la terminaison) est le **prochain pas
-  concret**. NB : le .NET Framework (mscoree, chaîne plus courte, §10) court-
-  circuite l'apphost/hostfxr et reste la cible la plus simple pour J2-J3 une fois
-  son runtime provisionné.
+  mappe — la voie « fournir le vrai CLR » est mécaniquement ouverte.
+- **J2/J3** : voir §8bis.2 — J2 franchi (chaîne host chargée), J3 atteint avec
+  une frontière nette (réservation GC 2 To).
+
+### 8bis.2 — Percée J2→J3 : un syscall manquant, puis la réservation GC
+
+**Diagnostic J2 (méthode).** Le message guest exact
+`Failed to resolve full path of the current executable [C:\Users\…\mgdcore.exe]`
+est le libellé corehost de `CoreHostCurHostFindFailure` (**0x80008085**).
+`GetModuleFileNameW` renvoyait le **bon** chemin ; c'est `pal::realpath` qui
+échouait. La trace `[ENTRY]` (mode `debug`) montre la séquence
+`GetFileAttributesExW → RtlDosPathNameToRelativeNtPathName_U → NtQueryFullAttributesFile`
+suivie de **`Unimplemented syscall … STATUS_NOT_SUPPORTED`**.
+
+**Cause racine.** Brovan implémentait `NtQueryAttributesFile` (0x3D) mais **pas
+son jumeau `NtQueryFullAttributesFile`** — que `kernelbase!GetFileAttributesExW`
+utilise. Sans lui, `GetFileAttributesExW` échoue sur **tout** chemin, donc
+`pal::realpath` échoue et l'apphost abandonne avant de chercher `hostfxr`. Ce
+n'était **ni F-THREAD ni un fichier manquant** : un seul syscall.
+
+**Fix (livré).** `Core/Emulation/OS/Windows/Files/NtQueryFullAttributesFile.cs` —
+calqué sur `NtQueryAttributesFile`, écrit `FILE_NETWORK_OPEN_INFORMATION` (0x38,
+ajoute `AllocationSize`+`EndOfFile`). Auto-enregistré par `WinRegistryGenerator`
+(numéro extrait du vrai stub ntdll). Non-régression : le PE natif témoin reste
+identique. Aligné sur `IDEAS.md` #1 (« ajouter des syscalls »).
+
+**Effet mesuré.** L'erreur passe de « Failed to resolve full path » à
+**`Failed to create CoreCLR, HRESULT: 0x80070008`** : l'apphost charge désormais
+`hostfxr.dll` → `hostpolicy.dll` → **`coreclr.dll`** (confirmé par les `Loaded …`)
+et appelle `coreclr_initialize`. **J2 franchi, J3 atteint.**
+
+**Nouvelle frontière J3 (diagnostiquée, non corrigée).** `coreclr_initialize`
+échoue `0x80070008` (`ERROR_NOT_ENOUGH_MEMORY`). Diagnostic (log temporaire sur
+le chemin `STATUS_NO_MEMORY`) : `NtCreateSection` avec **`Size = 0x20000000000`
+(2 To)** — la réservation d'espace d'adressage du `global_region_allocator` du
+GC .NET 8 (feature *regions*). Brovan la rejette (`Size > uint.MaxValue`), et
+`MapUniqueAddress` allouerait de toute façon un buffer réel. Le cap
+`System.GC.HeapHardLimit` ne réduit **pas** cette réservation (elle est intrinsèque
+au GC regions). **Fix requis = support des réservations `SEC_RESERVE` >4 Go
+sparses** (adresse réservée sans backing, commit/pagination à la demande) dans le
+modèle mémoire + backend de Brovan — une vraie fonctionnalité, pas un stub, hors
+périmètre de cette passe (risque de cascade sur le chemin natif validé). C'est le
+**prochain pas concret** pour J4-J5. NB : le .NET **Framework** (heap CLR classique,
+sans réservation regions 2 To) pourrait franchir J3 sans cette fonctionnalité —
+piste alternative une fois son runtime provisionné.
 
 ### Reproduction
 
@@ -460,9 +497,14 @@ n'est qu'une question de *quelle enveloppe de bootstrap* attaquer en premier.
   traité. C'est une frontière connue et documentée côté al-khaser.
 - **F-THREAD — scheduler MLFQ.** Bug connu (`IDEAS.md`) sur le multi-thread ; le
   CLR est intrinsèquement multi-thread (finalizer, thread pool). Probable
-  prérequis — **et vraisemblablement déjà rencontré au J2 (§8bis)** : l'apphost
-  self-contained lève des workers thread-pool Win32 puis termine sur un thread
-  `0x80008085` avant d'atteindre `hostfxr`/`coreclr`.
+  prérequis à J4+. *(NB : la worker factory vue au J2 avant le fix §8bis.2
+  n'était **pas** ce bug — fausse piste ; le blocage réel était un syscall
+  manquant. F-THREAD n'a donc pas encore été atteint empiriquement.)*
+- **F-GCRESERVE — réservation d'espace d'adressage >4 Go (frontière J3 active).**
+  Le GC regions .NET 8 réserve ~2 To via `NtCreateSection`/`SEC_RESERVE` ;
+  `NtCreateSection` de Brovan plafonne à `uint.MaxValue` et `MapUniqueAddress`
+  alloue un backing réel. Fix = sections/reserves sparses paginées à la demande.
+  Bloque `coreclr_initialize` (§8bis.2).
 - **F-FRAMEWORK — surface BCL réelle.** Selon ce que l'assembly touche, le CLR
   charge de plus en plus d'assemblies système ⇒ plus de fichiers VFS + plus de
   syscalls. La couverture croît avec le corpus, pas d'un coup.
