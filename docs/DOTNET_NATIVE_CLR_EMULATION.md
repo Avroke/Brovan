@@ -303,8 +303,8 @@ Format volontairement calqué sur la table de progression d'`AL_KHASER_EMULATION
 | Jalon | But | Critère de réussite observable |
 |---|---|---|
 | **J0 — Spike JIT** ✅ **FAIT (GO, jambe Unicorn)** | Prouver que le backend exécute du code écrit puis exécuté à l'exécution, avec bascule RW→RX. | **Fait** via `scripts/jit_spike_j0.py` sur Unicorn 2.1.4 : 5/5 tests JIT-critiques verts (§5.d). **Correctif pré-requis identifié** : `remove_cache` sur écritures hôte de code (§5.d). **Reste** : rejouer la jambe **KVM** sur un hôte `/dev/kvm`. |
-| **J1 — Provisioning** | Déposer le runtime cible dans `WindowsLibs` + framework dans le VFS ; résolution de chemins OK. | Le loader guest mappe `clr.dll`/`clrjit.dll` (ou `coreclr.dll`) sans `STATUS_DLL_NOT_FOUND` ; modules visibles dans la LDR list. |
-| **J2 — Bind d'entrée** | .NET Framework : l'import `mscoree!_CorExeMain` bind et le premier saut atteint mscoree. | Passé le stub d'entrypoint ; RIP dans mscoree/clr. |
+| **J1 — Provisioning** 🟡 **partiel** | Déposer le runtime cible dans `WindowsLibs` + framework dans le VFS ; résolution de chemins OK. | Le loader guest mappe `clr.dll`/`clrjit.dll` (ou `coreclr.dll`) sans `STATUS_DLL_NOT_FOUND` ; modules visibles dans la LDR list. **Mesuré (§8bis)** : Brovan **construit et tourne sur hôte Linux**, émule un PE natif de bout en bout ; mais le bundle deps ne contient **aucun runtime CLR** → à ajouter. Un publish **self-contained** (runtime app-local) est mappé et exécuté par l'apphost. |
+| **J2 — Bind d'entrée** 🟡 **atteint (natif)** | .NET Framework : l'import `mscoree!_CorExeMain` bind et le premier saut atteint mscoree. .NET Core : l'apphost natif charge hostfxr. | **Mesuré (§8bis)** : l'apphost self-contained exécute **6,0 M instructions** de bootstrap natif (15 DLL système mappées, thread-pool Win32, CPUID) mais **termine avant** de charger `hostfxr`/`coreclr` — corrèle avec F-THREAD (scheduler MLFQ) et/ou la résolution app-local. |
 | **J3 — Survie init CLR** | Le CLR initialise GC/TLS/heaps sans faute non gérée. | Franchit l'init sans `0xC0000005` ; premier appel au JIT observé. |
 | **J4 — Première méthode JIT-ée** | `clrjit` compile et exécute au moins une méthode managée. | Bascule RW→RX observée + exécution du code produit ; RIP dans une page JIT. |
 | **J5 — `Main()` managé** | Exécution du point d'entrée managé. | Effet de bord observable d'un `Console.WriteLine("...")` capté par `NtWriteFile`/console. |
@@ -313,6 +313,86 @@ Format volontairement calqué sur la table de progression d'`AL_KHASER_EMULATION
 
 Chaque jalon documente le **dernier syscall/instruction atteint** (comme la
 table al-khaser) pour reprise sans re-analyse.
+
+---
+
+## 8bis. Résultats empiriques (build + run sur hôte Linux, 2026-07-17)
+
+Première exécution réelle de bout en bout : Brovan **construit et lancé sur un
+hôte Linux x86-64** (sans Windows, sans `/dev/kvm`), avec les vraies dépendances
+Windows + Unicorn 2.1.4. Objectif : mesurer où en est concrètement la Voie A.
+
+### Environnement (reproductible)
+
+- **SDK .NET 8.0.423** requis. ⚠️ Le SDK apt `dotnet-sdk-8.0` (8.0.129, Roslyn
+  **4.8**) **ne compile pas** Brovan : `Brovan.Generators` référence
+  `Microsoft.CodeAnalysis.CSharp 4.10`, d'où `CS9057` → les 3 source-generators
+  (`VulkanForwardGenerator`, `WinRegistryGenerator`, `StructSerializerGenerator`)
+  ne s'exécutent pas → 23 erreurs de symboles absents (`BvkMK`,
+  `BrovVulkGenDispatch`, `WinDeviceRegistry`…). Fix : SDK à bande **≥ 8.0.4xx**
+  (Roslyn ≥ 4.10), ex. via `dotnet-install.sh --channel 8.0`.
+- **Unicorn 2.1.4** : le `.so` du package Python (`pip install unicorn==2.1.4`)
+  est byte-identique à la cible du build ; on peut court-circuiter la compilation
+  source (`Brovan.Unicorn.targets`) en pré-plaçant
+  `libunicorn.so` dans `.cache/unicorn/build/`.
+- **Dépendances Windows** : bundle `WindowsLibs/` (Win10 19044, 80 DLL x64 + 79
+  x86 + 120 NLS) + `WinReg/` (5 hives), importées via `scripts/Import-BrovanDeps.sh`.
+  **`SortDefault.nls` absent** (warning : comparaison insensible à la casse
+  dégradée). **Aucun runtime CLR** dans le bundle (voir plus bas).
+- Un `mingw-w64` fournit un PE natif témoin ; un `dotnet publish -r win-x64
+  --self-contained` fournit un runtime .NET Core **complet en PE Windows**.
+
+### Ce qui marche
+
+| Cas | Résultat |
+|---|---|
+| **Démarrage Brovan** | OK — `libunicorn.so` chargé, ApiSetMap auto-généré, `--help` OK. |
+| **PE natif x64** (`mingw`, `printf`+`GetCurrentProcessId`, `return 7`) | ✅ **émulation complète** : sortie stdout correcte, `GetCurrentProcessId → 11150` réaliste, exit propre. Valide tout le stack (loader ntdll, mapping des vraies DLL, syscalls, CRT). |
+
+### La frontière .NET, mesurée
+
+| Cas | Observation |
+|---|---|
+| **PE managé .NET Framework** (net48, x64) | Brovan **détecte .NET** puis affiche : *« doesn't currently support emulating .NET CIL instructions → treated as a normal PE »* → exécute l'entrypoint natif (stub `mscoree`). Le **loader ntdll bootstrappe** (centaines de syscalls) mais **stalle** : `mscoree`/`clr`/`clrjit` **absents du bundle** (J1 non provisionné). |
+| **Self-contained .NET Core** (net8, `win-x64`, runtime app-local complet : `coreclr.dll`/`clrjit.dll`/`hostfxr.dll`/`hostpolicy.dll`/`System.Private.CoreLib.dll` + framework, 187 fichiers) | L'apphost natif tourne **6 016 096 instructions** : mappe 15 DLL système réelles (ntdll, kernel32, kernelbase, user32, win32u, gdi32(full), ucrtbase, msvcp_win, shell32, advapi32, msvcrt, sechost, rpcrt4), lève des workers **thread-pool Win32** (`NtWorkerFactoryWorkerReady`), fait la détection **CPUID** (leaf 0/1/7). Puis **termine avant** de charger `hostfxr`/`hostpolicy`/`coreclr`/`clrjit` (0 référence) : thread `7977` terminé `0x80008085`, `NtTerminateProcess → ACCESS_DENIED`. |
+
+### Lecture
+
+- Le **stack d'émulation est validé** : un vrai process Windows natif s'exécute
+  intégralement. La Voie A ne bute donc pas sur le socle, mais sur les couches
+  .NET, exactement comme prévu.
+- **J1** : le seul manque est le **provisioning du runtime CLR** (le bundle n'en
+  contient pas). Le publish self-contained le fournit app-local et Brovan le
+  mappe — donc la voie « fournir le vrai CLR » est mécaniquement ouverte.
+- **J2** : l'apphost self-contained ne franchit pas encore le pont vers
+  `hostfxr`/`coreclr`. Sa terminaison **au milieu d'activité multi-thread**
+  (worker factory + thread `0x80008085`) pointe vers la frontière **F-THREAD**
+  (bug scheduler MLFQ signalé dans `IDEAS.md` — « apps multi-thread qui sortent,
+  2 threads en attente jamais Ready ») et/ou la résolution app-local de
+  `hostfxr` par l'apphost. Départager les deux (tracer l'ouverture de fichier
+  `hostfxr.dll` vs l'état du scheduler à la terminaison) est le **prochain pas
+  concret**. NB : le .NET Framework (mscoree, chaîne plus courte, §10) court-
+  circuite l'apphost/hostfxr et reste la cible la plus simple pour J2-J3 une fois
+  son runtime provisionné.
+
+### Reproduction
+
+```bash
+# 1. SDK avec Roslyn >= 4.10
+curl -sSL https://dot.net/v1/dotnet-install.sh | bash -s -- --channel 8.0 --install-dir ~/.dotnet-new
+export DOTNET_ROOT=~/.dotnet-new PATH="$HOME/.dotnet-new:$PATH"
+# 2. Unicorn 2.1.4 (court-circuit du build source)
+pip install unicorn==2.1.4
+mkdir -p Brovan/.cache/unicorn/{unicorn-2.1.4,build}; : > Brovan/.cache/unicorn/unicorn-2.1.4.tar.gz
+echo '#' > Brovan/.cache/unicorn/unicorn-2.1.4/CMakeLists.txt
+cp "$(python3 -c 'import unicorn,os;print(os.path.dirname(unicorn.__file__))')/lib/libunicorn.so.2" Brovan/.cache/unicorn/build/libunicorn.so
+# 3. Build + deps
+dotnet build Brovan/Brovan.csproj -c Release
+OUT=Brovan/bin/Release/net8.0
+bash scripts/Import-BrovanDeps.sh -a BrovanDeps.zip -d "$OUT"
+# 4. Run (LD_LIBRARY_PATH pour libunicorn.so app-local)
+cd "$OUT" && LD_LIBRARY_PATH="$PWD" dotnet Brovan.dll --quick -s /path/to/sample.exe
+```
 
 ---
 
@@ -380,7 +460,9 @@ n'est qu'une question de *quelle enveloppe de bootstrap* attaquer en premier.
   traité. C'est une frontière connue et documentée côté al-khaser.
 - **F-THREAD — scheduler MLFQ.** Bug connu (`IDEAS.md`) sur le multi-thread ; le
   CLR est intrinsèquement multi-thread (finalizer, thread pool). Probable
-  prérequis.
+  prérequis — **et vraisemblablement déjà rencontré au J2 (§8bis)** : l'apphost
+  self-contained lève des workers thread-pool Win32 puis termine sur un thread
+  `0x80008085` avant d'atteindre `hostfxr`/`coreclr`.
 - **F-FRAMEWORK — surface BCL réelle.** Selon ce que l'assembly touche, le CLR
   charge de plus en plus d'assemblies système ⇒ plus de fichiers VFS + plus de
   syscalls. La couverture croît avec le corpus, pas d'un coup.
