@@ -1519,6 +1519,11 @@ the guest ntdll's `mov eax, imm32` stub prologues, now from `WindowsLibs/SysWOW6
 | RTL_USER_PROCESS_PARAMETERS header size (0x2A0→0x300) | HeapPartitionName no longer garbage → NT heap (not segment heap) → ~128k (KnownDlls chain reached) |
 | KnownDlls object-manager + file handlers → WOW64 | NtOpen{DirectoryObject,SymbolicLinkObject,Section}, NtQuery{SymbolicLinkObject,AttributesFile} → ~181k (DLL disk-load reached) |
 | SysWOW64 case-insensitive leaf resolution | 32-bit kernel32/kernelbase/CRT bind (not the 64-bit copy) → ~1.34M (DLL init reached) |
+| CSR base-server connect (`NtWow64CsrClientConnectToServer`, SSN 0x1D7) | kernel32/kernelbase `BaseDllInitialize` reaches the CSR handshake |
+| CSR read-only shared section + `BASE_STATIC_SERVER_DATA` (PEB +0x4C/+0x54/+0x248) | `BaseDllInitialize` completes → **~6.31M** (`DLL_INIT_FAILED` cleared) |
+| `NtSetInformationProcess(ProcessTlsInformation)` WOW64 element size (0xC not 0x18) | ntdll deferred-TLS setup succeeds → **~9.93M** (`INFO_LENGTH_MISMATCH` cleared) |
+| `NtSetInformationVirtualMemory` + `NtQueryInformationProcess(ProcessMitigationPolicy)` → WOW64 | CFG registration + mitigation query succeed (advisory) → later-DLL init |
+| *(open)* user32 win32k client-connect (syscall 0x2000) | current terminus — GUI subsystem, see frontier below |
 
 #### Resolved this pass (each fix is a generic WOW64 fidelity correction)
 
@@ -1626,13 +1631,28 @@ mitigations default), mirroring the x64 class-52 handler. Both now return SUCCES
 the trace; the CFG-registration burst is advisory (its result is ignored — the
 instruction count was byte-identical with it as `NOT_SUPPORTED` vs SUCCESS).
 
-**Next frontier — unimplemented syscall `0x2000` during late DLL init.** After the
-CFG registration + `NtProtectVirtualMemory` burst, the failing DllMain issues raw
-syscall `0x2000` (unmapped → `NOT_SUPPORTED`), then the hard error fires. This is the
-current fatal call and needs identifying (via the caller return address) and
-implementing. Other still-unimplemented syscalls in the run (`0x1E9`
-`NtWow64IsProcessorFeaturePresent` hammered in a loop but non-fatal;
-`NtQuerySystemInformationEx` 0x161; `NtQueryInformationThread` class
+**Next frontier — user32's win32k client-connect (syscall `0x2000`, the GUI subsystem).**
+The `0x2000` terminus was traced (via the caller return address) to **`user32.dll`'s
+`DllMain`** (`_UserClientDllInitialize`): after the CFG registration burst it performs
+a CFG-protected win32k client-connect. The stub is `mov eax, 0x2000; call <thunk>;
+ret 0x10` — a **4-argument `NtUser*` connect** (args: a per-DLL data ptr, an out
+buffer, size `0x240`, a 4th ptr) whose result is sign-checked (`test eax,eax; js
+<fail>`); our `NOT_SUPPORTED` (negative) takes user32's failure-cleanup path and
+`DllMain` returns FALSE → `DLL_INIT_FAILED`. This is `NtUserProcessConnect` in spirit,
+but note the SSN mismatch: user32's internal stub uses `0x2000` while the WindowsLibs
+`win32u.dll` (same 19041.1288 build) exports `NtUserProcessConnect` at SSN `0x10e9`
+(2-arg). So the existing win32k SSN sourcing (parsed from win32u exports into
+`SupportedFunctionsWin32k`) never registers `0x2000` — user32 reaches it through its
+own CFG-bound internal thunk, not the win32u import. This is a **new subsystem**:
+implementing it means (a) a `Win32k/NtUserProcessConnect` handler that fills a 32-bit
+`USERCONNECT` (version words + a `SHAREDINFO` block — `psi`/`aheList`/dispatch table,
+the GUI analog of the CSR `BASE_STATIC_SERVER_DATA` shared section, for which the x64
+`CsrssPortHandler.HandleUserSrvConnect` path already builds the 64-bit variant) and
+returns `STATUS_SUCCESS`, and (b) wiring SSN `0x2000` to it (either register from
+user32's internal stubs, or map the win32k connect SSN explicitly). Scope is
+comparable to the CSR shared-section work above. Other still-unimplemented syscalls
+in the run (`0x1E9` `NtWow64IsProcessorFeaturePresent` hammered in a loop but
+non-fatal; `NtQuerySystemInformationEx` 0x161; `NtQueryInformationThread` class
 `ThreadDynamicCodePolicyInfo`) are not (yet) on the fatal path.
 
 **Remaining WOW64 work (mechanical continuation):** the other x64-gated `Nt*`
