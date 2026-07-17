@@ -9,6 +9,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint FileFsSizeInformation = 3;
         private const uint FileFsDeviceInformation = 4;
         private const uint FileFsAttributeInformation = 5;
+        private const uint FileFsFullSizeInformation = 7;
 
         private const uint FileFsVolumeInformationFixedSize = 0x18;
         private const uint FileFsVolumeInformationLabelOffset = 0x12;
@@ -73,6 +74,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 FileFsVolumeInformation => QueryVolumeLabelInformation(Instance, IoStatusBlockPtr, FsInfoBuffer, Length, Is64Bit),
                 FileFsSizeInformation => QuerySizeInformation(Instance, IoStatusBlockPtr, FsInfoBuffer, Length, Is64Bit),
+                FileFsFullSizeInformation => QueryFullSizeInformation(Instance, IoStatusBlockPtr, FsInfoBuffer, Length, Is64Bit),
                 FileFsDeviceInformation => QueryDeviceInformation(Instance, FileHandle, FileObj, IoStatusBlockPtr, FsInfoBuffer, Length, Is64Bit),
                 FileFsAttributeInformation => QueryAttributeInformation(Instance, IoStatusBlockPtr, FsInfoBuffer, Length, Is64Bit),
                 _ => WriteStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_INFO_CLASS, 0, Is64Bit)
@@ -125,6 +127,26 @@ namespace Brovan.Core.Emulation.OS.Windows
             Instance._emulator.WriteMemory(FsInfoBuffer + 0x08, WindowsStorageDeviceSupport.FreeClusters, 8);
             Instance._emulator.WriteMemory(FsInfoBuffer + 0x10, (uint)WindowsStorageDeviceSupport.SectorsPerCluster, 4);
             Instance._emulator.WriteMemory(FsInfoBuffer + 0x14, (uint)WindowsStorageDeviceSupport.BytesPerSector, 4);
+
+            return WriteStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, RequiredSize, Is64Bit);
+        }
+
+        private static NTSTATUS QueryFullSizeInformation(BinaryEmulator Instance, ulong IoStatusBlockPtr, ulong FsInfoBuffer, uint Length, bool Is64Bit)
+        {
+            // FILE_FS_FULL_SIZE_INFORMATION: total/caller-available/actual-available
+            // allocation units + geometry. Modern GetDiskFreeSpaceEx queries this class
+            // first; no per-user quota is modelled, so caller-available == actual-available.
+            const uint RequiredSize = 32;
+            if (Length < RequiredSize)
+            {
+                return WriteStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_BUFFER_TOO_SMALL, 0, Is64Bit);
+            }
+
+            Instance._emulator.WriteMemory(FsInfoBuffer + 0x00, WindowsStorageDeviceSupport.TotalClusters, 8);
+            Instance._emulator.WriteMemory(FsInfoBuffer + 0x08, WindowsStorageDeviceSupport.FreeClusters, 8);
+            Instance._emulator.WriteMemory(FsInfoBuffer + 0x10, WindowsStorageDeviceSupport.FreeClusters, 8);
+            Instance._emulator.WriteMemory(FsInfoBuffer + 0x18, (uint)WindowsStorageDeviceSupport.SectorsPerCluster, 4);
+            Instance._emulator.WriteMemory(FsInfoBuffer + 0x1C, (uint)WindowsStorageDeviceSupport.BytesPerSector, 4);
 
             return WriteStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, RequiredSize, Is64Bit);
         }

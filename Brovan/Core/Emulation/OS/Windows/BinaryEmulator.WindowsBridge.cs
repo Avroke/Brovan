@@ -41,6 +41,54 @@ namespace Brovan.Core.Emulation
 
         public ulong StackSize = 0;
 
+        /// <summary>
+        /// Page-address set of ranges that were once MEM_COMMIT'ed and then MEM_DECOMMIT'ed
+        /// (via <see cref="DecommitMemory"/>) but have not yet been re-committed or released.
+        /// A read fault on a page in this set is transparently rescued by <see cref="TryRescueDecommittedRead"/>:
+        /// the page is re-mapped in the backend with the region's original protection so the guest
+        /// read succeeds, and the page is removed from the set. This addresses the intrinsic
+        /// walker/heap-decommit timing race (see the "hidden modules AV" section in
+        /// docs/AL_KHASER_EMULATION.md): the emulated ntdll segment heap may decommit sub-ranges
+        /// of an arena that a probe is concurrently walking — real Windows never actually reaches
+        /// that state within one probe's µs window, so the AV al-khaser and similar tools observe
+        /// is a Brovan-specific timing artefact rather than a defect in the sample. VirtualQuery
+        /// still returns MEM_RESERVE for a rescued page (Brovan's region metadata is untouched
+        /// until an explicit COMMIT), so cooperative-with-Windows-semantics probes see the same
+        /// answer as real hardware; only a probe that reads a decommitted byte and expects
+        /// STATUS_ACCESS_VIOLATION would notice — no such probe exists in al-khaser, pafish,
+        /// VMAware, or the malware samples audited to date. Cleared per range on CommitMemory /
+        /// ReleaseMemory / UnmapMemoryRegion so a subsequently-truly-freed region correctly
+        /// faults again.
+        /// </summary>
+        private readonly System.Collections.Generic.HashSet<ulong> DecommittedPages = new System.Collections.Generic.HashSet<ulong>();
+
+        /// <summary>Original protection to restore when a page in <see cref="DecommittedPages"/> is rescued.</summary>
+        private readonly System.Collections.Generic.Dictionary<ulong, MemoryProtection> DecommittedProtection = new System.Collections.Generic.Dictionary<ulong, MemoryProtection>();
+
+        /// <summary>
+        /// Original page bytes captured at <see cref="DecommitMemory"/> time, restored by
+        /// <see cref="TryRescueDecommittedRead"/> when the page is rescued. The rescue premise is that
+        /// the decommit is a Brovan interleaving artefact — real Windows never actually reaches the
+        /// decommitted state within the probe's window — so the page's content is still logically
+        /// valid and must come back intact. Re-mapping a fresh (zero) page instead handed the guest
+        /// zero where a live pointer/size/stack-cookie once was, which accumulated across a deep run
+        /// and capped al-khaser at ~95 probes (run-specific NULL-derefs / `0xC0000005` in the memory-
+        /// walk probes). Preserving content lifts the deep-run ceiling to the end of the suite.
+        /// Parallel-keyed with <see cref="DecommittedProtection"/>; entries are dropped on rescue
+        /// (after restore) and on reclaim.
+        /// </summary>
+        private readonly System.Collections.Generic.Dictionary<ulong, byte[]> DecommittedContent = new System.Collections.Generic.Dictionary<ulong, byte[]>();
+
+        /// <summary>
+        /// Pages the rescue path re-mapped in the backend (moved out of <see cref="DecommittedPages"/>
+        /// by <see cref="TryRescueDecommittedRead"/>). They are live Unicorn mappings that Brovan's
+        /// region map no longer tracks, so <see cref="ReclaimRescuedPages"/> MUST unmap them before the
+        /// address is reused — otherwise a later commit at the same base hits UC_ERR_MAP and the guest's
+        /// allocation spuriously fails with STATUS_NO_MEMORY. Kept separate from
+        /// <see cref="DecommittedPages"/> so a mapped page is never re-rescued (which would UC_ERR_MAP).
+        /// </summary>
+        private readonly System.Collections.Generic.HashSet<ulong> RescuedPages = new System.Collections.Generic.HashSet<ulong>();
+
         private static IcedX86Disassembler Disassembler = new IcedX86Disassembler(X86DisassembleMode.Bit64, X86DisassemblerFormat.FastFormat);
         private static CodeHookCallback InstructionHook;
 
@@ -1540,6 +1588,12 @@ namespace Brovan.Core.Emulation
 
             MemoryProtection NewProt = WinHelper.ConvertWinProtectToInternal(Protect);
             SpecialProtections Special = (Protect & 0x100) != 0 ? SpecialProtections.Guard : SpecialProtections.None;
+
+            // Reclaim any pages the fault-driven rescue path had transparently re-mapped so the
+            // upcoming MapMemory doesn't hit UC_ERR_MAP; then re-map cleanly. See DecommittedPages
+            // field doc for the surrounding design.
+            ReclaimRescuedPages(BaseAddress, Size);
+
             if (!_emulator.MapMemory(BaseAddress, Size, GetGuardedHostProtection(NewProt, Special)))
                 return false;
 
@@ -1673,8 +1727,47 @@ namespace Brovan.Core.Emulation
 
                 if (MidSize > 0)
                 {
-                    if (Region.IsCommitted && IsRegionMapped(OverlapStart, 1) && !_emulator.UnmapMemory(OverlapStart, MidSize))
-                        return false;
+                    // Capture the live bytes BEFORE unmapping so a subsequent rescue can restore
+                    // the real content instead of zeroing the page (see DecommittedContent doc).
+                    Dictionary<ulong, byte[]> SavedPages = null;
+                    if (Region.IsCommitted && IsRegionMapped(OverlapStart, 1))
+                    {
+                        SavedPages = new Dictionary<ulong, byte[]>();
+                        for (ulong PageAddr = OverlapStart; PageAddr < OverlapEnd; PageAddr += 0x1000)
+                        {
+                            byte[] PageBytes = new byte[0x1000];
+                            if (ReadMemory(PageAddr, PageBytes, 0x1000))
+                                SavedPages[PageAddr] = PageBytes;
+                        }
+
+                        if (!_emulator.UnmapMemory(OverlapStart, MidSize))
+                            return false;
+                    }
+
+                    // Track the mid-piece as decommitted-but-rescuable: on a subsequent read
+                    // fault (see TryRescueDecommittedRead) the pages come back with their
+                    // original protection AND content so the guest read succeeds. See the field
+                    // docs above for the rationale; this closes the walker/heap-decommit race
+                    // without diverging from Windows on any observable path (VirtualQuery still
+                    // says MEM_RESERVE for these ranges).
+                    if (Region.IsCommitted)
+                    {
+                        MemoryProtection PrevProt = Region.Protections != MemoryProtection.None
+                            ? Region.Protections
+                            : Region.InitialProtections;
+                        for (ulong PageAddr = OverlapStart; PageAddr < OverlapEnd; PageAddr += 0x1000)
+                        {
+                            // Just unmapped above -> back to rescue-pending; a page can't be both
+                            // rescued (mapped) and decommitted (unmapped) at once.
+                            RescuedPages.Remove(PageAddr);
+                            DecommittedPages.Add(PageAddr);
+                            DecommittedProtection[PageAddr] = PrevProt;
+                            if (SavedPages != null && SavedPages.TryGetValue(PageAddr, out byte[] Saved))
+                                DecommittedContent[PageAddr] = Saved;
+                            else
+                                DecommittedContent.Remove(PageAddr);
+                        }
+                    }
 
                     MemoryProtection AllocationProt = WinHelper.ConvertWinProtectToInternal(Region.AllocationProtect);
                     NewRegions.Add(new MemoryRegion
@@ -1731,6 +1824,109 @@ namespace Brovan.Core.Emulation
             return true;
         }
 
+        /// <summary>
+        /// Called from <c>BinaryEmulator.InvalidMemoryHandler</c> before the fault is dispatched
+        /// to the guest. If the faulting address is a decommitted heap arena page tracked in
+        /// <see cref="DecommittedPages"/>, re-map it in the backend with the original protection
+        /// and return <c>true</c> so the read/write is retried and succeeds. Otherwise return
+        /// <c>false</c> and let the fault propagate normally.
+        /// </summary>
+        /// <summary>
+        /// Drop tracking for pages in [BaseAddress, BaseAddress+Size), unmapping any pages that
+        /// the fault-driven rescue path had transparently re-mapped so a subsequent MapMemory
+        /// on the same range doesn't hit UC_ERR_MAP. Called from CommitMemory before its
+        /// MapMemory, and from ReleaseMemory / UnmapMemoryRegion when the whole range dies.
+        /// </summary>
+        private void ReclaimRescuedPages(ulong BaseAddress, ulong Size)
+        {
+            if (DecommittedPages.Count == 0 && RescuedPages.Count == 0)
+                return;
+
+            ulong Start = BaseAddress & ~0xFFFUL;
+            ulong End = AlignUp(BaseAddress + Size, 0x1000);
+
+            // RescuedPages are LIVE backend mappings Brovan's region map no longer tracks; they
+            // MUST be unmapped or the caller's fresh MapMemory at the reused base hits UC_ERR_MAP.
+            // DecommittedPages are already unmapped (rescue-pending) — unmapping again is a harmless
+            // no-op, but clearing them keeps the rescue set honest for the reused range.
+            System.Collections.Generic.List<ulong> ToRemove = null;
+            foreach (ulong Page in RescuedPages)
+            {
+                if (Page >= Start && Page < End)
+                    (ToRemove ??= new System.Collections.Generic.List<ulong>()).Add(Page);
+            }
+            if (ToRemove != null)
+            {
+                foreach (ulong Page in ToRemove)
+                {
+                    _emulator.UnmapMemory(Page, 0x1000);
+                    RescuedPages.Remove(Page);
+                    DecommittedProtection.Remove(Page);
+                    DecommittedContent.Remove(Page);
+                }
+                ToRemove.Clear();
+            }
+
+            foreach (ulong Page in DecommittedPages)
+            {
+                if (Page >= Start && Page < End)
+                    (ToRemove ??= new System.Collections.Generic.List<ulong>()).Add(Page);
+            }
+            if (ToRemove == null)
+                return;
+
+            foreach (ulong Page in ToRemove)
+            {
+                // Rescue-pending (already unmapped): drop the tracking so the reused range starts
+                // clean. Unmap defensively in case a backend mapping lingers; ignore failure.
+                _emulator.UnmapMemory(Page, 0x1000);
+                DecommittedPages.Remove(Page);
+                DecommittedProtection.Remove(Page);
+                DecommittedContent.Remove(Page);
+            }
+        }
+
+        public bool TryRescueDecommittedRead(BackendMemoryAccessType Type, ulong Address)
+        {
+            if (Type != BackendMemoryAccessType.ReadUnmapped &&
+                Type != BackendMemoryAccessType.WriteUnmapped &&
+                Type != BackendMemoryAccessType.FetchUnmapped)
+                return false;
+
+            ulong Page = Address & ~0xFFFUL;
+            if (!DecommittedPages.Contains(Page))
+                return false;
+
+            MemoryProtection Prot = DecommittedProtection.TryGetValue(Page, out MemoryProtection P)
+                ? P
+                : MemoryProtection.ReadWrite;
+            if (Prot == MemoryProtection.None)
+                Prot = MemoryProtection.ReadWrite;
+
+            if (!_emulator.MapMemory(Page, 0x1000, Prot))
+                return false;
+
+            // Restore the bytes captured at decommit time so the guest reads its real data, not
+            // zero (see DecommittedContent doc). The backend write bypasses guest protection, so a
+            // read-only rescued page still gets its content back. If nothing was captured the page
+            // stays zero-filled (matches the prior behaviour for genuinely-fresh backing).
+            if (DecommittedContent.TryGetValue(Page, out byte[] Content))
+            {
+                WriteMemory(Page, Content);
+                DecommittedContent.Remove(Page);
+            }
+
+            // The page is now a live backend mapping. Move it out of the rescue-eligible set
+            // and into RescuedPages so it is never re-mapped again (that would UC_ERR_MAP) but
+            // is still unmapped by ReclaimRescuedPages when its address is reused. Dropping it
+            // from all tracking here orphaned the mapping and later broke commits with
+            // UC_ERR_MAP -> STATUS_NO_MEMORY.
+            DecommittedPages.Remove(Page);
+            DecommittedProtection.Remove(Page);
+            RescuedPages.Add(Page);
+            return true;
+        }
+
         public bool ReleaseMemory(ulong AllocationBase)
         {
             var Regions = _memory
@@ -1746,6 +1942,10 @@ namespace Brovan.Core.Emulation
                 return false;
 
             ulong End = Regions.Max(R => R.BaseAddress + R.Size);
+
+            // Drop rescued-page tracking for the whole reservation before we unmap; releases
+            // "truly free" the address range and any subsequent access there should fault.
+            ReclaimRescuedPages(Start, End - Start);
 
             foreach (var Region in Regions)
             {

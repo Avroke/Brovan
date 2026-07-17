@@ -23,7 +23,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (PerformanceCounterPtr != 0)
                 {
-                    ulong CounterValue = (ulong)System.Diagnostics.Stopwatch.GetTimestamp();
+                    ulong CounterValue = Instance.GetEmulatedQpc();
                     Instance._emulator.WriteMemory(PerformanceCounterPtr, CounterValue, 0);
                 }
 
@@ -33,7 +33,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
                 else
                 {
-                    Instance._emulator.WriteMemory(PerformanceFrequencyPtr, 10000000UL);
+                    Instance._emulator.WriteMemory(PerformanceFrequencyPtr, BinaryEmulator.EmulatedQpcFrequency);
                 }
                 return NTSTATUS.STATUS_SUCCESS;
             }
@@ -49,7 +49,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (PerformanceCounterPtr != 0)
                 {
-                    ulong CounterValue = (ulong)System.Diagnostics.Stopwatch.GetTimestamp();
+                    ulong CounterValue = Instance.GetEmulatedQpc();
                     Instance._emulator.WriteMemory(PerformanceCounterPtr, CounterValue, 0);
                 }
 
@@ -59,7 +59,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
                 else
                 {
-                    Instance._emulator.WriteMemory(PerformanceFrequencyPtr, 10000000UL);
+                    Instance._emulator.WriteMemory(PerformanceFrequencyPtr, BinaryEmulator.EmulatedQpcFrequency);
                 }
                 return NTSTATUS.STATUS_SUCCESS;
             }

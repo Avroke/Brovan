@@ -41,7 +41,21 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if(TargetProcess.Status == ProtectionStatus.Unaccessible)
                     return NTSTATUS.STATUS_ACCESS_DENIED;
 
-                if (Instance.WinHelper.IsProtectedStatus(TargetProcess.Status) || Instance.WinHelper.CurrentUser == User.Standard && TargetProcess.RunningUser == User.Admin)
+                if (Instance.WinHelper.IsProtectedStatus(TargetProcess.Status))
+                {
+                    // Protected system processes (csrss.exe, wininit.exe, services.exe, winlogon.exe,
+                    // MsMpEng.exe, ...) cannot be opened for any access from a non-elevated caller on
+                    // real Windows — even PROCESS_QUERY_LIMITED_INFORMATION returns ACCESS_DENIED.
+                    // Al-khaser's SeDebugPrivilege probe relies on this: it OpenProcess()es
+                    // csrss.exe with PROCESS_QUERY_LIMITED_INFORMATION and treats any non-NULL
+                    // handle as proof of elevated debug privilege. When the current caller isn't
+                    // elevated, deny unconditionally so the probe reports GOOD.
+                    WinProcess Self = Instance.WinHelper.GetProcessList().FirstOrDefault(p => p.PID == Instance.WinHelper.PID);
+                    bool CallerElevated = Self?.PrimaryToken?.IsElevated ?? false;
+                    if (!CallerElevated)
+                        return NTSTATUS.STATUS_ACCESS_DENIED;
+                }
+                else if (Instance.WinHelper.CurrentUser == User.Standard && TargetProcess.RunningUser == User.Admin)
                 {
                     uint AllowedAccess = (uint)(AccessMask.ProcessQueryInformation | AccessMask.ProcessQueryLimitedInformation);
 
@@ -102,7 +116,21 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (TargetProcess.Status == ProtectionStatus.Unaccessible)
                     return NTSTATUS.STATUS_ACCESS_DENIED;
 
-                if (Instance.WinHelper.IsProtectedStatus(TargetProcess.Status) || Instance.WinHelper.CurrentUser == User.Standard && TargetProcess.RunningUser == User.Admin)
+                if (Instance.WinHelper.IsProtectedStatus(TargetProcess.Status))
+                {
+                    // Protected system processes (csrss.exe, wininit.exe, services.exe, winlogon.exe,
+                    // MsMpEng.exe, ...) cannot be opened for any access from a non-elevated caller on
+                    // real Windows — even PROCESS_QUERY_LIMITED_INFORMATION returns ACCESS_DENIED.
+                    // Al-khaser's SeDebugPrivilege probe relies on this: it OpenProcess()es
+                    // csrss.exe with PROCESS_QUERY_LIMITED_INFORMATION and treats any non-NULL
+                    // handle as proof of elevated debug privilege. When the current caller isn't
+                    // elevated, deny unconditionally so the probe reports GOOD.
+                    WinProcess Self = Instance.WinHelper.GetProcessList().FirstOrDefault(p => p.PID == Instance.WinHelper.PID);
+                    bool CallerElevated = Self?.PrimaryToken?.IsElevated ?? false;
+                    if (!CallerElevated)
+                        return NTSTATUS.STATUS_ACCESS_DENIED;
+                }
+                else if (Instance.WinHelper.CurrentUser == User.Standard && TargetProcess.RunningUser == User.Admin)
                 {
                     uint AllowedAccess = (uint)(AccessMask.ProcessQueryInformation | AccessMask.ProcessQueryLimitedInformation);
 

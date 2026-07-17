@@ -95,6 +95,16 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 case THREADINFOCLASS.ThreadHideFromDebugger:
                     {
+                        // The correct call is NtSetInformationThread(hThread, ThreadHideFromDebugger, NULL, 0):
+                        // no payload, length must be zero. Al-khaser probes this by passing a bogus length
+                        // (e.g. 12345) and expecting STATUS_INFO_LENGTH_MISMATCH. Handle validation is
+                        // already done by ResolveThreadFromHandle above (bogus handle → STATUS_INVALID_HANDLE).
+                        if (ThreadInformationLength != 0)
+                            return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+
+                        WindowsThreadState State = WinEmulatedThread.GetState(Thread);
+                        State.HiddenFromDebugger = true;
+
                         if ((Instance.Settings.Flags & LogFlags.Suspicious) != 0)
                             Instance.TriggerEventMessage($"[{Thread.ThreadId}] Thread Hide From Debugger.", LogFlags.Suspicious);
                         return NTSTATUS.STATUS_SUCCESS;

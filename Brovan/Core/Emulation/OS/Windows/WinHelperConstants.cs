@@ -113,9 +113,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_MORE_ENTRIES = 0x00000105,
         STATUS_NOT_ALL_ASSIGNED = 0x00000106,
         STATUS_SOME_NOT_MAPPED = 0x00000107,
+        STATUS_NO_YIELD_PERFORMED = 0x40000024,
         STATUS_OPLOCK_BREAK_IN_PROGRESS = 0x00000108,
         STATUS_INFO_LENGTH_MISMATCH = 0xC0000004,
         STATUS_INVALID_INFO_CLASS = 0xC0000003,
+        STATUS_PRIVILEGE_NOT_HELD = 0xC0000061,
         STATUS_NOT_IMPLEMENTED = 0xC0000002,
         STATUS_UNSUCCESSFUL = 0xC0000001,
         STATUS_ACCESS_VIOLATION = 0xC0000005,
@@ -980,7 +982,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         Window = 13,
         EtwRegistrationHandle = 14,
         SemaphoreHandle = 15,
-        JobHandle = 16
+        JobHandle = 16,
+        DebugObjectHandle = 17
     }
 
     public sealed class WinToken : IHandleObject
@@ -1421,6 +1424,16 @@ namespace Brovan.Core.Emulation.OS.Windows
         public string ObjectId => Name;
 
         public HandleType ObjectType => HandleType.IoCompletionHandle;
+    }
+
+    public sealed class WinDebugObject : IHandleObject
+    {
+        public string Name;
+        public bool KillOnClose;
+
+        public string ObjectId => Name;
+
+        public HandleType ObjectType => HandleType.DebugObjectHandle;
     }
 
     public sealed class WinWorkerFactory : IHandleObject

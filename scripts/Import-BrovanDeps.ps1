@@ -93,6 +93,27 @@ finally {
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+# --- Sanitize VM-identifying strings out of the hives ---------------------------
+# The dependency is `reg save`d from a real Windows box; when that box is a
+# Hyper-V/Azure VM its SYSTEM hive carries the VM's disk identity
+# (SCSI\Disk&Ven_Msft&Prod_Virtual_Disk), which a guest reads as a sandbox tell.
+# Length-preserving fix-up at the dependency layer keeps every registry read
+# coherent without any runtime masking. Non-fatal if python3 is unavailable.
+$systemHive = Join-Path $Destination 'WinReg\SYSTEM'
+if (Test-Path $systemHive) {
+    Write-Step 'Sanitizing hive VM strings'
+    $py = Get-Command python3 -ErrorAction SilentlyContinue
+    if (-not $py) { $py = Get-Command python -ErrorAction SilentlyContinue }
+    if ($py) {
+        $sanitizer = Join-Path $PSScriptRoot 'sanitize_hive.py'
+        & $py.Source $sanitizer $systemHive
+        if ($LASTEXITCODE -ne 0) { Write-Warn2 'sanitize_hive.py failed; hives keep their exported VM strings.' }
+    }
+    else {
+        Write-Warn2 'python not found - skipping hive sanitization; storage buses will read as a VM.'
+    }
+}
+
 # --- Verification ---------------------------------------------------------------
 Write-Step 'Verifying layout'
 $ok = $true
@@ -115,6 +136,16 @@ if ((Test-Path $localeNls) -and (Get-Item $localeNls).Length -gt 0) {
     Write-Ok "WindowsLibs\ NLS tables present ($ncnt *.nls, locale.nls OK)."
 } else {
     Write-Warn2 'WindowsLibs\locale.nls missing - kernelbase init will fail; re-export with an NLS-aware bundle.'
+}
+
+# SortDefault.nls: needed by kernel32!SortGetHandle for case-insensitive collation.
+# Without it CompareStringW / StrCmpNIW return a constant error and al-khaser's
+# DLL-injection check flags every legitimate System32 module (see F3).
+$sortNls = Join-Path $libDir 'SortDefault.nls'
+if ((Test-Path $sortNls) -and (Get-Item $sortNls).Length -gt 0) {
+    Write-Ok 'WindowsLibs\SortDefault.nls present.'
+} else {
+    Write-Warn2 'WindowsLibs\SortDefault.nls missing - case-insensitive comparison will fail; re-export with an NLS-aware bundle.'
 }
 
 $wow = Join-Path $libDir 'SysWOW64'

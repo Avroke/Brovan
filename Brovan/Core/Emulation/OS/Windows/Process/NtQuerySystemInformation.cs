@@ -480,7 +480,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
                             }
 
-                            uint NumberOfPhysicalPages = 0x200000;
+                            uint NumberOfPhysicalPages = WindowsMemorySupport.TotalPhysicalPages;
                             uint LowestPhysicalPageNumber = 0x00000001;
                             uint HighestPhysicalPageNumber = LowestPhysicalPageNumber + NumberOfPhysicalPages - 1;
                             uint AllocationGranularity = 0x10000;
@@ -508,6 +508,117 @@ namespace Brovan.Core.Emulation.OS.Windows
                             }
                             return NTSTATUS.STATUS_SUCCESS;
                         }
+
+                    case SYSTEM_INFORMATION_CLASS.SystemMemoryUsageInformation:
+                        {
+                            // SYSTEM_MEMORY_USAGE_INFORMATION (0x38 bytes). This is the ONLY class
+                            // modern kernelbase!GlobalMemoryStatusEx queries; returning
+                            // STATUS_NOT_SUPPORTED left MEMORYSTATUSEX unfilled (ullTotalPhys == 0),
+                            // reading as a sub-2 GB VM. All figures come from the RAM SSOT.
+                            const uint RequiredLength = 0x38;
+                            if (SystemInformationLength < RequiredLength)
+                            {
+                                if (ReturnLengthPtr != 0)
+                                {
+                                    if (!Instance.IsRegionMapped(ReturnLengthPtr, 4))
+                                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                                    Instance._emulator.WriteMemory(ReturnLengthPtr, RequiredLength);
+                                }
+
+                                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                            }
+
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x00, WindowsMemorySupport.TotalPhysicalBytes, 8);
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x08, WindowsMemorySupport.AvailablePhysicalBytes, 8);
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x10, unchecked((ulong)WindowsMemorySupport.ResidentAvailableBytes), 8);
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x18, WindowsMemorySupport.CommittedBytes, 8);
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x20, WindowsMemorySupport.SharedCommittedBytes, 8);
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x28, WindowsMemorySupport.CommitLimitBytes, 8);
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x30, WindowsMemorySupport.PeakCommitmentBytes, 8);
+
+                            if (ReturnLengthPtr != 0)
+                            {
+                                if (!Instance.IsRegionMapped(ReturnLengthPtr, 4))
+                                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                                Instance._emulator.WriteMemory(ReturnLengthPtr, RequiredLength);
+                            }
+                            return NTSTATUS.STATUS_SUCCESS;
+                        }
+                    case SYSTEM_INFORMATION_CLASS.SystemFirmwareTableInformation:
+                        {
+                            // GetSystemFirmwareTable / EnumSystemFirmwareTables route here via a
+                            // SYSTEM_FIRMWARE_TABLE_INFORMATION struct: ProviderSignature (+0x00),
+                            // Action (+0x04), TableID (+0x08), TableBufferLength (+0x0C), TableBuffer
+                            // (+0x10). We answer the 'ACPI' provider with a bare-metal-realistic table
+                            // set: a real machine always exposes ACPI tables, so code that reads an
+                            // absent/unenumerable ACPI firmware table as an emulator tell sees a normal
+                            // host. OEM strings are common AMI/desktop values with NO hypervisor
+                            // signature, so a firmware VM-string scan finds nothing. Other providers
+                            // (RSMB / FIRM) fall through to the default path unchanged (still fail).
+                            const uint FirmwareHeaderLen = 0x10;
+                            if (SystemInformationLength < FirmwareHeaderLen)
+                                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+
+                            uint ProviderSignature = Instance.ReadMemoryUInt(SystemInformationPtr + 0x00);
+                            uint FirmwareAction = Instance.ReadMemoryUInt(SystemInformationPtr + 0x04);
+                            uint FirmwareTableId = Instance.ReadMemoryUInt(SystemInformationPtr + 0x08);
+                            uint TableBufferLength = Instance.ReadMemoryUInt(SystemInformationPtr + 0x0C);
+
+                            const uint AcpiProvider = 0x41435049; // 'ACPI'
+                            if (ProviderSignature != AcpiProvider)
+                                break; // unsupported provider -> default (unimplemented), unchanged
+
+                            byte[] FirmwareData;
+                            if (FirmwareAction == 0) // SystemFirmwareTable_Enumerate
+                            {
+                                FirmwareData = AcpiEnumerateTables();
+                            }
+                            else if (FirmwareAction == 1) // SystemFirmwareTable_Get
+                            {
+                                FirmwareData = AcpiGetTable(FirmwareTableId);
+                                // Only the tables we actually enumerate exist. A Get for any other
+                                // signature (e.g. a probe that reads a hypervisor-specific table such
+                                // as QEMU's 'PCAF' and inspects a fixed byte) must fail exactly as it
+                                // would on bare metal where that table is absent. Report size 0 so the
+                                // GetSystemFirmwareTable wrapper returns 0 ("table not present") instead
+                                // of leaving the caller's input TableBufferLength in place — which a probe
+                                // would read as "table exists" and then inspect at a fixed offset.
+                                if (FirmwareData == null)
+                                {
+                                    Instance._emulator.WriteMemory(SystemInformationPtr + 0x0C, 0u);
+                                    if (ReturnLengthPtr != 0 && Instance.IsRegionMapped(ReturnLengthPtr, 4))
+                                        Instance._emulator.WriteMemory(ReturnLengthPtr, FirmwareHeaderLen);
+                                    return NTSTATUS.STATUS_NOT_FOUND;
+                                }
+                            }
+                            else
+                            {
+                                break; // unsupported action (e.g. register handler) -> default
+                            }
+
+                            // GetSystemFirmwareTable reads TableBufferLength back as the actual size.
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x0C, (uint)FirmwareData.Length);
+
+                            uint CopyLen = Math.Min(TableBufferLength, (uint)FirmwareData.Length);
+                            if (CopyLen > 0)
+                            {
+                                if (!Instance.IsRegionMapped(SystemInformationPtr + FirmwareHeaderLen, CopyLen))
+                                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                                byte[] Slice = CopyLen == FirmwareData.Length ? FirmwareData : FirmwareData[..(int)CopyLen];
+                                Instance.WriteMemory(SystemInformationPtr + FirmwareHeaderLen, Slice);
+                            }
+
+                            if (ReturnLengthPtr != 0 && Instance.IsRegionMapped(ReturnLengthPtr, 4))
+                                Instance._emulator.WriteMemory(ReturnLengthPtr, FirmwareHeaderLen + (uint)FirmwareData.Length);
+
+                            return TableBufferLength >= (uint)FirmwareData.Length
+                                ? NTSTATUS.STATUS_SUCCESS
+                                : NTSTATUS.STATUS_BUFFER_TOO_SMALL;
+                        }
+
                     default:
                         if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
                             Instance.TriggerEventMessage($"[!] Unsupported NtQuerySystemInformation class: 0x{SystemInformationClass:X}", LogFlags.Issues);
@@ -520,6 +631,85 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
             return Instance.WinUnimplemented;
         }
+
+        private const uint AcpiSigSSDT = 0x54445353; // 'SSDT'
+
+        // Bare-metal-realistic ACPI signature set. Deliberately EXCLUDES 'WAET' (the "Windows ACPI
+        // Emulated devices Table" — its presence is itself a virtualization tell) and INCLUDES 'WSMT'
+        // (Windows SMM Security Mitigations Table — present on real modern machines; its absence is a
+        // tell). Stored as the little-endian DWORDs EnumSystemFirmwareTables returns / GetSystemFirmware
+        // Table takes back as TableID.
+        private static readonly uint[] AcpiTableSignatures =
+        {
+            0x50434146, // 'FACP' (FADT)
+            0x43495041, // 'APIC'
+            0x54455048, // 'HPET'
+            0x4746434D, // 'MCFG'
+            AcpiSigSSDT, // 'SSDT'
+            0x54524742, // 'BGRT'
+            0x544D5357, // 'WSMT'
+        };
+
+        // Standard ACPI PnP hardware IDs a real firmware exposes (PS/2, power/sleep buttons, container,
+        // memory). Embedded (as ASCII, the form a firmware string scan matches) in the SSDT body so a
+        // scan that treats the ABSENCE of real PnP devices as a virtualization tell is satisfied.
+        private static readonly byte[] AcpiSsdtDeviceIds =
+            System.Text.Encoding.ASCII.GetBytes("PNP0000\0PNP0C0C\0PNP0C0E\0PNP0C14\0PNP0D80\0");
+
+        private static bool IsKnownAcpiTable(uint Signature)
+        {
+            foreach (uint Sig in AcpiTableSignatures)
+                if (Sig == Signature)
+                    return true;
+            return false;
+        }
+
+        private static byte[] AcpiEnumerateTables()
+        {
+            byte[] Out = new byte[AcpiTableSignatures.Length * 4];
+            for (int i = 0; i < AcpiTableSignatures.Length; i++)
+                BinaryPrimitives.WriteUInt32LittleEndian(Out.AsSpan(i * 4, 4), AcpiTableSignatures[i]);
+            return Out;
+        }
+
+        private static byte[] AcpiGetTable(uint TableId)
+        {
+            // Only the tables we enumerate exist; anything else is absent (bare-metal behavior).
+            if (!IsKnownAcpiTable(TableId))
+                return null;
+
+            // Minimal but well-formed ACPI table: the 36-byte common header + a body, with a corrected
+            // 8-bit checksum (whole table sums to 0 mod 256). OEM fields are the ubiquitous AMI/desktop
+            // strings — bare metal, no VM signature. The SSDT carries the standard PnP device IDs.
+            const int HeaderLen = 36;
+            byte[] Body = TableId == AcpiSigSSDT ? AcpiSsdtDeviceIds : new byte[16];
+            byte[] Table = new byte[HeaderLen + Body.Length];
+            Span<byte> S = Table;
+
+            BinaryPrimitives.WriteUInt32LittleEndian(S.Slice(0, 4), TableId); // Signature
+            BinaryPrimitives.WriteUInt32LittleEndian(S.Slice(4, 4), (uint)Table.Length);                   // Length
+            S[8] = 3;                                                                                       // Revision
+            S[9] = 0;                                                                                       // Checksum (computed below)
+            WriteAcpiAscii(S.Slice(10, 6), "ALASKA");                                                      // OEMID
+            WriteAcpiAscii(S.Slice(16, 8), "A M I ");                                                       // OEM Table ID
+            BinaryPrimitives.WriteUInt32LittleEndian(S.Slice(24, 4), 0x01072009);                          // OEM Revision
+            WriteAcpiAscii(S.Slice(28, 4), "AMI ");                                                         // Creator ID
+            BinaryPrimitives.WriteUInt32LittleEndian(S.Slice(32, 4), 0x00010013);                          // Creator Revision
+            Body.CopyTo(S.Slice(HeaderLen));                                                                // table-specific body
+
+            byte Sum = 0;
+            foreach (byte B in Table)
+                Sum += B;
+            S[9] = (byte)(0x100 - Sum);
+            return Table;
+        }
+
+        private static void WriteAcpiAscii(Span<byte> Dest, string Value)
+        {
+            for (int i = 0; i < Dest.Length; i++)
+                Dest[i] = (byte)(i < Value.Length ? Value[i] : 0x20);
+        }
+
         private static void WriteUnicodeString(BinaryEmulator Instance, ulong Address, string Value)
         {
             int ByteCount = Encoding.Unicode.GetByteCount(Value) + 2;

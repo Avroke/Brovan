@@ -411,6 +411,101 @@ trace bottoms out, check whether the failure is actually in an emulator-side
 syscall/resolver (here, `NtCreateFile` path resolution) before theorising about
 the guest's deeper logic.
 
+### Scheduler livelock watchdog (F1 mitigation — safe recovery + diagnostic + opt-in escape)
+
+**Motivation.** The pre-F3 `RtlpBackoff` livelock (F1) is a non-deterministic
+cooperative-scheduler hazard: one ntdll thread free-runs the `rdtsc`+`pause`
+SRW/critsec backoff spin forever while its peers are parked in
+`NtWaitForSingleObject` on handles that never get signalled in that particular
+interleaving. Because the spinner stays *runnable*, the scheduler happily feeds
+it full quanta and the run burns hundreds of millions of no-progress
+instructions to the wall-clock timeout with no diagnostic. The full source-level
+fix (find the exact signal/wait pairing whose release never propagates and make
+signal-before-wait always leave consumable state) needs a deterministic repro to
+do safely — see F1. This change adds the generic, low-risk scheduler-level net
+the F1 note recommends ("force a wakeup re-scan or advance virtual time … a
+scheduler deadlock/livelock detector").
+
+**Discriminator (why it does not fire on the healthy slow-heap path).** A slice
+is classified as a *frozen spin* only when the running thread completes a
+**full quantum** yet ends within `LivelockSpinRipWindow` (0x40) of where it
+started, **is the only runnable thread**, and **≥1 peer is parked in `Waiting`**.
+Forward-progressing code breaks this every slice: over a full 200k-instruction
+quantum a real code path moves its RIP far (the F2 heap probe traverses
+`RtlAllocateHeap` + helpers + `memset` and returns to callers), or it yields via
+a syscall (which truncates the slice, so it never completes a full quantum in
+place). Only a genuine userland spin ends a full quantum essentially where it
+began. The episode counter resets the instant the RIP moves, a peer becomes
+runnable, or the thread yields, so it climbs unboundedly **only** for a true
+infinite spin.
+
+**Action (escalating, always-safe first).** After `LivelockNudgeSlices` (256)
+consecutive frozen slices, and every 256 thereafter, the scheduler:
+1. emits **one** `LogFlags.General` diagnostic per episode naming the spinning
+   thread (`module+offset` when resolvable) and every parked peer with its
+   resume RIP, wait handles and deadline — the exact chokepoint the next F1 pass
+   would otherwise have to re-instrument by hand;
+2. runs the **safe recovery**: a full `UpdateMlfqWakeups` re-scan (recovers a
+   missed/late wakeup — F1's primary hypothesis) plus a virtual-time advance to
+   the nearest finite deadline. Neither can perturb a thread that needs no peer
+   to progress (the re-scan only touches genuinely-blocked waiters; the
+   time-advance only moves *finite* deadlines, and the idle thread-pool workers
+   wait on `WorkerFactory` with no deadline), so a false-positive spin
+   classification is a harmless no-op. If the recovery wakes a peer,
+   `HasOtherRunnableThread` flips next slice and the episode self-clears.
+
+**Opt-in bounded escape.** `BinaryEmulatorSettings.LivelockEscapeSlices`
+(default **0 = disabled**) lets the operator/harness cap a genuinely
+unrecoverable interleaving: when non-zero, once the spin persists that many
+frozen slices with nothing changing, the scheduler returns cleanly so the run
+reaches a bounded, diagnosable terminus instead of hanging to the wall-clock
+timeout. It is off by default and must be set larger than any legitimate
+self-completing tight loop the sample runs (a big `memset` also pins its RIP) —
+it exists for a calibrated hunt, not as a default behaviour change. The menu
+wires it from the env var **`BROVAN_LIVELOCK_ESCAPE_SLICES`** (unset / unparseable
+⇒ 0), so it is reachable without a rebuild; the escape is evaluated at the
+256-slice nudge boundaries, so the effective bail count rounds up to the next
+multiple of 256.
+
+**Validation (behavioural — al-khaser + a deterministic repro).** Compiles clean
+(`dotnet build -c Release`, net8.0 via a .NET 9 SDK) and was **run end-to-end**
+against `al-khaser_x64.exe` with the real Windows dependency set + Unicorn 2.1.4:
+
+- *No misfire on the real, progressing sample.* Four independent runs plus a
+  baseline built at the parent commit all reach the same terminus —
+  **~149 M instructions** (one interleaving 105 M; the depth is non-deterministic
+  as documented), `0xC0000005`, 397 injected-library lines — with **zero**
+  watchdog output. The added path is never entered on al-khaser, so the build is
+  byte-for-byte behaviourally identical to baseline there (the discriminator
+  never accumulates 256 pinned full-quantum slices because the sample keeps
+  progressing).
+- *Positive path proven with a deterministic livelock repro.* A minimal x64 PE
+  whose main thread spins (`jmp $`) after spawning a worker that parks on
+  `Sleep(INFINITE)` reproduces the exact "only-runnable spinner + blocked peers"
+  shape. With the watchdog on it emits the precise diagnostic —
+  `Scheduler livelock suspected: thread N spinning at spin2.exe+0x102C … Waiters:
+  tid=… handles=[0x64] tid=… deadline=…` — naming the spinner (module+offset) and
+  both parked peers with their handles/deadlines. With the escape off (default)
+  the run keeps spinning (recovery cannot resolve the effectively-infinite waits);
+  with `BROVAN_LIVELOCK_ESCAPE_SLICES=400` it prints
+  `Scheduler livelock escape: … spun 512 frozen slices … terminating scheduler.`
+  and **exits cleanly (rc=0)** instead of hanging to the timeout.
+
+This upgrades the earlier reasoning-only validation to a behavioural one on both
+the negative (no regression on the real sample) and positive (detect → diagnose
+→ escape) sides. The source-level lost-wakeup fix (F1 steps 1–3) still stands —
+the recovery only recovers the recoverable subclass — but the watchdog now
+demonstrably turns a silent hang into an actionable, bounded terminus.
+
+**Environment note (deps-bundle gap).** The dependency bundle used here (build
+19044) ships the codepage `C_*.NLS` tables but **not**
+`Globalization\Sorting\SortDefault.nls`. Without it the F3 NLS-collation fix has
+no file to open, so the injected-library false positive reappears (al-khaser
+flags all 61 System32 modules). This is a gap in the dependency **export**, not a
+Brovan regression — the F3 code fix (`b205488`) is intact; it just needs the sort
+table shipped. Worth adding `SortDefault.nls` to `Export-BrovanDeps.ps1`'s NLS
+set for a clean-verdict repro.
+
 ### Host-environment fixes (intentionally **not** committed)
 
 These are specific to the Linux build/run host and must not be pushed into
@@ -465,6 +560,25 @@ consumable state. Consider a scheduler deadlock/livelock detector: when the only
 runnable thread is spinning in a known ntdll backoff and all others are blocked,
 force a wakeup re-scan or advance virtual time.
 
+**Landed mitigation (the detector half of step 3's last sentence).** The
+scheduler now carries a generic **livelock watchdog** (see *Past corrections* →
+*Scheduler livelock watchdog*): it recognises the "only runnable thread completes
+full quanta at a pinned RIP while ≥1 peer is parked" shape, emits a per-episode
+diagnostic naming the spinner + every stuck waiter's handles (the exact input
+step (2) asks for, now produced automatically), and performs the safe recovery
+(full wakeup re-scan + finite-deadline time advance). A discriminator keyed on
+*full-quantum + RIP-pinned* keeps it from firing on the progressing slow-heap
+interleaving, and an opt-in `LivelockEscapeSlices` (default off) can bound a
+genuinely unrecoverable interleaving to a clean terminus. This does **not**
+replace the source-level fix — steps (1)–(3) still stand for the lost-wakeup
+that the recovery can't recover — but it turns the silent multi-minute hang into
+an actionable signal and recovers the recoverable subclass. Now **behaviourally
+validated** (see *Scheduler livelock watchdog* → *Validation*): four al-khaser
+runs + a parent-commit baseline confirm zero misfire on the progressing sample
+(identical ~149 M-instruction / `0xC0000005` terminus), and a deterministic
+spin-PE repro proves the detect → diagnose → escape path (clean `rc=0` under
+`BROVAN_LIVELOCK_ESCAPE_SLICES`).
+
 **Post-F3 re-characterization (2026-07, corrects the framing above).** After the
 F3 fix (`b205488`) removed the `sortdefault.nls` re-open storm, the instruction
 interleaving changed, and a fresh scheduler-state trace (dump every live
@@ -510,6 +624,667 @@ around RVA `0x2B3E2..0x2B426`, plus `memset`).
   al-khaser x64 terminus is **F2 throughput** on the heap-heavy probes, plus the
   pre-F3 `RtlpBackoff` livelock which is still a real (separate, non-deterministic)
   hazard — not a heap-corruption bug.
+
+**End-to-end terminus (2026-07, real harness).** With the exported deps + Unicorn
+2.1.4 harness now available, four al-khaser_x64 runs + a parent-commit baseline
+consistently reach a **much deeper endpoint than the 22.8 M-instruction line the
+top table records**:
+
+- **~149 M instructions** (105 M in one interleaving; depth is non-deterministic
+  as documented) — **6.6× beyond** the doc's `4b9540f`-era ceiling.
+- **48 al-khaser probe verdicts printed** every run (38 `GOOD` / 10 `BAD`), with
+  the `BAD` set stable across runs and identical to baseline. All 10 `BAD` are
+  the injected-library FP: `cfgmgr32.dll`, `bcrypt.dll`, `POWRPROF.dll`,
+  `UMPDC.dll`, `cfgmgr32.dll` again (× 2 each × 5 modules = 10 flags) — the F3
+  collation gap reappears purely because the shipped deps bundle is missing
+  `SortDefault.nls` (see script fix below), **not** a Brovan regression: the F3
+  code fix (`b205488`) is intact and re-verified.
+- **Termination pattern is consistent**: a fault deep in the DLL-injection /
+  hidden-modules memory-walk probe → `ntdll!KiUserExceptionDispatcher` →
+  `VCRUNTIME140!__C_specific_handler` → `ucrtbase!_seh_filter_exe` →
+  `NtTerminateProcess(0xC0000005)`. rc = 0 (the process exits cleanly through the
+  guest's own SEH machinery — a natural terminus at "al-khaser catches a fault
+  and terminates itself", not a Brovan crash).
+- The exact faulting page is run-specific (`0x100209000` / `0x1002A9000` /
+  a null-read in one interleaving), all inside the same `0x100120000`-based
+  allocation family — a memory-model coherence question worth its own pass but
+  not chased here: the runs all reach the same terminus category, and the
+  livelock watchdog is silent throughout every one.
+
+**Invalid-handle wait terminus fixed — `NtWaitForMultipleObjects` now validates
+handles (deep-run ceiling 88 → 95 `GOOD`).** After the rescued-page memory fix
+lifted the earlier `0xC0000005` ceiling, a fraction of runs reached a **new
+silent terminus** deep in the `Generic Sandbox/VM Detection` section: the main
+thread parked on `NtWaitForMultipleObjects` returning `STATUS_PENDING` forever
+(~130 M instructions, 88 `GOOD`), so the scheduler ran out of runnable threads
+and returned. Instrumenting the block point showed the wait array held handles
+that Brovan never allocated — a constant `0x4` (below the `0x40` handle base) plus
+a run-varying second slot (`0x7C`/`0x7E`, sometimes resolving to an unrelated ETW
+registration) — sourced by the **real `setupapi.dll`/`devobj.dll` device-
+enumeration path** that `al-khaser`'s `SetupDiGetClassDevsW` VM-hardware probe
+drives. Root cause: `NtWaitForMultipleObjects` did **not** validate its handles —
+an unknown handle was silently treated as "never satisfiable" and the wait parked
+indefinitely. Real Windows references every object by handle *before* waiting and
+fails the whole call with `STATUS_INVALID_HANDLE` if any is invalid (it never
+blocks); `NtWaitForSingleObject` already did exactly this for its single handle.
+The one-file fix ports that check to the multi-object path (every waitable object
+lives in the handle table, so a null lookup is a genuinely invalid handle — both
+`CanSatisfyWaitHandle` and `WindowsGuest.IsHandleSignaled` agree). With it, the
+device-enumeration wait returns `STATUS_INVALID_HANDLE` once (no retry spin —
+`NtWaitForMultipleObjects` fires exactly twice per run, the legitimate first wait
+unchanged), `SetupDiGetClassDevsW` takes its error path, and the run continues:
+the deepest interleavings now print **95 `GOOD` / 1 `BAD`** (up from 88/0) before
+hitting the pre-existing `0xC0000005` memory-coherence terminus further along. The
+new `1 BAD` is `al-khaser`'s *"process loaded modules contains: dbghelp.dll"*
+check. **RESOLVED (and it was never SEH/WER — see
+`docs/SEH_WER_DISPATCH_INVESTIGATION.md`):** runtime tracing proved `faultrep.dll`
+(+ its static import `dbghelp.dll`) was dragged in **at load time by a bogus
+`ApiSetOverrideMap` entry** (`ext-ms-win-kernel32-errorhandling-l1-1-0 →
+faultrep.dll`), with **no exception involved** — kernelbase statically imports that
+error-handling contract, and the override mis-resolved it to the fault-*reporting*
+DLL. Fix: the contract now resolves to `KERNELBASE` (matching real Windows), so
+faultrep ships on disk (file-existence probe passes) but is never loaded and dbghelp
+never enters the LDR (`BAD → GOOD`). The stop-the-spurious-load-don't-mask-it
+requirement below was met at the source. The earlier
+GS/stack-cookie `__fastfail` and null-read `wcslen` termini (both ~48 `GOOD`,
+run-specific pages in the same `0x100120000` allocation family) are the same open
+memory-model coherence question.
+
+**Decommit-rescue now restores real content, not zero (removes the `0xC0000005`
+deep-run cap; full-suite completion becomes reachable).** The rescue path
+(`TryRescueDecommittedRead`) re-mapped a decommitted heap page on a fault but
+handed back a **fresh zero page** — it restored the page's protection, not its
+bytes. The rescue's own premise is that the decommit is a Brovan interleaving
+artefact (real Windows never reaches the decommitted state inside the probe's
+window), which means the page's content is still logically valid and must come
+back intact; zeroing it handed the guest `0` where a live pointer / allocation
+size / stack cookie once sat. Over a deep run this accumulated and was the source
+of the run-specific NULL-derefs and `0xC0000005` faults in the memory-walk probes
+that **hard-capped every baseline interleaving at 95 `GOOD`** (no baseline run has
+ever exceeded it). `DecommitMemory` now snapshots each page's bytes before
+unmapping (parallel-keyed `DecommittedContent`, dropped on rescue-restore and on
+reclaim/commit), and `TryRescueDecommittedRead` writes them back after re-mapping.
+The write uses the backend path so it bypasses guest protection, and a legitimate
+decommit→commit→read still gets fresh zeros (the commit reclaim drops the saved
+content first) — so no observable Windows semantics change. Effect is
+**non-deterministic** (which pages get decommitted / rescued / re-read varies
+run-to-run, so the corruption — and thus the fix's benefit — is hit-or-miss per
+run): across batches the early-terminus rate drops and, decisively, some
+interleavings now run al-khaser's **entire suite to completion** — a clean
+`GetMessageW` / `NtUserGetMessage` message-loop terminus at **247 `GOOD`** —
+which the zero-rescue baseline could categorically never reach. No run regressed
+(worst case is the unchanged ~48/95 terminus). The residual ~48 GS-`__fastfail` is
+**stack** corruption the heap rescue never touches and is unaffected — the next
+memory-coherence frontier. **[SUPERSEDED — see "RESOLVED" below: the residual-48
+terminus was NOT stack corruption but a host-pointer bookkeeping desync on partial
+unmap; fixed, 48 → 248 GOOD.]**
+
+**Guest-visible non-determinism pinned (reproducibility + removed per-run tells).**
+Two runs of the *same* sample diverged (e.g. 130.6 M vs 132.1 M instructions), and
+several synthetic-identity values changed every run. The `EmulatedTickCount64`
+delta already advanced purely by instruction count, but the surrounding sources
+leaked host state: the system-time BASE was `DateTime.UtcNow`; `QueryPerformance
+Counter` returned the host `Stopwatch.GetTimestamp()` (non-deterministic AND a
+stealth tell — a QPC-vs-RDTSC/GetTickCount timing check saw the huge, variable
+emulation cost instead of a coherent virtual delta); the volume GUID was
+`Guid.NewGuid()`; PIDs and the KUSER `SharedUserData->Cookie` came from an unseeded
+`Random` / crypto RNG; and the guest username was a **random-length** string
+(5–11 chars) whose length rippled into every path/env/compare, jittering the
+instruction stream. Fix: one deterministic per-sample seed (`BinaryEmulator.
+DeterministicSeed`, FNV-1a over the image bytes) drives a single shared
+`SeededRandom` and the clock base; QPC now derives from the emulated TSC
+(invariant-TSC model, 10 MHz); the internal LDR-refresh `Pump` throttles by
+emulated time, not host `Stopwatch`; and `NtQueryAttributesFile` file times use
+the emulated clock. Crypto RNG (`BCryptGenRandom` / `RtlGenRandom`) stays genuinely
+random. Result: run-to-run variance collapses from ~12 %+ with 48/95/247 depth
+swings to a **stable verdict** (+~0.4 % residual instruction jitter). **Trade-off,
+accepted deliberately:** pinning timing/identity/layout also pins the still-open
+memory-coherence frontier, so al-khaser now hits the 48-`GOOD` terminus
+*consistently* instead of reaching ~95 on lucky interleavings — reproducible-48 is
+the honest state and a better base for fixing the corruption than flaky-48/95.
+Recovering depth deterministically is now purely a matter of fixing that heap/stack
+corruption. A few niche GUIDs (AFD socket paths, RPC context ids) and the USN-journal
+timestamp are still `Guid.NewGuid()`/`DateTime.UtcNow`; al-khaser does not exercise
+them, so they are the residual determinism gap.
+
+---
+
+## RESOLVED — the "corruption" was a host-pointer bookkeeping desync, not a heap/stack timing race. 48 → 248 GOOD.
+
+**Everything below this line in the older "memory-coherence frontier" / "not fixable
+by a Brovan-side patch" analysis is SUPERSEDED.** Instruction-level instrumentation
+(env-gated, since reverted) proved the earlier root-cause attribution wrong on every
+point: the decommit-content **rescue path fires 0×** in the terminating run, and the
+fault is **not** a GS-`__fastfail` stack-cookie smash — it is a plain NULL-read
+`0xC0000005` at al-khaser's hidden-module MZ-probe (`cmp byte [rax],0x4D`, `rax=0`,
+IP `0x14000CA73`). At the fault, the C# host-pointer view (`ReadMemoryULong`) returned
+the correct value while the guest CPU's own read (`uc_mem_read` path) returned `0` — a
+**backend-vs-C# mapping desync**, not a TLB/cache staleness (an explicit
+`UC_CTL_TLB_FLUSH` + TB-cache removal did **not** clear it).
+
+**Real root cause.** `Unicorn.UnmapMemory` reconciled the C# `_mappedRegions` view
+(consulted by `TryGetHostPointer` for every emulated read/write) with the backend
+**only on an exact `(Address,Size)` match**. The guest ntdll segment heap constantly
+issues *sub-range* `NtFreeVirtualMemory(MEM_DECOMMIT)` on parts of a larger arena
+(`AllocationBase 0x100120000`). `uc_mem_unmap` split its own mapping correctly, but the
+stale full-size C# entry survived and kept aliasing the *old* host buffer; a later
+`MapMemory` re-backed that VA with a **new** buffer in Unicorn. `TryGetHostPointer`
+then resolved the VA to the stale buffer, so emulated `NtQueryVirtualMemory` wrote the
+`MEMORY_BASIC_INFORMATION` into a buffer the guest never reads → a page-straddling
+MBI node's `BaseAddress` read as `0` → `cmp [0]` → AV. (This is why only straddling
+nodes faulted, and why the earlier "stack corruption" / heap-decommit-timing framing
+never reconciled with the evidence.)
+
+**Fix** (`Unicorn.cs`, `UnmapMemory` only, all guests — commit *Fix host-pointer desync
+on partial unmap*): `ReconcileUnmap` splits every `_mappedRegions` entry overlapping the
+unmapped range into its surviving left/right halves, mirroring Unicorn's own
+`split_region` (the right half's `Ptr` shifts by `overlapEnd - rStart` so it stays
+aliased into the same host buffer at the correct offset). A new `MappedRegion.AllocBase`
+records the real `AlignedAlloc` base; the buffer is deferred-freed only once no surviving
+region references it (also closing a latent free-of-wrong-pointer). No masking, no ntdll
+patching, no sample-specific tuning, no budget change — a pure backend-invariant
+correctness fix, so the rejected-fix table below no longer applies (none of those levers
+were needed).
+
+**Result** (deterministic across runs): al-khaser advances **48 → 248 GOOD / 7 BAD**,
+past the entire anti-VM suite (VirtualBox/VMware/Parallels/Hyper-V) to its own
+**Timing-attacks** long-sleep section (the new terminus is the sample's deliberate
+600 s delay, not a crash). The **7 BAD** are newly-reachable, orthogonal anti-emulation
+stealth gaps (time-acceleration, WMI CPU-fan, ACPI-table-string probes) never reached
+before because the run died at probe 48 — a fresh, separate work item, not a regression.
+Regression guard: svchost/services/lsass/spoolsv/rundll32/csrss/explorer all still exit
+clean. The heap-decommit-content rescue (`DecommittedContent` / `TryRescueDecommittedRead`)
+is retained but was **not** what unblocked this terminus.
+
+**Determinism residuals now also closed.** The "niche GUIDs (AFD/RPC) + USN timestamp"
+gap noted just above, plus a `ProcessCookie` still seeded from `Random.Shared` (it feeds
+the guest CRT stack-cookie derivation), are all now routed through the per-sample
+`SeededRandom` / emulated clock. Crypto RNG (`BCryptGenRandom` / Ksec / Cng) stays
+genuinely random by design.
+
+### Anti-VM probe hardening after the desync fix — 48 → 251 GOOD / 4 BAD
+
+Clearing the hidden-modules terminus exposed the rest of al-khaser's suite. Fixed since:
+
+- **ACPI firmware tables** (`NtQuerySystemInformation` `SystemFirmwareTableInformation`,
+  previously unimplemented): `EnumSystemFirmwareTables`/`GetSystemFirmwareTable('ACPI')`
+  now return a bare-metal table set (FACP/APIC/HPET/MCFG/SSDT/BGRT/WSMT, no `WAET`, no
+  fabricated tables — absent signatures fail with `STATUS_NOT_FOUND`). Flips the
+  VirtualBox + VMware "Checking ACPI tables" probes to GOOD.
+- **`GetTickCount` returned 0 for all guests** — `KUSER_SHARED_DATA.TickCountMultiplier`
+  (offset 0x004) was never written, so `(TickCount.Low * 0) >> 24 == 0`. Set to the
+  standard `0x0FA00000`; GetTickCount now tracks `EmulatedTickCount64` ms. Flips
+  al-khaser's `accelerated_sleep` ("Check if time has been accelerated") to GOOD, and is
+  a general correctness fix for any GetTickCount-based timing.
+
+**Residual 4 BAD — honestly left:**
+- **"Checking ACPI table strings" + QEMU "Checking ACPI tables"** both route through
+  al-khaser's `firmware_ACPI()`, which returns detected unless EVERY enumerated ACPI
+  table contains all five of `PNP0000`/`PNP0C0C`/`PNP0C0E`/`PNP0C14`/`PNP0D80`. No real
+  bare-metal firmware satisfies that (FADT/MADT/HPET carry no PnP device IDs), so this
+  al-khaser check false-positives on real hardware too. Passing it would require embedding
+  fake PnP strings in every synthetic table (unrealistic forgery / over-fit to one tool),
+  so it's left BAD per the "return realistic values, don't over-fit" discipline.
+- **"Checking CPU fan using WMI"** (`SELECT * FROM Win32_Fan`, detected when 0 instances)
+  and **"VM Driver Services"** (`OpenSCManager` returns NULL) each need a subsystem Brovan
+  doesn't have: a WMI query-interception provider that synthesizes a `Win32_Fan` instance,
+  and a `svcctl` RPC endpoint (`ROpenSCManagerW` + service enumeration). Both are scoped
+  follow-ups, not stub gaps.
+
+**Deps-bundle fix landing with this note** (`scripts/Export-BrovanDeps.ps1` +
+importer validators). The export script's NLS copy globs `System32\*.nls`, but
+the sort table the F3 fix (`b205488`) needs to open for `CompareStringW` /
+`StrCmpNIW` — `SortDefault.nls` — is **not in System32 at all**: it lives at
+`%WINDIR%\Globalization\Sorting\SortDefault.nls` (one architecture-independent
+file, shared by the x64 and x86 views), so the System32 glob never picks it up.
+Bundles exported from the older script (including the one used for the runs
+above) trip the F3 injected-library FP on every re-import, even though the code
+fix is intact. The export script now copies `SortDefault.nls` from
+`%WINDIR%\Globalization\Sorting` into both the x64 (`WindowsLibs\`) and x86
+(`WindowsLibs\SysWOW64\`) views, and both importers (`Import-BrovanDeps.ps1` /
+`.sh`) warn when it is absent so operators reconciling an older bundle notice
+before running. Brovan's `\Globalization\...`-by-leaf resolver (commit `2f6e5ae`)
+already maps the file wherever it lands in `WindowsLibs\`, so no runtime change
+is needed.
+
+**Complete missing-file inventory (resolver-instrumented, this pass).** To settle
+"what else is the bundle short of", the read-path resolver was instrumented to log
+every `*.nls` / `*.dll` guest open that falls through to a non-existent VirtualFS
+path. Across a full run al-khaser touches exactly three unshipped files, all now
+covered by the curated-set / NLS fixes:
+
+- `Globalization\Sorting\SortDefault.nls` — the F3 collation table (requested
+  **once** per run now, confirming the F3 code fix ended the pre-`b205488`
+  re-open storm — the residual is purely the missing file).
+- `WUDFPlatform.dll` — al-khaser resolves `WudfIs{Any,Kernel,User}DebuggerPresent`
+  from it for its WUDF debugger checks.
+- `faultrep.dll` — al-khaser's Windows-Error-Reporting-based probe.
+
+The two DLLs are now in the `Export-BrovanDeps.ps1` curated set. Their absence is
+**low-severity** (the `GetProcAddress` calls return NULL, so those specific probes
+silently no-op rather than exercising the real detection path — they do not fault
+or change the terminus), but shipping them closes the last fidelity gaps the
+al-khaser workload exposes in the dependency bundle. No other `*.nls` / `*.dll`
+is requested-but-missing.
+
+**Unimplemented ntdll syscalls the run exercises.** Separately from missing files,
+al-khaser reaches a handful of ntdll syscalls Brovan answered with
+`STATUS_NOT_SUPPORTED`. The SSN→name map is authoritative (extracted from the
+shipped 19044 ntdll stubs): `0x19E NtSetInformationVirtualMemory` (31×),
+`0xFB NtGetWriteWatch` (5×), `0x162 NtQueryTimerResolution`, `0xA5
+NtCreateDebugObject`, `0x1BD NtSystemDebugControl`, `0x179 NtResetWriteWatch`,
+`0x147 NtQueryInformationAtom` (the `0x1037` / `0x105D` ones are `win32u` GUI
+syscalls — a different subsystem). Six are now implemented — the four below plus
+`NtGetWriteWatch` (0xFB) / `NtResetWriteWatch` (0x179), covered in the write-watch
+entry that follows — each auto-registering via the `IWinSyscall` generator (the SSN
+is read from the shipped ntdll, so it tracks the build):
+
+- **`NtSetInformationVirtualMemory` (0x19E)** — advisory VM operations (prefetch /
+  page-priority / CFG call-target / working-set / hot-patch / contiguity /
+  prepopulate) the MSVC loader/CRT drive; validates the class + `MEMORY_RANGE_ENTRY`
+  array + payload and returns success (none observably mutates emulated memory).
+- **`NtQueryTimerResolution` (0x162)** — coarsest/finest/current interrupt period,
+  kept coherent with the `156250` (15.625 ms) increment `NtQuerySystemInformation`
+  already reports.
+- **`NtSystemDebugControl` (0x1BD)** — **a real fidelity fix, not just a warning
+  removal.** al-khaser's `NtSystemDebugControl` kernel-debugger probe got
+  `STATUS_NOT_SUPPORTED` and flagged it **BAD** (detected). Returning the correct
+  "no kernel debugger" `STATUS_DEBUGGER_INACTIVE` (the same answer
+  `NtQueryDebugFilterState` already gives) flips that probe to **GOOD**: the run
+  verdict improved **38 GOOD / 10 BAD → 39 GOOD / 9 BAD**, stable across a full
+  149 M-instruction interleaving, terminus unchanged.
+- **`NtCreateDebugObject` (0xA5)** — reached lazily via ntdll's `DbgUiConnectToDbg`;
+  creating a debug object is not itself a debugger-presence signal (that answer is
+  `NtQueryInformationProcess(ProcessDebugObjectHandle)` → `STATUS_PORT_NOT_SET`), so
+  it allocates a real handle (new `HandleType.DebugObjectHandle`) and returns it.
+
+**Landed (the "needs a feature" pair, done right).** `NtGetWriteWatch` (0xFB) /
+`NtResetWriteWatch` (0x179) back al-khaser's four write-watch checks (buffer-only /
+API-calls / IsDebuggerPresent / code-write), which detect an emulator when the
+reported dirty-page set doesn't match what was actually written. Implemented as a
+**genuinely opt-in** feature (`System/.../WriteWatchManager.cs`): a region allocated
+with `MEM_WRITE_WATCH` (0x00200000) gets a **ranged** Unicorn write hook scoped to
+just that region, so a program that never uses the feature pays **zero** cost (the
+backend filters the hook range before any managed callback runs — no global
+per-write hook, sidestepping the F2 concern entirely). The design is correct by a
+Unicorn property: only guest STORE instructions trigger the write hook, while
+host-side stub writes go through `uc_mem_write` (which bypasses hooks) — so a probe
+that hands the buffer to a *failing* API and expects a **zero** hit-count gets it
+(the API never stored to the buffer), while a real `buffer[0]=x` store yields
+exactly one dirty page. `NtGetWriteWatch` returns the pages ascending + granularity
+0x1000 and honours `WRITE_WATCH_FLAG_RESET`; `NtResetWriteWatch` clears the set (the
+code-write probe writes generated code into the buffer, resets, runs it, then
+expects zero). Registered on the MEM_WRITE_WATCH alloc, unregistered (hook removed)
+on MEM_RELEASE. Verdict unchanged at **48 GOOD / 0 BAD** — the four probes stay GOOD
+and the syscalls are now exercised for real (4× `NtGetWriteWatch → STATUS_SUCCESS`,
+1× `NtResetWriteWatch → STATUS_SUCCESS`, plus one intentional `INVALID_PARAMETER`
+for the API-calls probe's non-watch query), stable across runs, instruction count
+identical to baseline (no throughput regression). This closes the write-watch
+anti-emulation class faithfully rather than with the previous always-fail
+`STATUS_NOT_SUPPORTED`.
+
+**Landed (fidelity pass on the still-noisy return paths).** Every previously
+`STATUS_NOT_SUPPORTED` syscall / info-class the run touched was audited against
+what real Windows returns from an unprivileged token, and each replaced with the
+correct answer. Verdict unchanged at **48 GOOD / 0 BAD** (stable across 4 runs);
+the residual noise dropped from 12 unimplemented markers per run to 4 (all in
+paths where no clean answer exists: `0xC8 NtCreateUserProcess` fired by the CRT
+terminus spawning WerFault, `0x1037` / `0x105D` `win32u` GUI syscalls, one
+`ProcessTelemetryCoverage` init call).
+
+- **`NtQueryInformationAtom` (0x147)** — implemented. Integer atoms
+  (`>= 0xC000`) round-trip through `ATOM_BASIC_INFORMATION` with the canonical
+  `"#N"` name; string-atom queries — the al-khaser `GlobalGetAtomName(bogus)`
+  probe uses this shape — return `STATUS_INVALID_HANDLE` (matches real Windows
+  when the atom isn't in the process's atom table), so `GlobalGetAtomName`
+  fails without writing the OUT buffer. Previously the `NOT_SUPPORTED` reply
+  worked only by kernel32's LastError propagation.
+- **`NtSetSystemInformation` (0x1AA)** — implemented. Kernel-mode / TCB-privileged
+  surface; from a non-elevated user process real Windows returns
+  `STATUS_PRIVILEGE_NOT_HELD` for every information class (the callable-from-userland
+  carve-outs still need `SeTcbPrivilege`). Returning that instead of NOT_SUPPORTED
+  matches the honest usermode answer.
+- **`NtQueryInformationProcess(ProcessDebugFlags = 0x1F)`** — implemented. Real
+  Windows returns `NoDebugInherit = 1` for a non-debugged process; al-khaser's
+  probe checks `Status == SUCCESS && buffer == 0` for BAD, so `SUCCESS + 1` is
+  both the honest "no debugger" answer and the value that keeps the probe GOOD.
+  The old NOT_SUPPORTED reply worked only because the probe treats a failed
+  call as GOOD too.
+- **`NtQueryInformationProcess(ProcessDefaultHardErrorMode = 0x0C)`** — implemented.
+  Called by ntdll's process-init code path; `SUCCESS + 0` (SEM_ flags all clear,
+  default critical-error handling) matches real Windows.
+
+**Still deferred.** `NtCreateUserProcess` (0xC8) fires once from the CRT terminus
+spawning WerFault after the walker AV — the syscall is a full process-creation
+surface (14 args, PS_ATTRIBUTES) with no honest usermode payoff to model on this
+sample, and no probe hangs on it. `NtQueryInformationProcess(0x56 =
+ProcessTelemetryCoverage)` is a WIP telemetry class ntdll may or may not expose
+depending on the build; keeping it NOT_SUPPORTED is the honest answer. The
+`win32u` GUI syscalls (`0x1037`, `0x105D`) remain out of scope for the ntdll pass.
+
+**Verified with a corrected bundle (SortDefault.nls + WUDFPlatform.dll + faultrep.dll
+shipped).** Re-exporting with the fixed `Export-BrovanDeps.ps1` and re-running
+confirms the deps analysis end-to-end:
+
+- **Injected-library FP eliminated** — with `SortDefault.nls` present the collation
+  works, and the 397 `[!] Injected library` lines / the whole class of System32-module
+  false positives drop to **0**. `WUDFPlatform.dll` now loads and al-khaser's
+  `WudfIs{Any,Kernel,User}DebuggerPresent` resolve and execute (were NULL before).
+- **Verdict 44 GOOD / 4 BAD** (from 38/10 at the start of this work). The four
+  remaining `BAD` probes — `NtSetInformationThread(ThreadHideFromDebugger)`, `Int
+  0x2D`, `SeDebugPrivilege`, `NtYieldExecution` — are landed as fixes in the
+  follow-up pass below (verdict `48 GOOD / 0 BAD`).
+- **New terminus surfaced, non-deterministic.** With the FP-storm gone the flow is
+  shorter and different; one interleaving reaches MSVC's `__report_gsfailure`
+  (`__fastfail(FAST_FAIL_STACK_COOKIE_CHECK_FAILURE)` / `int 0x29`, `0xC0000409`) at
+  ~47 M inside the now-correct module-scan path, another runs past it to ~73 M
+  hitting a `0xC0000005` in the same path. Investigated this pass (below); both
+  termini share one root cause. The livelock watchdog stays silent throughout.
+
+### Landed later — soft-rescue on decommitted-read closes the walker terminus
+
+The intrinsic-timing analysis below stayed correct, but the terminus itself is now
+closable with a **fault-driven rescue** that leaves observable Windows semantics
+intact (VirtualQuery still reports MEM_RESERVE for the affected pages). Design:
+
+- `DecommitMemory` still unmaps in the backend as before AND records each
+  page it drops into `DecommittedPages` (per-emulation `HashSet<ulong>`) along
+  with the region's pre-decommit protection in `DecommittedProtection`.
+- On any read/write/fetch fault the guest layer's new
+  `TryRescueDecommittedMemory` runs before the fault dispatches: if the page
+  is in the set, it is re-mapped in the backend with its original protection
+  and removed from the set. `InvalidMemoryHandler` returns `true`; the guest
+  access retries and succeeds — the walker completes and the process runs on
+  to whatever probe comes next.
+- `CommitMemory` and `ReleaseMemory` call `ReclaimRescuedPages` which unmaps
+  any earlier-rescued page in the target range so the caller's own MapMemory
+  (COMMIT) or UnmapMemory (RELEASE) has clean ground; freshly-released
+  pages correctly go MEM_FREE and any subsequent access there faults.
+- Only the Windows guest wires the rescue — Linux / Generic default to false
+  so their semantics are unchanged.
+
+**Observable effect**: the terminus documented below (0xC0000005 at
+`0x14000CA73`) no longer happens on the "walker snapshotted + heap decommitted"
+class. Al-khaser's `Walking process memory for hidden modules` probe completes
+(`-> 0`) and the run continues into the **AntiDumping / SystemInfo / AntiVM /
+HumanInteraction** categories that were previously blocked. New high-water mark:
+**92 GOOD / 4 BAD** across ~124 M instructions on the deeper interleaving
+(steady state per run is non-deterministic — some runs still terminate earlier
+on other AVs in downstream probes, but the walker terminus itself no longer
+fires deterministically). The 4 new BADs are all real fidelity gaps we haven't
+patched yet, not accidental passes:
+
+- **`Checking if process loaded modules contains: dbghelp.dll`** — **RESOLVED
+  (not SEH/WER).** `faultrep.dll` (+ static import `dbghelp.dll`) was pulled in at
+  **load time** by a bogus `ApiSetOverrideMap` entry
+  (`ext-ms-win-kernel32-errorhandling-l1-1-0 → faultrep.dll`), not by any WER path
+  — runtime tracing recorded zero exceptions before the map. That error-handling
+  contract (kernelbase statically imports it) now resolves to `KERNELBASE`, matching
+  real Windows; faultrep ships on disk but stays unloaded. See
+  `docs/SEH_WER_DISPATCH_INVESTIGATION.md`.
+- ~~**`Checking mouse movement`**~~ — **fixed**, see *Landed later — cursor
+  movement fidelity* below.
+- ~~**`Checking memory space using GlobalMemoryStatusEx`**~~ — **fixed**, see
+  *Landed later — RAM + disk size fidelity* below.
+- ~~**`Checking disk size using GetDiskFreeSpaceEx`**~~ — **fixed**, see
+  *Landed later — RAM + disk size fidelity* below.
+
+**Fingerprint discipline**: the only Windows-observable divergence from the
+rescue path is that a guest read of a page whose VirtualQuery reports
+MEM_RESERVE (having been decommitted) returns stale bytes instead of raising
+STATUS_ACCESS_VIOLATION. No al-khaser variant, pafish, or VMAware probe tests
+this specific "read-decommitted-expect-AV" shape (each of them walks memory
+through VirtualQuery + read *believing* the region is committed, and their code
+has no SEH around the byte read — the AV is a Brovan-specific timing artefact,
+not a probe target). The alternative — the deterministic `0xC0000005` terminus
+we had before this change — was strictly more fingerprintable (100 % crash on
+the "hidden modules" probe on every run).
+
+### Landed later — RAM + disk size fidelity (both size probes → GOOD)
+
+With the walker terminus unblocked, al-khaser reaches its `SystemInfo`-category
+size probes, which had surfaced two `BAD`s. Both were honest fidelity gaps, both
+now fixed and confirmed `GOOD` end-to-end on a run that reaches them (`memory
+space using GlobalMemoryStatusEx → GOOD`, `disk size using GetDiskFreeSpaceEx →
+GOOD`, alongside the already-passing `hard disk size using WMI` /
+`DeviceIoControl`).
+
+- **Disk size (`GetDiskFreeSpaceEx`)** — `WindowsStorageDeviceSupport` reported a
+  64 GB volume (`TotalClusters = 0x01000000` × 4 KiB/cluster). al-khaser's disk
+  probes fail any volume under a 60–128 GB floor, so 64 GB read as a VM. Bumped
+  the single `TotalClusters` SSOT to `0x08000000` → a realistic 512 GB SSD, which
+  propagates coherently to every derived surface (drive geometry, NTFS volume
+  data, disk extents, `FileFsSizeInformation`). Also added
+  `FileFsFullSizeInformation` (class 7) to `NtQueryVolumeInformationFile` so the
+  modern `GetDiskFreeSpaceEx` takes its primary query path instead of the
+  error-fallback to `FileFsSizeInformation` (class 3).
+
+- **RAM (`GlobalMemoryStatusEx`)** — root cause was NOT a wrong value but an
+  unhandled class: modern `kernelbase!GlobalMemoryStatusEx` sources the *entire*
+  `MEMORYSTATUSEX` from a single `NtQuerySystemInformation(SystemMemoryUsageInformation
+  = 0xB6)` call (verified from the syscall trace — it makes no other query and
+  does **not** consult `SystemBasicInformation`). Brovan returned
+  `STATUS_NOT_SUPPORTED`, so the function returned with the buffer unfilled
+  (`ullTotalPhys == 0`), reading as a sub-2 GB VM. Implemented class `0xB6`
+  returning the full 0x38-byte `SYSTEM_MEMORY_USAGE_INFORMATION` (layout confirmed
+  against `ntdiff/headers` extracts, identical 1607→22H2, and multiple phnt
+  copies) on both the plain and `Ex` syscall surfaces.
+
+- **New RAM SSOT** — the physical-page count (`0x200000` = 8 GiB) had been
+  duplicated inline in `SystemBasicInformation` and its `Ex` twin. Extracted to
+  `WindowsMemorySupport` (mirroring the `WindowsStorageDeviceSupport` idiom) so
+  every RAM-reporting surface reads one coherent 8 GiB machine — a sample that
+  cross-checks total RAM across `SystemBasicInformation` and
+  `SystemMemoryUsageInformation` sees agreeing answers (realism rule #1). The
+  five commitment figures are internally consistent (Available < Total, Committed
+  < CommitLimit, Peak ∈ [Committed, CommitLimit]).
+
+Both fixes are pure fidelity — realistic, deterministic, SSOT-derived — with no
+sample-specific values (rules #4, #6).
+
+### Landed later — cursor movement fidelity (`mouse movement` → GOOD)
+
+al-khaser's human-presence probe samples the cursor twice across a `Sleep` and
+flags an unmoving cursor as a sandbox. `user32!GetCursorPos` faulted through to
+`STATUS_NOT_SUPPORTED`, so the caller's `POINT` stayed `(0,0)` on both reads.
+
+The routing was not obvious. `GetCursorPos` issues win32u syscall `0x102A`, but
+that SSN is **not** `NtUserGetCursorPos` (which this build's win32u does not even
+export) — disassembling the bundled `user32!GetCursorPos` shows
+`mov edx,1; lea r8d,[rdx+0x7e]; jmp NtUserCallTwoParam`, i.e. it tail-calls the
+`NtUserCallTwoParam(lpPoint, 1, 0x7F)` multiplexer (`GetPhysicalCursorPos` routes
+identically). Implemented `NtUserCallTwoParam`: for code `0x7F` it writes a
+screen-space `POINT` and returns TRUE; every other code returns
+`WinUnimplemented` (STATUS_NOT_SUPPORTED), preserving prior behaviour so
+registering the handler regresses nothing.
+
+The position is a smooth Lissajous (two coprime-ish triangle-wave periods, ~0.3
+px/ms, bounded well inside 1920×1080) driven by the guest virtual clock
+(`EmulatedTickCount64`, which `Sleep`/`NtDelayExecution` advances). Two reads
+separated by any nonzero delay therefore differ — realistic human movement, not
+fabricated per-call jitter (rule #4). Verified `GOOD` end-to-end (the syscall now
+logs `NtUserCallTwoParam (0x102A) → STATUS_SUCCESS`, `mouse movement → GOOD`).
+
+**Generator caveat learned here**: the win32k syscall registry is
+source-generated from the handler class names. A compile *error* in a
+just-added handler poisons the incremental generator cache, so the next
+*successful* incremental build silently ships a registry without the new class
+(the syscall stays "unimplemented" at runtime with no build error). Rebuild
+`--no-incremental` after adding a syscall handler, and confirm the class appears
+in `obj/**/WinRegistry.g.cs`.
+
+Remaining `SystemInfo`-adjacent BAD: the `dbghelp.dll` loader-list probe is now
+RESOLVED (bogus apiset override → faultrep, fixed to resolve to KERNELBASE; described
+above), leaving no open `SystemInfo`-adjacent BAD.
+
+### Traced this pass — the "hidden modules" AV is an intrinsic timing race
+
+> **[SUPERSEDED by the "RESOLVED" section above.]** This pass concluded the AV was an
+> intrinsic segment-heap decommit *timing race* that was "not fixable by a Brovan-side
+> patch." Later instruction-level instrumentation disproved that: the fault is a
+> host-pointer bookkeeping desync in `UnmapMemory` (stale `_mappedRegions` entry after a
+> partial `uc_mem_unmap`), fixed generically via `ReconcileUnmap`. The decommit *does*
+> happen mid-walk, but a correct C#-vs-Unicorn mapping mirror makes the guest read the
+> right buffer, so the walk no longer faults (48 → 248 GOOD). The rejected-fix reasoning
+> and the `RtlpHeapReservedBytes` "deferred direction" below were both moot — the bug was
+> not in the heap model at all. Kept for the trace detail (fault site, ntdll RVAs).
+
+Instrumented (env-gated `BROVAN_QVMDBG`, reverted) to bracket the fault site
+`0x14000CA73: cmp BYTE [rax], 0x4d` in al-khaser's hidden-module scanner
+(`fn 0x14000C9D6-0x14000CBDE`). The mechanism, verified against 10+ runs:
+
+1. **Al-khaser snapshots MBIs into a heap-allocated vector**
+   (`fn 0x140017230`: `HeapAlloc(48)` per MBI, `VirtualQuery(addr, mbi)`, push
+   into `std::vector`, advance by `mbi.RegionSize`). ~25 000 `NtQueryVirtualMemory`
+   calls in a **1.7 M-instruction window** ending at insn ~47 M. Every reply
+   is a snapshot of the region topology at that instant.
+
+2. **Al-khaser then walks the snapshot linearly** in the enclosing function
+   at `0x14000C9D6`, calling `GetModuleHandleExW(FROM_ADDRESS, page)` per page
+   and — if the page is COMMIT+readable per the *snapshotted* MBI — reading
+   `[page]` to check for the `MZ` magic. Each iteration is ~1 000 instructions
+   (module-handle lookup + PEB LDR walk + string ops); the whole walk is
+   ~25 M instructions and covers insn ~47 M → ~72 M.
+
+3. **During that walk, the emulated ntdll segment heap calls
+   `NtFreeVirtualMemory(MEM_DECOMMIT)`** ~50 times, all from the same site
+   (`ntdll+0x20957`, a heap-manager decommit helper called via
+   `ntdll+0x9AF4 = NtFreeVirtualMemory`). The decommit ranges are subranges
+   of the same `AllocationBase=0x100120000` heap arena al-khaser is walking.
+
+4. **The snapshotted MBI at page P still says `COMMIT+RW`** (from step 1) but
+   at read time (step 2) the page has been **decommitted** (step 3). The
+   `cmp [rax], 0x4d` then raises `EXCEPTION_ACCESS_VIOLATION`.
+
+5. **The fault is not caught by al-khaser code.** `fn 0x14000C9D6-0x14000CBDE`'s
+   unwind info has `UNW_FLAG_CHAININFO` (no local scope table); the SEH
+   walker chains up, `__C_specific_handler` is invoked from thunk `0x140018BA6`,
+   returns `ExceptionContinueSearch`, and the exception reaches `main()`'s CRT
+   top-level filter `_seh_filter_exe` (invoked via thunk `0x140018C0C`), which
+   `TerminateProcess`es with `0xC0000005`. The occasional `0xC0000409`
+   fast-fail terminus is the same fault manifesting as an MSVC stack-cookie
+   check failure at `__report_gsfailure` (0x140017F84) when the AV happens
+   inside a cookie-protected function's epilogue path — same class, same root.
+
+The two participants — the guest's MBI-vector walker and the emulated ntdll's
+periodic MEM_DECOMMIT — are both **faithful**. Al-khaser is running its real
+detection code; the emulated ntdll IS a real Windows 10 ntdll.dll (from the
+deps bundle) executing its real segment-heap decommit paths. The bug is in
+neither.
+
+**What differs from real Windows is the timing distribution across the walk**.
+On real hardware the same walker completes in ~ms; the segment heap's
+delayed-coalesce / decommit pass doesn't fire on µs granularity between
+one page's snapshot and its read. In Brovan every instruction runs
+sequentially with per-`RtlEnterCriticalSection` / `RtlpAllocateHeap` /
+`GetModuleHandleExW` cost, so `GetModuleHandleExW` calls during the walk
+provide many more heap-allocator opportunities per unit of *guest time*
+than they would on hardware, tripping the decommit threshold from **inside**
+the walker itself. The specific arena being walked gets decommitted under
+the walker; the snapshot goes stale; the read faults.
+
+**Why this is not routed to `Boundary`** (verdict rule #14): the sample IS
+being terminated by a `0xC0000005` from its own code path — that's an honest
+`Error` verdict, not a natural boundary at an external dependency. Faking
+this as `Boundary` would hide the fact that al-khaser's own written contract
+(no SEH around its detection functions, relying on the impossibility of
+fault) is being exercised, and would set a precedent for masking any similar
+timing race in future samples. The verdict stays honest.
+
+**Why this is not fixable by a Brovan-side patch** (verdict rule #14 + rule #6):
+
+- Making `DecommitMemory` a metadata-only flip that leaves the Unicorn
+  mapping alive so subsequent reads succeed **would diverge from Windows
+  semantics** (real Windows returns `STATUS_ACCESS_VIOLATION` for a read
+  of a decommitted page); a probe that deliberately reads a decommitted
+  page to fingerprint the emulator would flag Brovan.
+- Preventing the emulated ntdll heap from calling `NtFreeVirtualMemory` is
+  impossible — that's the real ntdll's own decommit code path.
+- Retimed / batched / synthesised decommit is sample-specific tuning (rule
+  #6) — the trigger is a legitimate memory-pressure signal, not a stub gap.
+- Wrapping the guest's read in emulator-side SEH so al-khaser survives its
+  own bug would also be sample-specific and mask the real signal.
+
+**Result of this pass**: the 44 GOOD / 4 BAD verdict for probes that complete
+before the walker is stable; the walker terminus itself remains an honest
+`Error(0xC0000005)`. All the value from the earlier probes is preserved.
+The trace exposes both the `[GOOD]` /  `[ BAD ]` per-probe lines and the
+terminus code — the log alone tells the correct story.
+
+**Deferred as a future direction, not landed here**: the segment-heap
+decommit threshold might be soft-nudged by pre-populating a larger initial
+`RtlpHeapReservedBytes` field in the PEB so ntdll thinks it has more
+committed slack; this could delay the decommit past the walker's completion
+without patching semantics. It is a research direction, not a landed fix,
+and needs a validation strategy on other samples (rule #6) before shipping.
+
+All diagnostic instrumentation from this pass has been reverted; tree
+stays clean.
+
+### Landed this pass — the four residual BAD probes → GOOD (48 GOOD / 0 BAD)
+
+After the walker-terminus was diagnosed, the four residual `BAD` verdicts
+that ran to completion before the terminus were investigated individually
+against al-khaser's own upstream source. Every one was a concrete stub gap,
+not an intrinsic frontier. All four landed as generic, per-syscall fidelity
+fixes with no sample-specific tuning; verdict is **48 GOOD / 0 BAD stable
+across 5 consecutive runs** (both the ~47 M `Fast-Fail` interleaving and
+the ~72 M `0xC0000005` interleaving reach the terminus with an identical
+per-probe verdict distribution). The walker-terminus itself is unchanged
+— the sample still exits `Error`, but every visible probe result is now
+correct.
+
+- **`NtSetInformationThread(ThreadHideFromDebugger)`** — the stub always
+  returned `SUCCESS`, ignored the length argument, and stored nothing.
+  al-khaser probes it with (1) a bogus 12345 length expecting
+  `STATUS_INFO_LENGTH_MISMATCH`, (2) a bogus 0xFFFF handle expecting
+  `STATUS_INVALID_HANDLE`, then (3) a valid `Set(NULL, 0)` followed by
+  (4) 8 unaligned `Query(size=4, ptr=buf+i)` reads for `i∈[0,7]`
+  expecting `STATUS_DATATYPE_MISALIGNMENT` on offsets 1/2/3/5/6/7 and
+  `STATUS_INFO_LENGTH_MISMATCH` on the aligned 0/4, plus (5) a final
+  `Query(size=1)` expecting the hidden flag byte to read back as `1`.
+  Fixes: length-not-zero on Set → `INFO_LENGTH_MISMATCH`; track hidden
+  flag on `WindowsThreadState.HiddenFromDebugger`; on Query, do the
+  ntoskrnl `ProbeForWrite(sizeof(ULONG))` alignment check FIRST (length
+  ≥ 4 && unaligned → `DATATYPE_MISALIGNMENT`), then the strict size
+  check (`!= 1` → `INFO_LENGTH_MISMATCH`), then return the flag byte.
+- **`Int 0x2D` (`KiDebugService`)** — the WindowsGuest interrupt handler
+  had cases 1 / 3 / 0x29 / 0x2E but not 0x2D, so `int 0x2D` was silently
+  dropped and al-khaser's VEH never saw the expected `STATUS_BREAKPOINT`,
+  so its `SwallowedException` flag stayed `TRUE` and the probe reported
+  BAD. Fix: `case 0x2D: QueueUserModeException(STATUS_BREAKPOINT)` mirrors
+  the `int 3` path; the CPU/kernel already advances RIP past the CD 2D
+  opcode by the time the exception is delivered, matching the VEH's
+  "already advanced" expectation with no extra RIP fixup needed.
+- **`SeDebugPrivilege`** — al-khaser's probe is a compact
+  `OpenProcess(csrss.exe, PROCESS_QUERY_LIMITED_INFORMATION)` — a
+  non-`NULL` handle means the caller has `SeDebugPrivilege` (only
+  privileged callers can open a protected system process). Brovan's
+  `NtOpenProcess` allowed `PROCESS_QUERY_LIMITED_INFORMATION` on
+  protected processes regardless of caller elevation, so the probe got
+  a handle back and reported BAD. Fix: for any protected process
+  (`ProtectionStatus != None` — `LightTCB` covers csrss / wininit /
+  services / winlogon, `LightAM` covers MsMpEng / MpDefenderCoreService),
+  return `STATUS_ACCESS_DENIED` unconditionally unless the caller's
+  primary token has `IsElevated = true`. This is real-Windows behaviour
+  (protected processes are opaque to non-elevated callers even for
+  `QUERY_LIMITED_INFORMATION`) and generalises across every protected-
+  process detection variant, not just csrss.
+- **`NtYieldExecution`** — the stub returned `STATUS_SUCCESS` on every
+  call. al-khaser calls `NtYieldExecution` 20 times (with `Sleep(15)`
+  between each) and increments a counter on every non-
+  `STATUS_NO_YIELD_PERFORMED` return; the counter is compared against
+  `<= 3` for GOOD. Real bare-metal Windows returns `NO_YIELD_PERFORMED`
+  the vast majority of the time (nothing else is Ready to run), so the
+  counter never exceeds a few. Brovan returned SUCCESS on all 20 → BAD.
+  Fix: scan the emulator's thread table for any `EmulatedThreadState.Ready`
+  peer; if none, return `STATUS_NO_YIELD_PERFORMED`; otherwise mark the
+  caller Ready and stop-emulate exactly as before. This is the correct
+  scheduler semantics on any surface, not just this probe. The new
+  `NTSTATUS.STATUS_NO_YIELD_PERFORMED = 0x40000024` was added to the
+  enum (was missing).
+
+Fast test suite green through this pass; tree stays clean.
 
 **Bonus finding surfaced by getting further — a second injected-library FP.** The
 `Walking process memory for hidden modules` probe reported every System32 module

@@ -33,6 +33,12 @@ namespace Brovan.Core.Emulation.Guests
 
         private readonly BlobData _blob;
         private readonly WindowsBlobLaunchMode _blobLaunchMode;
+        // Deterministic RNG for synthetic guest identity (username, computer name). Points at the
+        // emulator's per-sample seeded stream once Initialize runs; the fallback keeps a param-less
+        // access before init still deterministic. Was new Random() + crypto RNG -> a random-LENGTH
+        // username every run, whose variable length rippled into path/env/compare work and made the
+        // instruction stream (and thus depth) non-reproducible run-to-run.
+        private Random _identityRandom;
         private IReadOnlyDictionary<uint, WinSyscallEntry> WinSyscallTable = new Dictionary<uint, WinSyscallEntry>();
         private WinModule _ntdllModule;
 
@@ -99,6 +105,8 @@ namespace Brovan.Core.Emulation.Guests
         {
             if (!Instance.IsArchX86Guest)
                 throw new Exception("Windows guest supports only x86/x64.");
+
+            _identityRandom = Instance.SeededRandom;
 
             if (Binary.FileFormat != BinaryFormat.PE)
             {
@@ -691,6 +699,11 @@ namespace Brovan.Core.Emulation.Guests
             }
         }
 
+        public bool TryRescueDecommittedMemory(BinaryEmulator Instance, BackendMemoryAccessType Type, ulong Address)
+        {
+            return Instance.TryRescueDecommittedRead(Type, Address);
+        }
+
         public bool HandleInvalidMemory(BinaryEmulator Instance, BackendMemoryAccessType Type, ulong Address, uint Size, ulong Value)
         {
             if (Instance._binary == null || (!IsBlob && Instance._binary.FileFormat != BinaryFormat.PE))
@@ -716,6 +729,14 @@ namespace Brovan.Core.Emulation.Guests
                     QueueUserModeException(Instance, NTSTATUS.STATUS_SINGLE_STEP);
                     return true;
                 case 3:
+                    QueueUserModeException(Instance, NTSTATUS.STATUS_BREAKPOINT);
+                    return true;
+                case 0x2D:
+                    // KiDebugService (int 2D). On real Windows without a kernel debugger the
+                    // kernel raises STATUS_BREAKPOINT and the CPU/kernel already advanced RIP
+                    // past the CD 2D opcode by the time the VEH runs — al-khaser's Interrupt_0x2d
+                    // probe VEH observes STATUS_BREAKPOINT with RIP already past the opcode and
+                    // returns EXCEPTION_CONTINUE_EXECUTION without adjusting RIP.
                     QueueUserModeException(Instance, NTSTATUS.STATUS_BREAKPOINT);
                     return true;
                 case 0x29:
@@ -1048,21 +1069,18 @@ namespace Brovan.Core.Emulation.Guests
         }
 
 
-        private static string GenerateRandomUsername()
+        private string GenerateRandomUsername()
         {
             const string Alphabet =
                 "ABCDEFGHIJKLMNOPQRSTUVWXYZ" +
                 "abcdefghijklmnopqrstuvwxyz" +
                 "0123456789";
-            Random RandomGen = new Random();
+            Random RandomGen = _identityRandom ?? new Random(0);
             int RandomLen = RandomGen.Next(5, 12);
-            byte[] RandomBytes = new byte[RandomLen];
-            RandomNumberGenerator.Fill(RandomBytes);
 
             char[] result = new char[RandomLen];
-
             for (int i = 0; i < RandomLen; i++)
-                result[i] = Alphabet[RandomBytes[i] % Alphabet.Length];
+                result[i] = Alphabet[RandomGen.Next(Alphabet.Length)];
 
             return new string(result);
         }
@@ -1135,8 +1153,7 @@ namespace Brovan.Core.Emulation.Guests
         {
             size = 0;
             string Username = GuestUserName;
-            Random RandomGen = new Random();
-            string PcName = $"DESKTOP-{RandomGen.Next(4, 10)}";
+            string PcName = $"DESKTOP-{Instance.SeededRandom.Next(4, 10)}";
             Dictionary<string, string> Env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
                 { "PROCESSOR_ARCHITECTURE", Instance._binary.Architecture == BinaryArchitecture.x64 ? "AMD64" : "x86" },

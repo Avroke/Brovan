@@ -116,6 +116,30 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Handles.Add(H);
             }
 
+            // Real Windows references every object by handle before waiting; if ANY
+            // handle in the array is invalid the whole call fails immediately with
+            // STATUS_INVALID_HANDLE — it never blocks. NtWaitForSingleObject already
+            // does this for its single handle. Without the check an invalid handle is
+            // silently skipped (never satisfiable) and the wait parks forever, so a
+            // caller that passes a stale/garbage handle (e.g. real setupapi/devobj's
+            // device-enumeration path) hangs the whole emulation instead of taking its
+            // error path. Every waitable object lives in the handle table, so a null
+            // lookup is a genuinely invalid handle (WindowsGuest.IsHandleSignaled and
+            // CanSatisfyWaitHandle agree — both return false for an absent handle).
+            for (int i = 0; i < Handles.Count; i++)
+            {
+                // The current-process (-1) / current-thread (-2) pseudo-handles are valid
+                // references that live outside the handle table; real Windows accepts them and
+                // simply never signals them while the thread runs (the wait blocks/times out).
+                // Treat them as valid here so they fall through to the normal wait path rather
+                // than being rejected as invalid.
+                if (Handles[i] == ulong.MaxValue || Handles[i] == ulong.MaxValue - 1)
+                    continue;
+
+                if (Instance.WinHelper.HandleManager.GetObjectByHandle(Handles[i]) == null)
+                    return NTSTATUS.STATUS_INVALID_HANDLE;
+            }
+
             bool WaitAll = WaitType == 0;
             if (TryGetSatisfiedIndex(Instance, Thread, Handles, WaitAll, out int Index, out NTSTATUS WaitStatus))
                 return WaitStatus;

@@ -1168,7 +1168,17 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             Shared = new WindowsSharedBuffer();
             this.Emulator = Emulator;
-            SyntheticVolumeGuid = Guid.NewGuid().ToString("D").ToLowerInvariant();
+
+            // Draw all synthetic identity (volume GUID, PIDs, ...) from the emulator's single
+            // deterministic RNG stream (seeded per sample from the guest image), so an analysis is
+            // reproducible and none of these values is a per-run tell. Previously RandomGen was
+            // time-seeded and the volume GUID was Guid.NewGuid(), so two runs of the same sample
+            // produced different guest identities and diverged.
+            RandomGen = Emulator.SeededRandom;
+
+            byte[] VolumeGuidBytes = new byte[16];
+            RandomGen.NextBytes(VolumeGuidBytes);
+            SyntheticVolumeGuid = new Guid(VolumeGuidBytes).ToString("D").ToLowerInvariant();
             SyntheticVolumeGuidSymbolicLink = $"\\??\\Volume{{{SyntheticVolumeGuid}}}";
             SyntheticVolumeWin32GuidPath = $"\\\\?\\Volume{{{SyntheticVolumeGuid}}}\\";
             SyntheticMountDevUniqueId = Guid.Parse(SyntheticVolumeGuid).ToByteArray();
@@ -3177,7 +3187,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!WriteZeroMemory(Monitor, (uint)UserPrimaryMonitorSize))
                 return 0;
 
-            (int Width, int Height) = GetHostPrimaryMonitorSize();
+            (int Width, int Height) = ScreenResolution();
 
             UserPrimaryMonitorInfo MonitorInfo = new UserPrimaryMonitorInfo
             {
@@ -3202,24 +3212,64 @@ namespace Brovan.Core.Emulation.OS.Windows
             return UserPrimaryMonitorAddress;
         }
 
-        private static (int Width, int Height) GetHostPrimaryMonitorSize()
+        /// <summary>The fixed default virtual-display resolution when none is configured.</summary>
+        public static readonly (int Width, int Height) DefaultScreenResolution = (1920, 1080);
+
+        // Effective guest screen resolution — the single SSOT read by every screen-space surface
+        // (primary-monitor MONITORINFO here, GetCursorPos bounds in NtUserCallTwoParam,
+        // GetDeviceCaps HORZRES) so they can never disagree. Sourced from the per-emulation
+        // config (BinaryEmulatorSettings.ScreenResolution, set via the emulator constructor /
+        // the console --screen argument); null there means the fixed default.
+        public (int Width, int Height) ScreenResolution()
         {
-            try
+            return Emulator.Settings.ScreenResolution ?? DefaultScreenResolution;
+        }
+
+        /// <summary>
+        /// Parse a screen-resolution spec into a concrete resolution for
+        /// <see cref="BinaryEmulatorSettings.ScreenResolution"/>. <c>null</c>/blank/unrecognised
+        /// returns <c>null</c> (fall back to <see cref="DefaultScreenResolution"/>, a
+        /// host-independent, reproducible 1920x1080). <c>"host"</c>/<c>"dynamic"</c> resolves the
+        /// real host monitor (GetSystemMetrics on a Windows host — non-deterministic, opt-in).
+        /// <c>"&lt;W&gt;x&lt;H&gt;"</c> (e.g. "2560x1440") is an explicit deterministic resolution.
+        /// </summary>
+        public static (int Width, int Height)? ResolveScreenResolution(string spec)
+        {
+            if (string.IsNullOrWhiteSpace(spec))
+                return null;
+
+            spec = spec.Trim();
+
+            if (spec.Equals("host", StringComparison.OrdinalIgnoreCase) ||
+                spec.Equals("dynamic", StringComparison.OrdinalIgnoreCase))
             {
-                if (OperatingSystem.IsWindows())
+                try
                 {
-                    int Width = NativeWinImports.GetSystemMetrics(SmCxScreen);
-                    int Height = NativeWinImports.GetSystemMetrics(SmCyScreen);
-
-                    if (Width > 0 && Height > 0)
-                        return (Width, Height);
+                    if (OperatingSystem.IsWindows())
+                    {
+                        int Width = NativeWinImports.GetSystemMetrics(SmCxScreen);
+                        int Height = NativeWinImports.GetSystemMetrics(SmCyScreen);
+                        if (Width > 0 && Height > 0)
+                            return (Width, Height);
+                    }
                 }
-            }
-            catch
-            {
+                catch
+                {
+                }
+                return DefaultScreenResolution;
             }
 
-            return (1920, 1080);
+            int sep = spec.IndexOfAny(new[] { 'x', 'X' });
+            if (sep > 0 && sep < spec.Length - 1)
+            {
+                var culture = System.Globalization.CultureInfo.InvariantCulture;
+                if (int.TryParse(spec.AsSpan(0, sep), System.Globalization.NumberStyles.Integer, culture, out int cw) &&
+                    int.TryParse(spec.AsSpan(sep + 1), System.Globalization.NumberStyles.Integer, culture, out int ch) &&
+                    cw > 0 && ch > 0)
+                    return (cw, ch);
+            }
+
+            return null;
         }
 
         public ulong EnsureUserDesktopInfo()

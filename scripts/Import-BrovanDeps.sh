@@ -35,6 +35,9 @@ ok()   { printf '%s[+] %s%s\n' "$C_GREEN"  "$1" "$C_RST"; }
 warn() { printf '%s[!] %s%s\n' "$C_YELLOW" "$1" "$C_RST"; }
 err()  { printf '%s[-] %s%s\n' "$C_RED"    "$1" "$C_RST" 1>&2; }
 
+# Directory of this script (for locating sibling helpers like sanitize_hive.py).
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 # Print the leading comment block (skip the shebang, stop at the first code line).
 usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"; }
 
@@ -127,6 +130,22 @@ else
     warn "Archive contained none of WindowsLibs/WinReg/apisetmap.bin."
 fi
 
+# --- sanitize VM-identifying strings out of the hives ---------------------------
+# The dependency is `reg save`d from a real Windows box; when that box is a
+# Hyper-V/Azure VM its SYSTEM hive carries the VM's disk identity
+# (SCSI\Disk&Ven_Msft&Prod_Virtual_Disk), which a guest reads as a sandbox tell.
+# Length-preserving fix-up at the dependency layer keeps every registry read
+# coherent without any runtime masking. Non-fatal if python3 is unavailable.
+if [ -f "$DEST/WinReg/SYSTEM" ]; then
+    step "Sanitizing hive VM strings"
+    if command -v python3 >/dev/null 2>&1; then
+        python3 "$SCRIPT_DIR/sanitize_hive.py" "$DEST/WinReg/SYSTEM" \
+            || warn "sanitize_hive.py failed; hives keep their exported VM strings."
+    else
+        warn "python3 not found - skipping hive sanitization; storage buses will read as a VM."
+    fi
+fi
+
 # --- verification ---------------------------------------------------------------
 step "Verifying layout"
 status_ok=1
@@ -147,6 +166,15 @@ if [ -s "$lib_dir/locale.nls" ]; then
     ok "WindowsLibs/ NLS tables present ($ncnt *.nls, locale.nls OK)."
 else
     warn "WindowsLibs/locale.nls missing - kernelbase init will fail; re-export with an NLS-aware bundle."
+fi
+
+# SortDefault.nls: needed by kernel32!SortGetHandle for case-insensitive collation.
+# Without it CompareStringW / StrCmpNIW return a constant error and al-khaser's
+# DLL-injection check flags every legitimate System32 module (see F3).
+if [ -s "$lib_dir/SortDefault.nls" ]; then
+    ok "WindowsLibs/SortDefault.nls present."
+else
+    warn "WindowsLibs/SortDefault.nls missing - case-insensitive comparison will fail; re-export with an NLS-aware bundle."
 fi
 
 wow_dir="$lib_dir/SysWOW64"

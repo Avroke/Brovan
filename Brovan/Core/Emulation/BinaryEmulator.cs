@@ -283,6 +283,35 @@ namespace Brovan.Core.Emulation
         /// <summary>Backend implementation to use. Defaults to Unicorn.</summary>
         public EmulationBackendKind BackendKind;
 
+        /// <summary>
+        /// Bounds the cooperative-scheduler livelock watchdog (see
+        /// <c>docs/AL_KHASER_EMULATION.md</c>, frontier F1). When a single thread keeps
+        /// burning full quanta at a pinned RIP while every peer is blocked — the
+        /// <c>RtlpBackoff</c> / SRW-contention livelock shape — the scheduler always
+        /// attempts a safe recovery (a full wakeup re-scan plus virtual-time advance,
+        /// both no-ops for a thread that is genuinely progressing). If, in addition,
+        /// this value is non-zero and the spin persists for this many consecutive
+        /// frozen slices with nothing changing, the scheduler bails cleanly so a
+        /// genuinely deadlocked interleaving terminates diagnosably instead of hanging
+        /// to the wall-clock timeout. <c>0</c> (the default) disables only the bail;
+        /// the recovery and diagnostic stay on. Set conservatively — a bounded tight
+        /// loop (e.g. a large <c>memset</c>) also pins its RIP, so the value must be
+        /// larger than any legitimate self-completing loop the sample runs.
+        /// </summary>
+        public uint LivelockEscapeSlices;
+
+        /// <summary>
+        /// Effective guest primary-screen resolution, the SSOT every screen-space surface reads
+        /// (primary-monitor MONITORINFO, GetCursorPos bounds, GetDeviceCaps HORZRES). <c>null</c>
+        /// (the default) means the fixed 1920x1080 virtual display — host-independent and
+        /// reproducible run-over-run, which a fingerprint requires. Set an explicit
+        /// <c>(Width, Height)</c> for a different deterministic resolution, or resolve the host's
+        /// real monitor via <see cref="OS.Windows.WinSysHelper.ResolveScreenResolution(string)"/>
+        /// (<c>"host"</c>/<c>"dynamic"</c>) when a non-deterministic host-tracking display is
+        /// wanted (e.g. InteractiveGui). The console exposes this as <c>--screen &lt;WxH|host&gt;</c>.
+        /// </summary>
+        public (int Width, int Height)? ScreenResolution;
+
 #pragma warning disable
         public BinaryEmulatorSettings()
         {
@@ -325,6 +354,13 @@ namespace Brovan.Core.Emulation
 
         internal List<MemoryRegion> _memory = new();
         internal List<MemoryRegion> _freedmemory = new();
+
+        /// <summary>
+        /// Tracks guest writes to MEM_WRITE_WATCH regions (NtGetWriteWatch / NtResetWriteWatch).
+        /// Lazily created the first time the guest allocates a write-watch region, so programs
+        /// that never use the feature pay nothing.
+        /// </summary>
+        internal Brovan.Core.Emulation.OS.Windows.WriteWatchManager WriteWatch;
         private readonly List<int> MemoryRegionIndex = new();
         private readonly Queue<int>[] MlfqReadyQueues = new Queue<int>[32];
         private readonly HashSet<int> MlfqQueuedThreads = new();
@@ -388,7 +424,26 @@ namespace Brovan.Core.Emulation
         private const ulong TscCyclesPerMillisecond = 3_000_000UL;
         private const ulong RdtscReadCycles = 60;
         private const ulong RdtscpReadCycles = 90;
-        private readonly long EmulatedSystemTimeBaseFileTimeUtc = DateTime.UtcNow.ToFileTimeUtc();
+        // Deterministic guest system-time base. Was DateTime.UtcNow, which broke the
+        // "deterministic guest system time" contract below (GetEmulatedSystemTimeFileTimeUtc):
+        // the absolute base drifted run-to-run, so two runs of the same sample diverged and
+        // the reported "now" was a per-run value. Default is a fixed plausible timestamp;
+        // SeedEmulatedClockBase re-seeds it deterministically per sample so different samples
+        // still get different (but reproducible) clocks. The tick DELTA already advances purely
+        // by instruction count, so only the base needed pinning.
+        private long EmulatedSystemTimeBaseFileTimeUtc = new DateTime(2024, 1, 1, 9, 30, 0, DateTimeKind.Utc).ToFileTimeUtc();
+
+        /// <summary>
+        /// Seeds the guest system-time base deterministically from a per-sample seed. The base
+        /// lands in a fixed, plausible window (early 2024 + up to ~300 days) so the value is
+        /// realistic yet reproducible for a given sample. Called once during guest init.
+        /// </summary>
+        internal void SeedEmulatedClockBase(ulong Seed)
+        {
+            long WindowStart = new DateTime(2024, 1, 1, 0, 0, 0, DateTimeKind.Utc).ToFileTimeUtc();
+            long WindowSpan = TimeSpan.FromDays(300).Ticks; // 100 ns units
+            EmulatedSystemTimeBaseFileTimeUtc = WindowStart + (long)(Seed % (ulong)WindowSpan);
+        }
 
         /// <summary>
         /// Current deterministic guest tick count in milliseconds.
@@ -404,6 +459,64 @@ namespace Brovan.Core.Emulation
                 return long.MaxValue;
 
             return EmulatedSystemTimeBaseFileTimeUtc + (EmulatedTickCount64 * 10000);
+        }
+
+        /// <summary>Frequency reported by QueryPerformanceFrequency (10 MHz), matching QueryPerformanceCounter below.</summary>
+        internal const ulong EmulatedQpcFrequency = 10_000_000UL;
+
+        // TSC advances at TscCyclesPerMillisecond (3 GHz) per emulated ms; QPC runs at 10 MHz.
+        private const ulong TscCyclesPerQpcTick = TscCyclesPerMillisecond / (EmulatedQpcFrequency / 1000); // 300
+
+        /// <summary>
+        /// Deterministic QueryPerformanceCounter value, derived from the same emulated TSC as
+        /// RDTSC (invariant-TSC model) scaled to <see cref="EmulatedQpcFrequency"/>. Replaces the
+        /// host <c>Stopwatch.GetTimestamp()</c>, which was non-deterministic AND leaked real
+        /// wall-clock into the guest — a timing check comparing QPC deltas to RDTSC/GetTickCount
+        /// would see the (huge, variable) emulation cost instead of a coherent virtual delta.
+        /// </summary>
+        internal ulong GetEmulatedQpc() => _timestampCounter / TscCyclesPerQpcTick;
+
+        /// <summary>
+        /// Deterministic per-emulation seed derived from the guest image. Every synthetic-identity
+        /// value the guest can observe (RNG stream, volume GUID, PIDs, KUSER cookie, clock base) is
+        /// derived from it, so two runs of the same sample are reproducible and none of these values
+        /// is a per-run tell. Crypto RNG (BCryptGenRandom / RtlGenRandom) stays genuinely random.
+        /// </summary>
+        internal ulong DeterministicSeed { get; private set; }
+
+        /// <summary>Single deterministic RNG stream seeded from <see cref="DeterministicSeed"/>. Shared by all non-crypto synthetic-value sites so their draws are reproducible.</summary>
+        internal Random SeededRandom { get; private set; } = new Random(0);
+
+        // FNV-1a over the guest image bytes (path-independent: the same sample seeds identically
+        // wherever it lives), size folded in; falls back to the image path, then a fixed constant.
+        private static ulong ComputeDeterministicSeed(BinaryFile Binary)
+        {
+            const ulong FnvOffset = 1469598103934665603UL;
+            const ulong FnvPrime = 1099511628211UL;
+            ulong Hash = FnvOffset;
+
+            ReadOnlySpan<byte> Data = Binary != null ? Binary.GetBinaryData() : ReadOnlySpan<byte>.Empty;
+            if (Data.Length != 0)
+            {
+                for (int i = 0; i < Data.Length; i++)
+                    Hash = (Hash ^ Data[i]) * FnvPrime;
+                Hash = (Hash ^ (ulong)(uint)Data.Length) * FnvPrime;
+            }
+            else if (Binary != null && !string.IsNullOrEmpty(Binary.Location))
+            {
+                string Loc = Binary.Location;
+                for (int i = 0; i < Loc.Length; i++)
+                    Hash = (Hash ^ (byte)Loc[i]) * FnvPrime;
+            }
+
+            return Hash == 0 ? FnvOffset : Hash;
+        }
+
+        private void InitDeterministicIdentity()
+        {
+            DeterministicSeed = ComputeDeterministicSeed(_binary);
+            SeededRandom = new Random(unchecked((int)DeterministicSeed));
+            SeedEmulatedClockBase(DeterministicSeed);
         }
 
         /// <summary>
@@ -511,6 +624,7 @@ namespace Brovan.Core.Emulation
                 throw new BadImageFormatException("Unsupported binary architecture.");
 
             _binary = Binary;
+            InitDeterministicIdentity();
             BackendArch = Arch.X86;
             BackendMode = Binary.Architecture == BinaryArchitecture.x64 ? Mode.MODE_64 : Mode.MODE_32;
             _emulator = BackendFactory.Create(Settings.BackendKind, BackendArch, BackendMode, Settings.NoHooks);
@@ -550,6 +664,7 @@ namespace Brovan.Core.Emulation
                 throw new NullReferenceException(nameof(Data));
 
             _binary = Binary ?? new BinaryFile(Data, true);
+            InitDeterministicIdentity();
             BackendArch = arch;
             BackendMode = mode;
             _emulator = BackendFactory.Create(Settings.BackendKind, arch, mode, Settings.NoHooks);
@@ -1994,6 +2109,19 @@ namespace Brovan.Core.Emulation
         private const int SpinWaitScoreMaximum = 4;
         private const ulong SpinWaitRipWindow = 0x80;
 
+        // Livelock watchdog (frontier F1). A thread that completes a *full* quantum yet
+        // ends within this window of where it started ran a tight userland loop without
+        // yielding — real forward progress either moves the RIP far across a full quantum
+        // or issues a syscall (which truncates the slice). Kept tighter than
+        // SpinWaitRipWindow so only genuinely-pinned spins qualify.
+        private const ulong LivelockSpinRipWindow = 0x40;
+
+        // Consecutive frozen-spin slices before the watchdog runs a safe recovery pass
+        // (wakeup re-scan + virtual-time advance) and emits one diagnostic. A false
+        // positive here (a bounded tight loop) is harmless: the recovery cannot perturb
+        // a thread that needs no peer to progress. Only the opt-in escape terminates.
+        private const long LivelockNudgeSlices = 256;
+
         private static void BuildMlfqQuanta(uint BaseQuantumInstructions, int Levels, uint[] Quanta)
         {
             if (Levels < 1 || Quanta == null || Quanta.Length == 0)
@@ -2277,6 +2405,78 @@ namespace Brovan.Core.Emulation
             return false;
         }
 
+        // True when a thread other than <paramref name="Except"/> is parked in a wait.
+        // Combined with "the current thread is the only runnable one and spinning", a
+        // blocked peer is the livelock signature (a lock holder that never wakes) as
+        // opposed to a single-threaded program legitimately busy in a hot loop.
+        private bool HasBlockedWaitingThread(EmulatedThread Except)
+        {
+            for (int i = 0; i < ThreadOrder.Count; i++)
+            {
+                int Tid = ThreadOrder[i];
+                if (!Threads.TryGetValue((uint)Tid, out EmulatedThread Thread) || Thread == null || Thread == Except)
+                    continue;
+
+                if (Thread.State == EmulatedThreadState.Waiting)
+                    return true;
+            }
+
+            return false;
+        }
+
+        // Emits a single, actionable diagnostic when the livelock watchdog trips: the
+        // spinning thread (module!offset if resolvable) plus every blocked peer with its
+        // resume RIP and the handles it is parked on. This is the exact chokepoint the
+        // next investigation pass would otherwise have to re-instrument by hand (see the
+        // F1 recommended approach in docs/AL_KHASER_EMULATION.md).
+        private void ReportSchedulerLivelock(EmulatedThread Spinner, ulong Rip)
+        {
+            if ((Settings.Flags & LogFlags.General) == 0 || Spinner == null)
+                return;
+
+            string Where = $"0x{Rip:X}";
+            var Module = FindModuleByAddress(Rip);
+            if (Module != null)
+                Where = $"{Module.Name}+0x{Rip - Module.MappedBase:X} (0x{Rip:X})";
+
+            StringBuilder Builder = new();
+            Builder.Append($"[!] Scheduler livelock suspected: thread {Spinner.ThreadId} spinning at {Where} with all peers blocked. Waiters:");
+
+            bool AnyWaiter = false;
+            for (int i = 0; i < ThreadOrder.Count; i++)
+            {
+                int Tid = ThreadOrder[i];
+                if (!Threads.TryGetValue((uint)Tid, out EmulatedThread Thread) || Thread == null || Thread == Spinner)
+                    continue;
+
+                if (Thread.State != EmulatedThreadState.Waiting)
+                    continue;
+
+                AnyWaiter = true;
+                Builder.Append($" tid={Thread.ThreadId} rip=0x{Thread.Context?.RIP ?? 0:X}");
+
+                if (Thread.WaitHandles != null && Thread.WaitHandles.Count > 0)
+                {
+                    Builder.Append(" handles=[");
+                    for (int h = 0; h < Thread.WaitHandles.Count; h++)
+                    {
+                        if (h != 0)
+                            Builder.Append(',');
+                        Builder.Append($"0x{Thread.WaitHandles[h]:X}");
+                    }
+                    Builder.Append(']');
+                }
+
+                if (Thread.WaitDeadline != -1)
+                    Builder.Append($" deadline={Thread.WaitDeadline}");
+            }
+
+            if (!AnyWaiter)
+                Builder.Append(" (none)");
+
+            TriggerEventMessage(Builder.ToString(), LogFlags.General);
+        }
+
         private void RebuildMlfqReadyQueues(Queue<int>[] ReadyQueues, HashSet<int> InQueue, int Levels, long SchedulerTick, long SchedulerWorkTick, long AgingThresholdBudget, int AgingBoost)
         {
             for (int i = 0; i < Levels && i < ReadyQueues.Length; i++)
@@ -2343,6 +2543,13 @@ namespace Brovan.Core.Emulation
             long AgingThresholdBudget = AgingThresholdSlices <= 0 ? 0 : Math.Max(1, (long)BaseQuantumInstructions) * AgingThresholdSlices;
             int KnownThreadOrderCount = ThreadOrder.Count;
             bool WakeupScanRequired = true;
+
+            // Livelock-watchdog episode state (frontier F1). Tracks a single thread that
+            // keeps completing full quanta at a pinned RIP while all peers are blocked.
+            int LivelockThreadId = -1;
+            ulong LivelockRip = 0;
+            long LivelockSpinSlices = 0;
+            bool LivelockReported = false;
 
             if (Debug)
                 if (Debug)
@@ -2574,6 +2781,69 @@ namespace Brovan.Core.Emulation
 
                 WakeupScanRequired = SliceRequestedRefresh || AdvancedEmulatedTime || ThreadOrder.Count != KnownThreadOrderCount || ImmaBeEmulatedOOO.State == EmulatedThreadState.Waiting;
 
+                // Livelock watchdog (frontier F1). A full quantum that ends within a tight
+                // window of where it started, while this thread is the only runnable one
+                // and at least one peer is parked, is the RtlpBackoff / SRW-contention
+                // livelock shape. Forward-progressing code breaks this every slice (its RIP
+                // moves, or it yields via a syscall and never completes a full quantum in
+                // place), so the counter only climbs for a genuine userland spin.
+                bool FrozenSpinSlice = CompletedFullQuantum
+                    && !HasOtherRunnableThread
+                    && ImmaBeEmulatedOOO.State != EmulatedThreadState.Terminated
+                    && RipBeforeSlice != 0
+                    && IsNearRip(RipBeforeSlice, RipAfterSlice, LivelockSpinRipWindow)
+                    && HasBlockedWaitingThread(ImmaBeEmulatedOOO);
+
+                if (FrozenSpinSlice
+                    && LivelockThreadId == (int)ImmaBeEmulatedOOO.ThreadId
+                    && IsNearRip(LivelockRip, RipAfterSlice, LivelockSpinRipWindow))
+                {
+                    LivelockSpinSlices++;
+                }
+                else if (FrozenSpinSlice)
+                {
+                    LivelockThreadId = (int)ImmaBeEmulatedOOO.ThreadId;
+                    LivelockRip = RipAfterSlice;
+                    LivelockSpinSlices = 1;
+                    LivelockReported = false;
+                }
+                else if (LivelockThreadId != -1)
+                {
+                    LivelockThreadId = -1;
+                    LivelockRip = 0;
+                    LivelockSpinSlices = 0;
+                    LivelockReported = false;
+                }
+
+                if (LivelockSpinSlices != 0 && LivelockSpinSlices % LivelockNudgeSlices == 0)
+                {
+                    if (!LivelockReported)
+                    {
+                        ReportSchedulerLivelock(ImmaBeEmulatedOOO, RipAfterSlice);
+                        LivelockReported = true;
+                    }
+
+                    // Safe recovery: re-scan every waiter (recovers a missed or late
+                    // wakeup — the doc's primary F1 hypothesis) and advance virtual time to
+                    // the nearest finite deadline. Neither perturbs a thread that needs no
+                    // peer to make progress, so a false-positive spin classification is
+                    // harmless; a woken peer flips HasOtherRunnableThread next slice and the
+                    // episode self-clears.
+                    UpdateMlfqWakeups(ReadyQueues, InQueue, Levels, SchedulerTick);
+                    KnownThreadOrderCount = ThreadOrder.Count;
+                    if (TryGetNextWaitSleepMs(out int LivelockSleepMs, int.MaxValue))
+                        AdvanceEmulatedTimeMilliseconds(LivelockSleepMs, AdvanceTimestampCounter: true);
+                    WakeupScanRequired = true;
+
+                    if (Settings.LivelockEscapeSlices != 0 && (ulong)LivelockSpinSlices >= Settings.LivelockEscapeSlices)
+                    {
+                        if ((Settings.Flags & LogFlags.General) != 0)
+                            TriggerEventMessage($"[!] Scheduler livelock escape: thread {ImmaBeEmulatedOOO.ThreadId} spun {LivelockSpinSlices} frozen slices at 0x{RipAfterSlice:X} with all peers blocked; terminating scheduler.", LogFlags.General);
+
+                        return true;
+                    }
+                }
+
                 if (Debug && (Slices <= 64 || (Slices & 0xFF) == 0 || ImmaBeEmulatedOOO.State != StateBeforeSlice || SliceRequestedRefresh || AdvancedEmulatedTime))
                 {
                     if (Debug)
@@ -2631,6 +2901,15 @@ namespace Brovan.Core.Emulation
                 SchedulerRefreshRequested = true;
                 return false;
             }
+
+            // Windows-guest specific: reads into a decommitted heap arena page (dropped by the
+            // real ntdll segment heap under memory pressure) transparently come back to their
+            // original protection so the guest access succeeds. This closes the walker/heap-
+            // decommit timing race that terminates al-khaser's hidden-modules probe at
+            // 0xC0000005 — see BinaryEmulator.WindowsBridge.cs :: DecommittedPages for the full
+            // rationale. Returning true here tells Unicorn to retry the access.
+            if (Guest.TryRescueDecommittedMemory(this, Type, Address))
+                return true;
 
             ulong Rip = ReadRegister(IPRegister);
             if ((Settings.Flags & LogFlags.Issues) != 0)

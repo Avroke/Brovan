@@ -106,6 +106,16 @@ namespace Brovan.EmulationMenu
             return lookup;
         }
 
+        // Opt-in bound for the cooperative-scheduler livelock watchdog (see
+        // BinaryEmulatorSettings.LivelockEscapeSlices and docs/AL_KHASER_EMULATION.md F1).
+        // Off by default; set BROVAN_LIVELOCK_ESCAPE_SLICES=<n> to make the scheduler bail
+        // cleanly once a thread has spun <n> frozen slices with every peer blocked.
+        private static uint ParseLivelockEscapeSlices()
+        {
+            string value = Environment.GetEnvironmentVariable("BROVAN_LIVELOCK_ESCAPE_SLICES");
+            return uint.TryParse(value, out uint slices) ? slices : 0u;
+        }
+
         private static void ShowHelp(string[] args)
         {
             if (args.Length > 0 && CommandHelpLookup.TryGetValue(args[0], out CommandHelpEntry entry))
@@ -2341,7 +2351,7 @@ namespace Brovan.EmulationMenu
             }
         }
 
-        public static void RunEmulator(string FilePath, bool Quick, bool Silent, [AllowNull] string Command, [AllowNull] string RawProgramArguments, string[] ProgramArguments, NetworkAccessPolicy NetworkPolicyValue, bool NoHooks, EmulationBackendKind BackendKind)
+        public static void RunEmulator(string FilePath, bool Quick, bool Silent, [AllowNull] string Command, [AllowNull] string RawProgramArguments, string[] ProgramArguments, NetworkAccessPolicy NetworkPolicyValue, bool NoHooks, EmulationBackendKind BackendKind, [AllowNull] string ScreenResolutionSpec = null)
         {
             SilentMode = Silent;
 
@@ -2408,7 +2418,12 @@ namespace Brovan.EmulationMenu
                     RawProgramArguments = RawProgramArguments,
                     ProgramArguments = ProgramArguments ?? Array.Empty<string>(),
                     NoHooks = NoHooks,
-                    BackendKind = BackendKind
+                    BackendKind = BackendKind,
+                    LivelockEscapeSlices = ParseLivelockEscapeSlices(),
+                    // Explicit --screen argument wins; else the BROVAN_SCREEN_RESOLUTION env var
+                    // (kept as a convenience default source); else null -> the fixed 1920x1080 SSOT.
+                    ScreenResolution = WinSysHelper.ResolveScreenResolution(
+                        ScreenResolutionSpec ?? Environment.GetEnvironmentVariable("BROVAN_SCREEN_RESOLUTION"))
                 };
 
                 if (UseWindowsBlobGuest)

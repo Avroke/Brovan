@@ -65,7 +65,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static void FillSyntheticDirectoryInformation(BinaryEmulator Instance, ulong FileInformationPtr)
         {
-            long Now = DateTime.UtcNow.ToFileTimeUtc();
+            long Now = Instance.GetEmulatedSystemTimeFileTimeUtc();
             Instance._emulator.WriteMemory(FileInformationPtr + 0x00, (ulong)Now, 8);
             Instance._emulator.WriteMemory(FileInformationPtr + 0x08, (ulong)Now, 8);
             Instance._emulator.WriteMemory(FileInformationPtr + 0x10, (ulong)Now, 8);
