@@ -1394,14 +1394,22 @@ loads the real 32-bit ntdll from the `SysWOW64` view, builds a valid 32-bit
 process environment, dispatches WOW64 system calls through a synthetic
 `sysenter` trampoline with the correct SSNs, handles CPU/software exceptions
 through the x86 `KiUserExceptionDispatcher`, and runs ntdll's `LdrInitializeThunk`
-loader **deep into process initialisation** — mapping dependent DLL sections,
-querying image/memory/process/thread information, synthesising the WOW64INFO block,
-reserving the CFG bitmap, opening the process memory partition and allocating the
-segment-heap arena, and dispatching real SEH — before terminating cleanly (no spin)
-at the current frontier below (ntdll heap-manager tree construction, ~22k guest
-instructions in, up from ~8k at the start of this pass). The x64 cohort is
-byte-for-byte unaffected by these x86 fixes (identical instruction trace,
-confirmed by an A/B run against the pre-change baseline).
+loader **all the way through image loading into DLL initialisation** — synthesising
+the WOW64INFO block, reserving the CFG bitmap, opening the process memory partition,
+creating the NT process heap, resolving the KnownDlls object-manager chain, mapping
+the real 32-bit `kernel32` / `kernelbase` / CRT from the `SysWOW64` view, and running
+their DllMains — reaching **~1.34M guest instructions**, up from ~8k at the start of
+this line of work. It now terminates at `STATUS_DLL_INIT_FAILED` inside a DLL's
+initialisation (the current frontier below). The x64 cohort is structurally
+unaffected by these x86 fixes (every fix is either x86-only-gated or in a WOW64
+`if`-branch).
+
+**Environment note (reproduction):** `WindowsLibs/` must be a *real* directory
+inside the emulator output dir, not a symlink pointing outside it. The path sandbox
+(`GetSandboxedFullPath`) resolves symlink targets and rejects anything outside the
+allowed roots, so a `WindowsLibs -> /elsewhere` symlink makes every system-DLL
+resolution silently miss (both bitnesses then fail to load `kernel32` with
+`STATUS_DLL_NOT_FOUND`). Copy the bundle in; don't symlink it.
 
 This whole subsection is the WOW64 model. **The design decision that makes it
 tractable: emulate a 32-bit process purely in `UC_MODE_32`** — one Unicorn
@@ -1505,6 +1513,9 @@ the guest ntdll's `mov eax, imm32` stub prologues, now from `WindowsLibs/SysWOW6
 | WOW64INFO in TEB TlsSlots[10] | CPU-feature init deref fixed → ~20k instrs (CFG-bitmap reserve reached) |
 | SystemEmulationBasicInformation MaximumUserModeAddress | CFG-bitmap span computes non-zero → ~21.6k (segment-heap init reached) |
 | NtOpenPartition | memory partition opens → segment-heap arena allocates → ~22.1k (heap tree build reached) |
+| RTL_USER_PROCESS_PARAMETERS header size (0x2A0→0x300) | HeapPartitionName no longer garbage → NT heap (not segment heap) → ~128k (KnownDlls chain reached) |
+| KnownDlls object-manager + file handlers → WOW64 | NtOpen{DirectoryObject,SymbolicLinkObject,Section}, NtQuery{SymbolicLinkObject,AttributesFile} → ~181k (DLL disk-load reached) |
+| SysWOW64 case-insensitive leaf resolution | 32-bit kernel32/kernelbase/CRT bind (not the 64-bit copy) → ~1.34M (DLL init reached) |
 
 #### Resolved this pass (each fix is a generic WOW64 fidelity correction)
 
@@ -1545,40 +1556,39 @@ the guest ntdll's `mov eax, imm32` stub prologues, now from `WindowsLibs/SysWOW6
    (`HandleType.PartitionHandle`) + `CreatePartitionHandle` + the `NtOpenPartition`
    handler (bitness-agnostic via `GetArg64`/`WritePointer`).
 
+**Segment-heap fast-fail — RESOLVED.** The earlier terminus (a `__fastfail`,
+`FAST_FAIL_INVALID_BALANCED_TREE`, in the segment heap's `RtlpHpVs*` free-chunk
+tree) was a *downstream symptom*: ntdll had wrongly selected the **segment heap**
+for a classic 32-bit process (which uses the **NT heap**). The root cause was traced
+through `RtlCreateHeap` → `RtlpHpHeapFeatures` → `RtlpHpShouldEnableSegmentHeap`,
+which for a non-packaged process reads `RTL_USER_PROCESS_PARAMETERS + 0x2B0`
+(`HeapPartitionName.Buffer`) and enables the segment heap when it is non-NULL.
+`BuildProcessEnvironment32` had sized the fixed header at only 0x2A0 and started the
+inline string buffers there, so the CurrentDirectory path string bled into
+`HeapPartitionName.Buffer`. Sizing the header to 0x300 leaves that field NULL → NT
+heap → no VS tree → the fast-fail is gone. (See "Resolved this pass" table row.)
+
 #### Current frontier (F5-next)
 
-The loader now reaches ntdll's **segment-heap tree construction** and hits a
-`__fastfail` (`int 0x29`, code `0x1D` = `FAST_FAIL_INVALID_BALANCED_TREE`) at
-guest `0x4B2DA37D` (`SysWOW64\ntdll` RVA 0x5A37D). It is an honest terminus (the
-guest itself executed the fast-fail), not an emulator spin. What the investigation
-has pinned so far:
+With the NT heap, the KnownDlls object-manager chain, and case-correct SysWOW64
+resolution all landed, the loader now maps the real 32-bit `kernel32` / `kernelbase`
+/ CRT and runs their DllMains, reaching **~1.34M instructions**, then terminates at
+`STATUS_DLL_INIT_FAILED` (`0xC0000142`, surfaced as `APP_INIT_FAILURE` Parameter0).
+This is the DLL-initialisation phase: a dependent DLL's `DllMain` (or a static TLS
+callback / `LdrpInitializeNode`) returned failure. It is an honest terminus, not an
+emulator spin. Just before it, a few syscalls still return unimplemented and are the
+prime suspects to investigate first: `NtSetInformationVirtualMemory` (SSN 0x19E,
+CFG call-target registration — likely tolerated), SSN `0x1D7`, and
+`NtQuerySystemInformation` classes `0x73` / `0xC5`. Next step: identify which DLL's
+init fails (instrument `LdrpInitializeNode` / the DllMain trampoline return) and
+whether an unimplemented syscall in that DllMain is the cause.
 
-- **Where:** the fast-fail lives in `RtlRbRemoveNodeEx` (the `_RTL_RB_TREE` /
-  `_RTL_BALANCED_NODE` rebalance: `mov edx,[node+8]; and edx,0xFFFFFFFC` reads the
-  `ParentValue` field with the low-2 colour bits masked, then `cmp edx,<expected>;
-  jne 0x…A378` enforces the parent↔child back-pointer invariant). The tree is the
-  segment heap's variable-size (`RtlpHpVs*`) free-chunk tree.
-- **Fault state:** at the `int 0x29`, `eax=0 ebx=1 esi=0` — the failing compare is
-  `cmp ebx,esi` with `ebx=1` (an invalid node/pointer value; a real node is a
-  mapped address or 0). So a `1` has entered the tree where a node pointer belongs.
-- **Ruled out:** `NtGlobalFlag` is 0 (the x86 PEB leaves +0x68 zero — the RB-tree
-  validation is *not* being force-enabled by a heap-debug flag). The six
-  `NtAllocateVirtualMemoryEx` allocations that build the heap are sane and
-  non-overlapping (two small reserve+commit pairs at 0x100000/0x110000 for the
-  `_SEGMENT_HEAP` header + VS context, then a 2 MB reserve+commit data arena at
-  0x120000); the 2 MB arena reads back all-zero, so this is **not** an
-  emulator zero-fill gap.
-- **Open question (highest-leverage next step):** the segment heap is default-*off*
-  for classic 32-bit Win32 processes (it is the NT heap that should run). Find
-  ntdll's segment-heap-enable check (`RtlpHpHeapFeatures` / the `RtlCreateHeap`
-  feature branch) and what input drives it — if a value Brovan presents wrongly
-  selects the segment heap, steering ntdll to the NT heap sidesteps this whole
-  tree-consistency question. Otherwise the `1`-in-the-tree must be traced to the
-  exact VS-context init write that produces it.
-
-A couple of secondary handlers still return unimplemented on the way there
-(`NtQuerySystemInformation` class 0x73, `NtWow64IsProcessorFeaturePresent`
-SSN 0x1E9) but are not the fatal path.
+**Remaining WOW64 work (mechanical continuation):** the other x64-gated `Nt*`
+handlers still return unimplemented for x86 — each needs the same treatment (unify
+args via `GetArg64`, size OUT pointers/structs to the guest via `WritePointer` /
+the 32-bit OBJECT_ATTRIBUTES / UNICODE_STRING readers, fix `(HANDLE)-1` pseudo-handle
+comparisons). The pattern is well established now (five handlers landed this pass);
+extend it handler-by-handler as the DLL-init and detection phases exercise them.
 
 **Remaining WOW64 work (mechanical continuation):** the other ~70 `Nt*` handlers
 gated `if (Architecture == x64)` still return unimplemented for x86 — each needs
