@@ -949,11 +949,6 @@ namespace Brovan.Core.Emulation
         {
             if (callback == null) return IntPtr.Zero;
             if (DisposedCheck()) return IntPtr.Zero;
-            if (NoHooks && instruction != BackendInstructionHook.Invalid)
-            {
-                _error = KvmErrors.Ok;
-                return IntPtr.Zero;
-            }
 
             InstructionHookEntry entry = new InstructionHookEntry { Type = instruction, Callback = callback };
             if (instruction == BackendInstructionHook.Syscall)
