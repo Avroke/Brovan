@@ -461,6 +461,19 @@ double-mapping (aliasing 2 VA/1 backing) — beaucoup plus lourd. NB : le .NET
 **Framework** (heap CLR classique, sans regions 2 To ni W^X double-map par défaut)
 reste une piste alternative une fois son runtime provisionné.
 
+**Évaluation stratégique (honnête).** La chaîne W^X-off est une **longue traîne de
+changements mémoire substantiels**, pas des correctifs incrémentaux : (1) gros
+reserve VirtualAlloc — *fait* ; (2) **modèle de pile** réserve+garde (F-STACKGUARD)
+— substantiel, touche toutes les piles ; (3) très probablement d'autres arêtes
+après (TLS managé, heap exécutable, EH). Atteindre **J4/J5** est réaliste mais
+c'est un **effort multi-PR** ciblé, chaque étape tracée + testée isolément pour ne
+pas régresser le chemin natif validé. Les deux fixes mémoire déjà livrés
+(sparse-section, gros-reserve) sont génériques et bénéficient à tout l'émulateur ;
+la suite (stack model) l'est aussi. Décision d'investissement à prendre avant de
+poursuivre : dérouler la chaîne W^X-off, ou provisionner un runtime **.NET
+Framework** (chaîne plus courte, sans regions/double-map) pour un chemin J3-J5
+potentiellement plus direct.
+
 ### Reproduction
 
 ```bash
@@ -562,10 +575,18 @@ n'est qu'une question de *quelle enveloppe de bootstrap* attaquer en premier.
   → collision → l'écriture tombe sur la page RX. Contournement propre mesuré :
   `DOTNET_EnableWriteXorExecute=0` (mapping unique RWX). Émuler le vrai aliasing
   2 VA/1 backing sous Unicorn est l'alternative lourde (§8bis.2).
-- **F-STACKGUARD — commit de page de garde sur région non-réservée (frontière J4,
-  mode W^X-off).** coreclr commit une garde de pile (`PAGE_GUARD|PAGE_READWRITE`)
-  sur une région que `CommitMemory` ne voit pas comme réservée. Prochaine étape de
-  la chaîne W^X-off (§8bis.2).
+- **F-STACKGUARD — modèle de pile : entièrement-mappée vs réserve+garde (frontière
+  J4, mode W^X-off).** coreclr commit une garde (`PAGE_GUARD|PAGE_READWRITE`, 5
+  pages) à `0x1017B000` (adresse basse, dans un gap entre DLL) — `CommitMemory`
+  répond « no region ». **Root confirmé** : `AllocateThreadStack` = `MapUniqueAddress`,
+  donc Brovan mappe les piles **entièrement**, alors que Windows **réserve** la pile
+  et ne commit que le haut + une garde ; `TryHandleGuardPageViolation` sait *effacer*
+  une garde déjà committée mais **n'agrandit pas** la pile à la demande. coreclr, qui
+  gère lui-même sa garde de pile, commit dans la partie « réservée-non-committée »
+  qui n'existe pas chez Brovan. **Fix = modèle de pile fidèle** (réserve + commit du
+  haut + croissance sur faute) — changement substantiel touchant **toutes** les piles
+  (natif inclus), donc à faire prudemment. *(Appelant coreclr exact non confirmé — le
+  rip capturé est le stub syscall ntdll ; tracer l'adresse de retour au besoin.)*
 - **F-FRAMEWORK — surface BCL réelle.** Selon ce que l'assembly touche, le CLR
   charge de plus en plus d'assemblies système ⇒ plus de fichiers VFS + plus de
   syscalls. La couverture croît avec le corpus, pas d'un coup.
