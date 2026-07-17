@@ -804,6 +804,40 @@ namespace Brovan.Core.Emulation.OS.Windows
                             SetReturnLength(StructSize);
                             return NTSTATUS.STATUS_SUCCESS;
                         }
+                    case (PROCESSINFOCLASS)52:
+                        {
+                            // ProcessMitigationPolicy — PROCESS_MITIGATION_POLICY_INFORMATION is
+                            // { PROCESS_MITIGATION_POLICY Policy; <policy union> }, 8 bytes on x86 (the WOW64
+                            // loader / GetProcessMitigationPolicy pass len=0x8 with the policy id in the first
+                            // DWORD). The kernel fills the union with the process's current policy word. Report
+                            // the sandbox's realistic state: DEP permanently enabled (policy 0), every other
+                            // mitigation at its default (0) — mirrors the x64 class-52 handler above.
+                            const uint StructSize = 8;
+                            if (OutBufferLength < StructSize)
+                            {
+                                SetReturnLength(StructSize);
+                                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                            }
+
+                            if (!Instance.IsRegionMapped(OutBufferPtr, StructSize))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                            uint Policy = Instance.ReadMemoryUInt(OutBufferPtr);
+                            uint PolicyFlags = Policy == 0 ? 1u : 0u; // ProcessDEPPolicy: DEP permanently on; others default/off.
+
+                            Span<byte> Buffer = GetSharedWriteBuffer(Instance, StructSize);
+                            WriteUInt32(Buffer, 0, Policy);
+                            WriteUInt32(Buffer, 4, PolicyFlags);
+
+                            if (!Instance.WriteMemory(OutBufferPtr, Buffer))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                            SetReturnLength(StructSize);
+                            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                                Instance.TriggerEventMessage($"[+] NtQueryInformationProcess (x86): ProcessMitigationPolicy ({Policy})", LogFlags.Syscall);
+                            return NTSTATUS.STATUS_SUCCESS;
+                        }
+
                     default:
                         Instance.TriggerEventMessage($"[!] NtQueryInformationProcess (x86): InfoClass {InfoClass} (0x{(int)InfoClass:X}) not implemented", LogFlags.Issues);
                         return Instance.WinUnimplemented;

@@ -1613,20 +1613,27 @@ pointer-sized vector reads/writes (`ReadPointer`/`WritePointer`). x64 is byte-id
 (Ptr=8 reproduces the former 0x18/0x58/8 constants). al-khaser advances **6.31M →
 ~9.93M** instructions.
 
-**Next frontier — later-DLL DllMain `DLL_INIT_FAILED` again (mitigation / CFG).**
-With TLS fixed the run drives deep into a subsequent DLL's `DllMain` and terminates
-back at `DLL_INIT_FAILED` (`0xC0000142`). The closest signals are
-`NtQueryInformationProcess(ProcessMitigationPolicy 0x34)` returning `NOT_SUPPORTED`
-(the x86 handler doesn't implement that class) and a burst of
-`NtSetInformationVirtualMemory (0x19E)` returning `NOT_SUPPORTED` (CFG call-target
-registration). Both are x86 gaps: next step is to give the x86
-`NtQueryInformationProcess` the `ProcessMitigationPolicy` class (realistic
-policy words) and make `NtSetInformationVirtualMemory` a realistic success for the
-WOW64 VM-information classes, then confirm which one the failing DllMain treats as
-fatal. Other still-unimplemented syscalls in the run (`0x1E9`
+**Resolved next — WOW64 `NtSetInformationVirtualMemory` + `NtQueryInformationProcess(ProcessMitigationPolicy)`.**
+Both were x86-gated to `NOT_SUPPORTED`. `NtSetInformationVirtualMemory` (SSN 0x19E,
+CFG call-target registration + working-set hints) is now bitness-aware — the
+`MEMORY_RANGE_ENTRY` stride is `2*GuestPointerSize` (8 on x86) and the pseudo-handle
+check uses `IsCurrentProcessPseudoHandle` — returning the same advisory success the
+x64 path does. `NtQueryInformationProcess`'s x86 branch gained the
+`ProcessMitigationPolicy` (class 52) case: the WOW64 caller passes an 8-byte
+`PROCESS_MITIGATION_POLICY_INFORMATION` with the policy id in the first DWORD; the
+handler echoes it and reports the sandbox's realistic state (DEP on, other
+mitigations default), mirroring the x64 class-52 handler. Both now return SUCCESS in
+the trace; the CFG-registration burst is advisory (its result is ignored — the
+instruction count was byte-identical with it as `NOT_SUPPORTED` vs SUCCESS).
+
+**Next frontier — unimplemented syscall `0x2000` during late DLL init.** After the
+CFG registration + `NtProtectVirtualMemory` burst, the failing DllMain issues raw
+syscall `0x2000` (unmapped → `NOT_SUPPORTED`), then the hard error fires. This is the
+current fatal call and needs identifying (via the caller return address) and
+implementing. Other still-unimplemented syscalls in the run (`0x1E9`
 `NtWow64IsProcessorFeaturePresent` hammered in a loop but non-fatal;
-`NtQuerySystemInformationEx` 0x161; `NtQueryInformationThread` 0x25) are not
-(yet) on the fatal path.
+`NtQuerySystemInformationEx` 0x161; `NtQueryInformationThread` class
+`ThreadDynamicCodePolicyInfo`) are not (yet) on the fatal path.
 
 **Remaining WOW64 work (mechanical continuation):** the other x64-gated `Nt*`
 handlers still return unimplemented for x86 — each needs the same treatment (unify
