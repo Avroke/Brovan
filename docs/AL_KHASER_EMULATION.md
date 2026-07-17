@@ -1397,12 +1397,15 @@ through the x86 `KiUserExceptionDispatcher`, and runs ntdll's `LdrInitializeThun
 loader **all the way through image loading into DLL initialisation** — synthesising
 the WOW64INFO block, reserving the CFG bitmap, opening the process memory partition,
 creating the NT process heap, resolving the KnownDlls object-manager chain, mapping
-the real 32-bit `kernel32` / `kernelbase` / CRT from the `SysWOW64` view, and running
-their DllMains — reaching **~1.34M guest instructions**, up from ~8k at the start of
-this line of work. It now terminates at `STATUS_DLL_INIT_FAILED` inside a DLL's
-initialisation (the current frontier below). The x64 cohort is structurally
-unaffected by these x86 fixes (every fix is either x86-only-gated or in a WOW64
-`if`-branch).
+the real 32-bit `kernel32` / `kernelbase` / CRT from the `SysWOW64` view, running
+their DllMains **to completion** (the CSR base-server connect + read-only
+shared-section / `BASE_STATIC_SERVER_DATA` are now wired), and driving on into
+process init — reaching **~6.31M guest instructions**, up from ~8k at the start of
+this line of work. `STATUS_DLL_INIT_FAILED` is cleared; it now terminates further
+along at `APP_INIT_FAILURE` `Parameter0=0xC0000004` (`STATUS_INFO_LENGTH_MISMATCH`
+from `NtSetInformationProcess` — the current frontier below). The x64 cohort is
+structurally unaffected by these x86 fixes (every fix is either x86-only-gated or in
+a WOW64 `if`-branch).
 
 **Environment note (reproduction):** `WindowsLibs/` must be a *real* directory
 inside the emulator output dir, not a symlink pointing outside it. The path sandbox
@@ -1570,28 +1573,43 @@ heap → no VS tree → the fast-fail is gone. (See "Resolved this pass" table r
 
 #### Current frontier (F5-next)
 
-With the NT heap, the KnownDlls object-manager chain, and case-correct SysWOW64
-resolution all landed, the loader now maps the real 32-bit `kernel32` / `kernelbase`
-/ CRT and runs their DllMains, reaching **~1.34M instructions**, then terminates at
-`STATUS_DLL_INIT_FAILED` (`0xC0000142`, surfaced as `APP_INIT_FAILURE` Parameter0).
-The failing DllMain has been pinned to **kernel32's `BaseDllInitialize` connecting
-to the CSR base server**: the run makes exactly one `NtWow64CsrClientConnectToServer`
-call — `ServerId=1` (BASESRV), `ConnectionInfo` an 8-byte in/out buffer — and fails
-immediately after it returns (the only syscalls between are the loader's
-`NtProtectVirtualMemory` / `NtUnmapViewOfSection` rollback of the just-mapped DLLs).
-Implementing that syscall to return `STATUS_SUCCESS` (SSN 0x1D7, landed) was
-necessary but not sufficient: `BaseDllInitialize` still returns FALSE because it
-needs the connect to hand back a **valid CSR connection** — the 8-byte BASESRV
-connect-info populated and, more importantly, the `BASE_STATIC_SERVER_DATA` view
-(`BaseStaticServerData`) that kernel32 caches from the CSR shared section. On the
-x64 path this is produced by `CsrssPortHandler.HandleCsrSrvConnect` /
-`HandleBaseSrvConnect` returning the shared-section base over the ALPC port; the
-WOW64 syscall must model the equivalent. **Next step:** populate
-`NtWow64CsrClientConnectToServer`'s `ConnectionInfo` and map/return a CSR shared
-section (reuse the x64 `GetSharedSectionBase` / `EnsureSharedSectionInitialized`
-path), then confirm kernel32's `BaseDllInitialize` returns TRUE. Secondary
-still-unimplemented syscalls seen earlier in the run (`NtSetInformationVirtualMemory`
-0x19E, `NtQuerySystemInformation` class 0xC5) are not on this fatal path.
+With the NT heap, the KnownDlls object-manager chain, case-correct SysWOW64
+resolution, the CSR base-server connect (SSN 0x1D7) **and the CSR read-only
+shared-section wiring** all landed, the loader now maps the real 32-bit `kernel32`
+/ `kernelbase` / CRT, runs their DllMains to completion, and drives on into process
+init — reaching **~6.31M instructions**, up from ~1.34M. DLL initialisation now
+**succeeds** (`STATUS_DLL_INIT_FAILED` is gone); the run terminates further along at
+`APP_INIT_FAILURE` with `Parameter0=0xC0000004` (`STATUS_INFO_LENGTH_MISMATCH`).
+
+**Resolved this pass — CSR read-only shared section / `BASE_STATIC_SERVER_DATA`.**
+The `DLL_INIT_FAILED` was root-caused by disassembling kernelbase's `BaseDllInitialize`
+from live guest memory: right after `NtWow64CsrClientConnectToServer` returns, the
+inner init reads `PEB->ReadOnlyStaticServerData` (32-bit PEB **+0x54**) and derefs
+`[array+8]` to reach the BASESRV static-server-data pointer, then remaps it with
+`edi = ReadOnlyStaticServerData[1] - ServerBase(PEB+0x248) + ReadOnlySharedMemoryBase(PEB+0x4C)`.
+All three PEB fields were NULL, so the deref faulted (`Invalid memory read … 0x8 …`),
+`BaseDllInitialize` returned FALSE, and the loader rolled the process back. The remap
+reads `[BSSD+0x9E8]` — the exact self-pointer the x64 `InitializeWindowsSharedSection`
+already writes — confirming **WOW64 shares the native 64-bit BSSD layout** (16-byte
+UNICODE_STRINGs, 8-byte pointers). Fix (`WindowsGuest.SetupCsrReadOnlySharedSection32`):
+eagerly create the read-only shared section at PEB-build time via the reused
+`NtMapViewOfSection.InitializeWindowsSharedSection`, then wire `PEB+0x4C` = section
+base, `PEB+0x54` = the section's `Base+0x10` server-data descriptor (whose `+0x8`
+already points at BSSD), and `PEB+0x248` = section base. Server view == client view
+(Brovan has no separate csrss address space), so the remap is the identity and the
+descriptor's absolute BSSD pointer resolves to itself. x64 guests reach BSSD through
+the CSR port connect reply instead, so this is WOW64-only and leaves x64 untouched.
+
+**Next frontier — `NtSetInformationProcess` `STATUS_INFO_LENGTH_MISMATCH`.** The
+`0xC0000004` terminus correlates with a single `NtSetInformationProcess` (SSN 0x1C)
+returning `INFO_LENGTH_MISMATCH` immediately before the hard error. The two handler
+paths that yield that status are `ProcessInstrumentationCallback` (accepts only the
+x64 buffer sizes 8/16) and `ProcessTlsInformation`; the WOW64 caller passes a 32-bit
+buffer size that neither accepts. Next step: pin the exact info class + buffer length
+the 32-bit caller uses and teach the handler the WOW64 sizes. Secondary
+still-unimplemented syscalls seen in the run (`0x1E9` `NtWow64IsProcessorFeaturePresent`,
+hammered in a loop but non-fatal; `NtSetInformationVirtualMemory` 0x19E;
+`NtQuerySystemInformation` classes 0x73 / 0xC5) are not on this fatal path.
 
 **Remaining WOW64 work (mechanical continuation):** the other x64-gated `Nt*`
 handlers still return unimplemented for x86 — each needs the same treatment (unify

@@ -13,7 +13,18 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static ulong AlignDown(ulong v, ulong a) => v & ~(a - 1);
 
-        private static void InitializeWindowsSharedSection(BinaryEmulator Instance, ulong Base)
+        /// <summary>
+        /// Populates a CSR read-only shared section at <paramref name="Base"/> with the
+        /// <c>BASE_STATIC_SERVER_DATA</c> block (at <c>Base+0x1000</c>) plus a one-entry server-data pointer
+        /// descriptor (at <c>Base+0x10</c>, whose <c>+0x8</c> slot holds the BSSD pointer). The layout uses the
+        /// 64-bit field convention (16-byte UNICODE_STRINGs, 8-byte pointers, self-pointers at BSSD+0x9E8/+0xB50)
+        /// because csrss builds this section once with the native layout and both the 64-bit and the WOW64 32-bit
+        /// client map that same section. It is therefore reused verbatim by the WOW64 PEB bootstrap
+        /// (<c>WindowsGuest.SetupCsrReadOnlySharedSection32</c>) to back <c>PEB-&gt;ReadOnlySharedMemoryBase</c>
+        /// (+0x4C), <c>ReadOnlyStaticServerData</c> (+0x54 → <c>Base+0x10</c>) and the server-view base (+0x248 →
+        /// <c>Base</c>), so kernelbase's <c>Base_static_server_data</c> pointer remap resolves to the BSSD here.
+        /// </summary>
+        internal static void InitializeWindowsSharedSection(BinaryEmulator Instance, ulong Base)
         {
             Instance._emulator.WriteMemory(Base + 0x8, 0x10UL, 8);
 

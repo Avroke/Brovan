@@ -1549,6 +1549,41 @@ namespace Brovan.Core.Emulation.Guests
             uint Length = Used < (uint)HeaderSize ? (uint)HeaderSize : Used;
             Instance._emulator.WriteMemory(ProcessParams + 0x0, (uint)TotalSize, 4);                 // MaximumLength
             Instance._emulator.WriteMemory(ProcessParams + 0x4, Length, 4);                          // Length
+
+            SetupCsrReadOnlySharedSection32(Instance);
+        }
+
+        /// <summary>
+        /// Creates the CSR read-only shared section that the kernel maps into every process and wires the three
+        /// 32-bit PEB fields kernelbase reads to locate <c>BASE_STATIC_SERVER_DATA</c>. During its own DllMain
+        /// (BaseDllInitialize) the WOW64 kernelbase computes the client-side BSSD pointer with the classic CSR
+        /// remap <c>BSSD = ReadOnlyStaticServerData[1] - ServerSharedBase + ReadOnlySharedMemoryBase</c>:
+        /// <list type="bullet">
+        ///   <item><c>PEB+0x4C ReadOnlySharedMemoryBase</c> = client view base of the section.</item>
+        ///   <item><c>PEB+0x54 ReadOnlyStaticServerData</c> = the section's server-data pointer descriptor, whose
+        ///         <c>+0x8</c> slot holds the (server-view) BSSD pointer — that descriptor is exactly the
+        ///         <c>Base+0x10</c> block <see cref="NtMapViewOfSection.InitializeWindowsSharedSection"/> lays
+        ///         down, whose <c>+0x8</c> already points at BSSD (<c>Base+0x1000</c>).</item>
+        ///   <item><c>PEB+0x248</c> = server-view base of the section, subtracted in the remap.</item>
+        /// </list>
+        /// Because Brovan has no separate csrss address space, the server view and the client view are the same
+        /// mapping, so the server base equals the client base and the remap is the identity — the descriptor's
+        /// absolute BSSD pointer resolves to itself. Without this, all three fields are NULL, kernelbase reads
+        /// <c>[NULL+8]</c> during init, faults, and BaseDllInitialize returns FALSE → STATUS_DLL_INIT_FAILED.
+        /// x64 guests reach BSSD through the CSR port connect reply instead, so this is the WOW64 path only.
+        /// </summary>
+        private void SetupCsrReadOnlySharedSection32(BinaryEmulator Instance)
+        {
+            const ulong SharedSectionSize = 0x10000;
+            ulong Base = Instance.MapUniqueAddress(SharedSectionSize, MemoryProtection.ReadWrite);
+            if (Base == 0)
+                return;
+
+            NtMapViewOfSection.InitializeWindowsSharedSection(Instance, Base);
+
+            Instance._emulator.WriteMemory(PEB + 0x4C, (uint)Base, 4);          // ReadOnlySharedMemoryBase (client base)
+            Instance._emulator.WriteMemory(PEB + 0x54, (uint)(Base + 0x10), 4); // ReadOnlyStaticServerData (server-data descriptor)
+            Instance._emulator.WriteMemory(PEB + 0x248, (uint)Base, 4);         // server-view base (identity → remap is a no-op)
         }
 
         /// <summary>
