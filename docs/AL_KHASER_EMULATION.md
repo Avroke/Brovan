@@ -1547,19 +1547,35 @@ the guest ntdll's `mov eax, imm32` stub prologues, now from `WindowsLibs/SysWOW6
 
 #### Current frontier (F5-next)
 
-The loader now reaches ntdll's **heap-manager tree construction** and hits a
+The loader now reaches ntdll's **segment-heap tree construction** and hits a
 `__fastfail` (`int 0x29`, code `0x1D` = `FAST_FAIL_INVALID_BALANCED_TREE`) at
-guest `0x4B2DA37D` (`SysWOW64\ntdll` RVA 0x5A37D) after the segment heap has
-opened its partition and allocated its arena (two more `NtAllocateVirtualMemoryEx`
-calls succeed just before). The fast-fail is the shared balanced-tree validation
-helper (many `cmp <node>,<node>; jne 0x…A378` sites converge on it, with
-pointer-XOR encoding — `xor edx,eax` — characteristic of the segment heap's
-`RtlpHpVs*` free-chunk tree). Committed guest pages *are* zero-filled (Unicorn
-`uc_mem_map`), so this is not the usual emulator zero-fill gap — it is a deeper
-segment-heap-consistency question (arena layout / chunk-header or tree-cookie
-expectation, or whether a 32-bit WOW64 process should be selecting the segment
-heap at all vs the classic NT heap). This is the next investigation; it is an
-honest terminus (the guest itself executed the fast-fail), not an emulator spin.
+guest `0x4B2DA37D` (`SysWOW64\ntdll` RVA 0x5A37D). It is an honest terminus (the
+guest itself executed the fast-fail), not an emulator spin. What the investigation
+has pinned so far:
+
+- **Where:** the fast-fail lives in `RtlRbRemoveNodeEx` (the `_RTL_RB_TREE` /
+  `_RTL_BALANCED_NODE` rebalance: `mov edx,[node+8]; and edx,0xFFFFFFFC` reads the
+  `ParentValue` field with the low-2 colour bits masked, then `cmp edx,<expected>;
+  jne 0x…A378` enforces the parent↔child back-pointer invariant). The tree is the
+  segment heap's variable-size (`RtlpHpVs*`) free-chunk tree.
+- **Fault state:** at the `int 0x29`, `eax=0 ebx=1 esi=0` — the failing compare is
+  `cmp ebx,esi` with `ebx=1` (an invalid node/pointer value; a real node is a
+  mapped address or 0). So a `1` has entered the tree where a node pointer belongs.
+- **Ruled out:** `NtGlobalFlag` is 0 (the x86 PEB leaves +0x68 zero — the RB-tree
+  validation is *not* being force-enabled by a heap-debug flag). The six
+  `NtAllocateVirtualMemoryEx` allocations that build the heap are sane and
+  non-overlapping (two small reserve+commit pairs at 0x100000/0x110000 for the
+  `_SEGMENT_HEAP` header + VS context, then a 2 MB reserve+commit data arena at
+  0x120000); the 2 MB arena reads back all-zero, so this is **not** an
+  emulator zero-fill gap.
+- **Open question (highest-leverage next step):** the segment heap is default-*off*
+  for classic 32-bit Win32 processes (it is the NT heap that should run). Find
+  ntdll's segment-heap-enable check (`RtlpHpHeapFeatures` / the `RtlCreateHeap`
+  feature branch) and what input drives it — if a value Brovan presents wrongly
+  selects the segment heap, steering ntdll to the NT heap sidesteps this whole
+  tree-consistency question. Otherwise the `1`-in-the-tree must be traced to the
+  exact VS-context init write that produces it.
+
 A couple of secondary handlers still return unimplemented on the way there
 (`NtQuerySystemInformation` class 0x73, `NtWow64IsProcessorFeaturePresent`
 SSN 0x1E9) but are not the fatal path.
