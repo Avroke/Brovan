@@ -1653,14 +1653,25 @@ run now faults deeper in win32k init at a NULL per-thread-client deref: `mov eax
 fs:[18h]` (TEB) → `[TEB+0xFDC]` → `[+0x60]` (== 0) → `[0+0xF8]` → later `[+0x180094]`
 (a GDI shared-section offset). This is the client-side **`CLIENTINFO`** / GDI
 handle-cache the process shared section + TEB should point at — the next layer of the
-GUI-subsystem state after the SHAREDINFO. In parallel, this same DLL init issues a
-burst of `NtOpenKey` (SSN 0x12) calls that return `NOT_SUPPORTED` because the x86
-registry path is still gated to x64 — extending the registry syscalls
-(`NtOpenKey`/`NtQueryValueKey`/…) to WOW64 (32-bit `OBJECT_ATTRIBUTES` +
-`GuestPointerSize` handle writes, the same treatment the KnownDlls object-manager
-handlers got) is the sibling gap. Other still-unimplemented syscalls (`0x1E9`
-`NtWow64IsProcessorFeaturePresent`; `0x1CE`; `NtQuerySystemInformation` class 0x73)
-are not (yet) on the fatal path.
+GUI-subsystem state after the SHAREDINFO, and the current fatal deref.
+
+**Landed alongside — WOW64 registry syscalls.** The same DLL init was issuing a burst
+of `NtOpenKey` (SSN 0x12) returning `NOT_SUPPORTED` because the whole registry family
+was gated to x64. All 13 handlers are now bitness-agnostic: a new
+`TryResolveRegistryObjectPath` reads the correct `OBJECT_ATTRIBUTES` (4-byte fields +
+8-byte `UNICODE_STRING` on x86 / 8-byte fields + 16-byte on x64), a `TryReadUnicodeString`
+wrapper picks the value-name layout by bitness, and OUT `KeyHandle`s are written with
+`WritePointer`/`GuestPointerSize`. The flat `KEY_*_INFORMATION` output records are
+identical on both bitnesses, so the handle-returning handlers (`NtOpenKey`/`NtOpenKeyEx`/
+`NtCreateKey`) took the pointer treatment while the data handlers
+(`NtQueryValueKey`/`NtEnumerate{Key,ValueKey}`/`NtQueryKey`/…) just widened their gate.
+This does not move the terminus (the `CLIENTINFO` deref is still fatal) but is
+**essential** for the detection phase — al-khaser's anti-VM logic reads dozens of
+registry keys, so WOW64 registry is squarely on the critical path once GUI init clears.
+x64 registry behaviour is byte-identical (the old `…64` resolver now forwards to the
+shared one; the widened gates still enter on x64). Other still-unimplemented syscalls
+(`0x1E9` `NtWow64IsProcessorFeaturePresent`; `0x1CE`; `NtQuerySystemInformation` class
+0x73) are not (yet) on the fatal path.
 
 **Remaining WOW64 work (mechanical continuation):** the other x64-gated `Nt*`
 handlers still return unimplemented for x86 — each needs the same treatment (unify

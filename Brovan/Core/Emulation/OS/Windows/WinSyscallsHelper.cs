@@ -464,6 +464,15 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// <summary>
         /// Reads a 64-bit UNICODE_STRING from guest memory and returns the status the caller should propagate on failure.
         /// </summary>
+        /// <summary>
+        /// Reads a <c>UNICODE_STRING</c> at <paramref name="UnicodeStringPtr"/> using the guest's native layout:
+        /// 8 bytes (Buffer@0x04) on x86/WOW64, 16 bytes (Buffer@0x08) on x64.
+        /// </summary>
+        public bool TryReadUnicodeString(ulong UnicodeStringPtr, out string Value, out NTSTATUS Status)
+            => Emulator._binary.Architecture == BinaryArchitecture.x64
+                ? TryReadUnicodeString64(UnicodeStringPtr, out Value, out Status)
+                : TryReadUnicodeString32((uint)UnicodeStringPtr, out Value, out Status);
+
         public bool TryReadUnicodeString64(ulong UnicodeStringPtr, out string Value, out NTSTATUS Status)
         {
             Value = string.Empty;
@@ -759,7 +768,17 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// <summary>
         /// Resolves a 64-bit registry OBJECT_ATTRIBUTES value to a full NT registry path.
         /// </summary>
+        // Back-compat forwarder for the original x64-only name.
         public bool TryResolveRegistryObjectPath64(ulong ObjectAttributesPtr, NTSTATUS MemoryFailureStatus, NTSTATUS EmptyPathStatus, NTSTATUS InvalidRootStatus, out string KeyPath, out NTSTATUS Status)
+            => TryResolveRegistryObjectPath(ObjectAttributesPtr, MemoryFailureStatus, EmptyPathStatus, InvalidRootStatus, out KeyPath, out Status);
+
+        /// <summary>
+        /// Resolves the registry key path from an <c>OBJECT_ATTRIBUTES</c>, bitness-aware: the struct has 8-byte
+        /// fields (RootDirectory@0x08, ObjectName@0x10) and a 16-byte UNICODE_STRING on x64, and 4-byte fields
+        /// (RootDirectory@0x04, ObjectName@0x08) with an 8-byte UNICODE_STRING on x86/WOW64. A non-zero
+        /// RootDirectory is an open key handle the path is relative to (same for both bitnesses).
+        /// </summary>
+        public bool TryResolveRegistryObjectPath(ulong ObjectAttributesPtr, NTSTATUS MemoryFailureStatus, NTSTATUS EmptyPathStatus, NTSTATUS InvalidRootStatus, out string KeyPath, out NTSTATUS Status)
         {
             KeyPath = string.Empty;
             Status = NTSTATUS.STATUS_SUCCESS;
@@ -770,35 +789,61 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
             }
 
-            uint ObjectAttributesSize = (uint)Unsafe.SizeOf<OBJECT_ATTRIBUTES64>();
-            if (!Emulator.IsRegionMapped(ObjectAttributesPtr, ObjectAttributesSize))
+            ulong RootDirectory;
+            ulong ObjectNamePtr;
+            bool Is64 = Emulator._binary.Architecture == BinaryArchitecture.x64;
+
+            if (Is64)
             {
-                Status = MemoryFailureStatus;
-                return false;
+                uint ObjectAttributesSize = (uint)Unsafe.SizeOf<OBJECT_ATTRIBUTES64>();
+                if (!Emulator.IsRegionMapped(ObjectAttributesPtr, ObjectAttributesSize))
+                {
+                    Status = MemoryFailureStatus;
+                    return false;
+                }
+
+                if (!StructSerializer.ParseStruct(Emulator, ObjectAttributesPtr, out OBJECT_ATTRIBUTES64 Attributes))
+                {
+                    Status = MemoryFailureStatus;
+                    return false;
+                }
+
+                RootDirectory = Attributes.RootDirectory;
+                ObjectNamePtr = Attributes.ObjectName;
+            }
+            else
+            {
+                // x86 OBJECT_ATTRIBUTES is 0x18 bytes: Length@0, RootDirectory@0x04, ObjectName@0x08, ...
+                const uint ObjectAttributes32Size = 0x18;
+                if (!Emulator.IsRegionMapped(ObjectAttributesPtr, ObjectAttributes32Size))
+                {
+                    Status = MemoryFailureStatus;
+                    return false;
+                }
+
+                RootDirectory = Emulator.ReadMemoryUInt(ObjectAttributesPtr + 0x04);
+                ObjectNamePtr = Emulator.ReadMemoryUInt(ObjectAttributesPtr + 0x08);
             }
 
-            if (!StructSerializer.ParseStruct(Emulator, ObjectAttributesPtr, out OBJECT_ATTRIBUTES64 Attributes))
-            {
-                Status = MemoryFailureStatus;
-                return false;
-            }
-
-            if (Attributes.ObjectName == 0)
+            if (ObjectNamePtr == 0)
             {
                 Status = NTSTATUS.STATUS_INVALID_PARAMETER;
                 return false;
             }
 
-            if (!TryReadUnicodeString64(Attributes.ObjectName, out KeyPath, out Status))
+            bool NameRead = Is64
+                ? TryReadUnicodeString64(ObjectNamePtr, out KeyPath, out Status)
+                : TryReadUnicodeString32((uint)ObjectNamePtr, out KeyPath, out Status);
+            if (!NameRead)
             {
                 if (Status == NTSTATUS.STATUS_ACCESS_VIOLATION)
                     Status = MemoryFailureStatus;
                 return false;
             }
 
-            if (Attributes.RootDirectory != 0)
+            if (RootDirectory != 0)
             {
-                WinRegKey ParentKey = HandleManager.GetObjectByHandle<WinRegKey>(Attributes.RootDirectory);
+                WinRegKey ParentKey = HandleManager.GetObjectByHandle<WinRegKey>(RootDirectory);
                 if (ParentKey == null || string.IsNullOrEmpty(ParentKey.FullPath))
                 {
                     Status = InvalidRootStatus;

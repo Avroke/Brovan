@@ -6,7 +6,8 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
+            // Bitness-agnostic: operates on an already-open KeyHandle; value payloads are flat records.
+            if (Instance._binary.Architecture == BinaryArchitecture.x64 || Instance._binary.Architecture == BinaryArchitecture.x86)
             {
                 ulong KeyHandle = Instance.WinHelper.GetArg64(0);
 
