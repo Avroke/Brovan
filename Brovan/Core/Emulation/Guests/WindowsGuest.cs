@@ -1473,6 +1473,7 @@ namespace Brovan.Core.Emulation.Guests
             Instance._emulator.WriteMemory(PEB + 0x08, (uint)MainModule.MappedBase);                 // ImageBaseAddress
             Instance._emulator.WriteMemory(PEB + 0x0C, 0u);                                          // Ldr (filled by the loader)
             Instance._emulator.WriteMemory(PEB + 0x38, (uint)ApiSetMap);                             // ApiSetMap
+            Instance._emulator.WriteMemory(PEB + 0x64, 8u, 4);                                       // NumberOfProcessors (x86 PEB @ 0x64; x64 uses 0xB8)
             Instance._emulator.WriteMemory(PEB + 0xA4, WindowsVersionInfo.MajorVersion, 4);          // OSMajorVersion
             Instance._emulator.WriteMemory(PEB + 0xA8, WindowsVersionInfo.MinorVersion, 4);          // OSMinorVersion
             Instance._emulator.WriteMemory(PEB + 0xAC, WindowsVersionInfo.BuildNumberShort, 2);      // OSBuildNumber
