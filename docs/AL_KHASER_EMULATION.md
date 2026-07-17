@@ -1574,14 +1574,24 @@ With the NT heap, the KnownDlls object-manager chain, and case-correct SysWOW64
 resolution all landed, the loader now maps the real 32-bit `kernel32` / `kernelbase`
 / CRT and runs their DllMains, reaching **~1.34M instructions**, then terminates at
 `STATUS_DLL_INIT_FAILED` (`0xC0000142`, surfaced as `APP_INIT_FAILURE` Parameter0).
-This is the DLL-initialisation phase: a dependent DLL's `DllMain` (or a static TLS
-callback / `LdrpInitializeNode`) returned failure. It is an honest terminus, not an
-emulator spin. Just before it, a few syscalls still return unimplemented and are the
-prime suspects to investigate first: `NtSetInformationVirtualMemory` (SSN 0x19E,
-CFG call-target registration — likely tolerated), SSN `0x1D7`, and
-`NtQuerySystemInformation` classes `0x73` / `0xC5`. Next step: identify which DLL's
-init fails (instrument `LdrpInitializeNode` / the DllMain trampoline return) and
-whether an unimplemented syscall in that DllMain is the cause.
+The failing DllMain has been pinned to **kernel32's `BaseDllInitialize` connecting
+to the CSR base server**: the run makes exactly one `NtWow64CsrClientConnectToServer`
+call — `ServerId=1` (BASESRV), `ConnectionInfo` an 8-byte in/out buffer — and fails
+immediately after it returns (the only syscalls between are the loader's
+`NtProtectVirtualMemory` / `NtUnmapViewOfSection` rollback of the just-mapped DLLs).
+Implementing that syscall to return `STATUS_SUCCESS` (SSN 0x1D7, landed) was
+necessary but not sufficient: `BaseDllInitialize` still returns FALSE because it
+needs the connect to hand back a **valid CSR connection** — the 8-byte BASESRV
+connect-info populated and, more importantly, the `BASE_STATIC_SERVER_DATA` view
+(`BaseStaticServerData`) that kernel32 caches from the CSR shared section. On the
+x64 path this is produced by `CsrssPortHandler.HandleCsrSrvConnect` /
+`HandleBaseSrvConnect` returning the shared-section base over the ALPC port; the
+WOW64 syscall must model the equivalent. **Next step:** populate
+`NtWow64CsrClientConnectToServer`'s `ConnectionInfo` and map/return a CSR shared
+section (reuse the x64 `GetSharedSectionBase` / `EnsureSharedSectionInitialized`
+path), then confirm kernel32's `BaseDllInitialize` returns TRUE. Secondary
+still-unimplemented syscalls seen earlier in the run (`NtSetInformationVirtualMemory`
+0x19E, `NtQuerySystemInformation` class 0xC5) are not on this fatal path.
 
 **Remaining WOW64 work (mechanical continuation):** the other x64-gated `Nt*`
 handlers still return unimplemented for x86 — each needs the same treatment (unify
