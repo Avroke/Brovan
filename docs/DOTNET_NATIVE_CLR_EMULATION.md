@@ -498,14 +498,18 @@ la pile utile vue par le guest est **inchangée** (RSP toujours dans
 `System.Private.CoreLib.dll` sont chargés** et **~116 M instructions** (×4 vs 28 M)
 de code managé JIT-é s'exécutent. **J3 franchi, J4 atteint.**
 
-**Nouvelle frontière J5 (managée).** Terminus : `RaiseException(0xE0434352)` =
-**exception managée .NET non gérée** pendant le démarrage managé (avant que
-`Main`/`Console.WriteLine` ne produise sa sortie). Syscalls non implémentés vus au
-passage : `NtOpenEvent` (SSN 0x40), `NtCreateNamedPipeFile` (SSN 0xB4, pipe de
-diagnostics coreclr) — candidats (souvent non-fatals côté coreclr), à confirmer.
-**Prochain pas** : identifier le type de l'exception managée (tracer l'objet de
-`RaiseException`, ou fournir les syscalls manquants et re-mesurer) pour atteindre
-**J5** (`Main` managé + sortie observable).
+**Nouvelle frontière J5 (managée).** coreclr **attrape** une exception managée à
+~116 M instructions et sort via `NtTerminateProcess(0xE0434352)` (code SEH CLR),
+**sans message imprimé** — fail-fast pendant l'init runtime managée, **avant `Main`**.
+Bisection : un `Main` réduit à `return 5` (sans `Console`) throw **au même point** →
+l'exception est **indépendante du corps de `Main`** (init runtime/CoreLib).
+Diagnostic mené : `NtOpenEvent` (0x40) + `NtCreateNamedPipeFile` (0xB4)
+**implémentés** (livrés) — l'exception **persiste**, donc écartés. Elle ne passe pas
+par le syscall `NtRaiseException` (dispatch **user-mode** `RtlDispatchException`), d'où
+l'absence de signal côté hook syscall. **Prochain pas** : intercepter le dispatch
+d'exception user-mode (ou marcher la TLS Thread de coreclr) pour lire le type/message,
+et/ou identifier les classes des **8× `NtQueryInformationProcess → NOT_SUPPORTED`** —
+pour atteindre **J5** (`Main` managé + sortie observable).
 
 ### Reproduction
 
@@ -614,10 +618,16 @@ n'est qu'une question de *quelle enveloppe de bootstrap* attaquer en premier.
   + un headroom (1 MiB) et ne **commit** que le haut, laissant le bas réservé pour la
   garde du guest (chemin reserve→commit de `CommitMemory`). Pile utile inchangée pour
   le natif ; débloque le chargement de `clrjit` + l'exécution managée (§8bis.3).
-- **F-CLRMANAGED — exception managée non gérée au démarrage (frontière J5 active).**
-  Après J4, `RaiseException(0xE0434352)` (exception .NET) pendant le démarrage managé,
-  avant la sortie de `Main`. Cause à identifier ; syscalls non implémentés candidats :
-  `NtOpenEvent` (0x40), `NtCreateNamedPipeFile` (0xB4). Bloque J5 (§8bis.3).
+- **F-CLRMANAGED — exception managée au démarrage runtime (frontière J5 active).**
+  Après J4, coreclr **attrape** une exception managée à ~116 M instructions et sort
+  via `NtTerminateProcess(0xE0434352)` (code SEH CLR), **sans message imprimé** →
+  fail-fast pendant l'init runtime managée, **avant `Main`** (identique avec un `Main`
+  qui fait juste `return 5` — donc indépendant du corps de `Main`). Candidats
+  **écartés** : `NtOpenEvent` / `NtCreateNamedPipeFile` (implémentés, l'exception
+  persiste). Identifier le type exige d'intercepter le dispatch d'exception
+  **user-mode** (`RtlDispatchException`) ou de marcher la TLS Thread de coreclr (offsets
+  version-spécifiques). Piste concrète restante : les **8× `NtQueryInformationProcess`
+  → NOT_SUPPORTED** (classes à identifier). Bloque J5 (§8bis.3).
 - **F-FRAMEWORK — surface BCL réelle.** Selon ce que l'assembly touche, le CLR
   charge de plus en plus d'assemblies système ⇒ plus de fichiers VFS + plus de
   syscalls. La couverture croît avec le corpus, pas d'un coup.
