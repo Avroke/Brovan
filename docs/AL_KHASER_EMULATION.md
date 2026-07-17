@@ -1672,17 +1672,31 @@ GDI init cleared the run reaches a fresh terminus at ntdll RVA `0x5F583`
 (`inc dword [eax+0x14]`), inside `RtlEnterCriticalSection`: it loads `eax = CS->DebugInfo`
 and, when that is neither a valid pointer nor the `-1` "no-debug-info" sentinel,
 increments `DebugInfo->ContentionCount` (`+0x14`). The faulting CS (heap-resident,
-e.g. `0x105DAA40`) is otherwise fully initialised (`LockCount` set, `LockSemaphore`
-`-1`) but its `DebugInfo` is **0** — a value real ntdll never leaves on a CS (it is a
-valid `RTL_CRITICAL_SECTION_DEBUG*` or `-1`). Brovan runs the real 32-bit ntdll (no CS
-interception), so the guest's own `RtlpAllocateDebugInfo` returned 0 here — most likely
-the static `RtlpStaticDebugInfo[64]` pool exhausting after the ~hundreds of CSes the
-DLL-init wave creates, with the heap fallback not resolving under the emulator. Next
-step: trace `RtlpAllocateDebugInfo`'s allocation path (static-array index + the
-`RtlpDebugInfoFreeList`/heap fallback) and find why it yields 0 — a guest-ntdll heap
-interaction, not a missing syscall. Nearby non-fatal gaps: an unimplemented win32k
-syscall `0x1037` and more `NtQuerySystemInformationEx` (0x161) /
+e.g. `0x105DAA40`) is **active** — `LockCount = -6` (locked, one waiter),
+`LockSemaphore = -1`, `SpinCount = 0xFA0` (initialised via
+`RtlInitializeCriticalSectionAndSpinCount(cs, 4000)`) — yet its `DebugInfo` is **0**.
+Disassembling the init path proves ntdll never *writes* 0: `RtlInitializeCriticalSectionEx`
+sets `DebugInfo = -1` up front, and on a debug-info allocation failure the failure arm
+(`RtlpAllocateDebugInfo` → `0x5FE00`, a free-list-only allocator with no heap fallback,
+plus the `0x5FDC7` handler that only bumps a failure counter) *leaves it at -1*. So a
+successfully-initialised CS carries a valid pointer or `-1`, never 0 — meaning this
+`DebugInfo = 0` is **post-init corruption of a live CS**, not an init gap. The signature
+(an actively-contended CS whose debug pointer got zeroed) points at a delete-then-reenter
+or a heap block reused while still referenced. A write-watchpoint on the CS's `DebugInfo`
+word (`0x105DAA40`) confirmed the direction: it caught **only** the `-1` init store from
+`RtlInitializeCriticalSectionEx` (`0x5FCA2`) and **no** later write, yet the enter reads
+`0` there. So the word transitioned `-1 → 0` through a path the per-address write hook
+didn't observe — i.e. the block was **freed and re-used** (a bulk heap zero / block
+recycle) with a stale pointer still treating it as a live CS, rather than any CS API
+storing 0. Next step: trace the heap free/realloc of that block (watch the containing
+heap chunk, not just the word) to find where a live-referenced CS block gets recycled —
+an emulator heap-lifecycle issue, not a missing syscall. Nearby non-fatal gaps:
+an unimplemented win32k syscall `0x1037` and more `NtQuerySystemInformationEx` (0x161) /
 `NtQuerySystemInformation` class 0x73 `NOT_SUPPORTED`.
+
+(Also fixed this pass, though not the cause: `PEB.NumberOfProcessors` (x86 PEB `+0x64`)
+was 0 — an impossible value the CS-init path branches on and anti-VM code reads
+directly — now set to 8, matching the x64 PEB.)
 
 The **x86 registry** sibling gap is now closed (see below).
 
