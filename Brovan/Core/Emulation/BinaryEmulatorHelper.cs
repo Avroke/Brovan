@@ -1671,7 +1671,7 @@ namespace Brovan.Core.Emulation
                 // STATUS_NOT_SUPPORTED and its DllMain fails with STATUS_DLL_INIT_FAILED. Bind that observed SSN
                 // to the same connect handler so user32 init completes. See Win32k/NtUserProcessConnect.
                 const uint User32ClientConnectSyscallX86 = 0x2000;
-                if (!SyscallDictionary.ContainsKey(User32ClientConnectSyscallX86))
+                if (BinaryArch == BinaryArchitecture.x86 && !SyscallDictionary.ContainsKey(User32ClientConnectSyscallX86))
                     RegisterSyscall(User32ClientConnectSyscallX86, "NtUserProcessConnect", true);
             }
 
