@@ -70,6 +70,15 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             // Ranged hook over [start, end-1] inclusive: near-zero cost when writes miss the range.
             w.Hook = _emu._emulator.AddMemoryHook(start, end - 1, BackendHookType.MemoryWrite, w.Callback);
+
+            // If the write hook could not be installed (e.g. NoHooks diagnostic mode, where
+            // UC_HOOK_MEM_WRITE is not whitelisted), do NOT register the region: a live region
+            // with no hook would never dirty a page, so GetWriteWatch would falsely report zero
+            // writes after a genuine store — a detectable tell. Leaving it unregistered makes a
+            // later query return STATUS_INVALID_PARAMETER instead (an honest "not tracked").
+            if (w.Hook == IntPtr.Zero)
+                return;
+
             _regions.Add(w);
         }
 
@@ -102,23 +111,26 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
 
             ulong qStart = baseAddress & ~PageMask;
-            ulong qEnd = baseAddress + size;
+            // Guard the range end against address-space wrap (baseAddress + size overflow),
+            // which would otherwise make the [qStart, qEnd) filter match nothing.
+            ulong qEnd = baseAddress > ulong.MaxValue - size ? ulong.MaxValue : baseAddress + size;
             pages = new List<ulong>();
-            List<ulong> matched = new List<ulong>();
 
             foreach (ulong page in w.Dirty)
             {
                 if (page < qStart || page >= qEnd)
                     continue;
-
-                matched.Add(page);
-                if ((ulong)pages.Count < maxEntries)
-                    pages.Add(page);
+                if ((ulong)pages.Count >= maxEntries)
+                    break;
+                pages.Add(page);
             }
 
+            // WRITE_WATCH_FLAG_RESET resets ONLY the pages actually returned (MSDN), so a
+            // subsequent GetWriteWatch with an ample buffer still retrieves any pages that were
+            // truncated by maxEntries this call.
             if (reset)
             {
-                foreach (ulong page in matched)
+                foreach (ulong page in pages)
                     w.Dirty.Remove(page);
             }
 
@@ -133,7 +145,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
 
             ulong qStart = baseAddress & ~PageMask;
-            ulong qEnd = baseAddress + size;
+            ulong qEnd = baseAddress > ulong.MaxValue - size ? ulong.MaxValue : baseAddress + size;
             List<ulong> toRemove = new List<ulong>();
             foreach (ulong page in w.Dirty)
             {

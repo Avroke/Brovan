@@ -61,16 +61,20 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             bool Reset = (Flags & WriteWatchManager.WriteWatchFlagReset) != 0;
 
-            // Validate range membership BEFORE any reset side-effect.
+            // Probe the caller's output array for its DECLARED capacity BEFORE invoking
+            // TryGetWrites, because TryGetWrites applies the WRITE_WATCH_FLAG_RESET side-effect.
+            // Real Windows probes the buffer up front and does not reset when the probe faults;
+            // validating here (rather than after, against the returned count) preserves that
+            // ordering so an unmapped array never silently wipes the write-watch state.
+            if (Capacity > 0 && (Capacity > ulong.MaxValue / 8 || !Instance.IsRegionMapped(UserAddressArray, Capacity * 8)))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
             if (Instance.WriteWatch == null ||
                 !Instance.WriteWatch.TryGetWrites(BaseAddress, RegionSize, Capacity, Reset, out List<ulong> Pages))
             {
                 // The range was not allocated with MEM_WRITE_WATCH — real Windows rejects it.
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
             }
-
-            if (Pages.Count > 0 && !Instance.IsRegionMapped(UserAddressArray, (ulong)Pages.Count * 8))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             for (int i = 0; i < Pages.Count; i++)
             {
