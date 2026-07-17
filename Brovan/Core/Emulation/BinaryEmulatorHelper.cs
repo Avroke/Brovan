@@ -1663,6 +1663,16 @@ namespace Brovan.Core.Emulation
 
                 if (Win32u != null)
                     AddSyscallsFromExports(Win32u.ExportFunctions, Win32uData, SupportedFunctionsWin32k, true);
+
+                // user32.dll's DllMain (_UserClientDllInitialize) issues the win32k client-connect through its
+                // OWN internal syscall stub, not win32u's exported NtUserProcessConnect (SSN 0x10e9) — the two
+                // are different entry points, and user32's early-init stub carries SSN 0x2000 on the 19041 WOW64
+                // build. The win32u export scan above therefore never binds 0x2000, so user32's connect returns
+                // STATUS_NOT_SUPPORTED and its DllMain fails with STATUS_DLL_INIT_FAILED. Bind that observed SSN
+                // to the same connect handler so user32 init completes. See Win32k/NtUserProcessConnect.
+                const uint User32ClientConnectSyscallX86 = 0x2000;
+                if (!SyscallDictionary.ContainsKey(User32ClientConnectSyscallX86))
+                    RegisterSyscall(User32ClientConnectSyscallX86, "NtUserProcessConnect", true);
             }
 
             if (SyscallDictionary.Count > 0)

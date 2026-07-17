@@ -1523,7 +1523,8 @@ the guest ntdll's `mov eax, imm32` stub prologues, now from `WindowsLibs/SysWOW6
 | CSR read-only shared section + `BASE_STATIC_SERVER_DATA` (PEB +0x4C/+0x54/+0x248) | `BaseDllInitialize` completes → **~6.31M** (`DLL_INIT_FAILED` cleared) |
 | `NtSetInformationProcess(ProcessTlsInformation)` WOW64 element size (0xC not 0x18) | ntdll deferred-TLS setup succeeds → **~9.93M** (`INFO_LENGTH_MISMATCH` cleared) |
 | `NtSetInformationVirtualMemory` + `NtQueryInformationProcess(ProcessMitigationPolicy)` → WOW64 | CFG registration + mitigation query succeed (advisory) → later-DLL init |
-| *(open)* user32 win32k client-connect (syscall 0x2000) | current terminus — GUI subsystem, see frontier below |
+| user32 win32k client-connect (`NtUserProcessConnect`, syscall 0x2000) + SHAREDINFO | user32 DllMain passes the connect → **~9.98M** |
+| *(open)* win32k per-thread CLIENTINFO + x86 registry (`NtOpenKey`) | current terminus — GUI subsystem, see frontier below |
 
 #### Resolved this pass (each fix is a generic WOW64 fidelity correction)
 
@@ -1631,29 +1632,35 @@ mitigations default), mirroring the x64 class-52 handler. Both now return SUCCES
 the trace; the CFG-registration burst is advisory (its result is ignored — the
 instruction count was byte-identical with it as `NOT_SUPPORTED` vs SUCCESS).
 
-**Next frontier — user32's win32k client-connect (syscall `0x2000`, the GUI subsystem).**
-The `0x2000` terminus was traced (via the caller return address) to **`user32.dll`'s
-`DllMain`** (`_UserClientDllInitialize`): after the CFG registration burst it performs
-a CFG-protected win32k client-connect. The stub is `mov eax, 0x2000; call <thunk>;
-ret 0x10` — a **4-argument `NtUser*` connect** (args: a per-DLL data ptr, an out
-buffer, size `0x240`, a 4th ptr) whose result is sign-checked (`test eax,eax; js
-<fail>`); our `NOT_SUPPORTED` (negative) takes user32's failure-cleanup path and
-`DllMain` returns FALSE → `DLL_INIT_FAILED`. This is `NtUserProcessConnect` in spirit,
-but note the SSN mismatch: user32's internal stub uses `0x2000` while the WindowsLibs
-`win32u.dll` (same 19041.1288 build) exports `NtUserProcessConnect` at SSN `0x10e9`
-(2-arg). So the existing win32k SSN sourcing (parsed from win32u exports into
-`SupportedFunctionsWin32k`) never registers `0x2000` — user32 reaches it through its
-own CFG-bound internal thunk, not the win32u import. This is a **new subsystem**:
-implementing it means (a) a `Win32k/NtUserProcessConnect` handler that fills a 32-bit
-`USERCONNECT` (version words + a `SHAREDINFO` block — `psi`/`aheList`/dispatch table,
-the GUI analog of the CSR `BASE_STATIC_SERVER_DATA` shared section, for which the x64
-`CsrssPortHandler.HandleUserSrvConnect` path already builds the 64-bit variant) and
-returns `STATUS_SUCCESS`, and (b) wiring SSN `0x2000` to it (either register from
-user32's internal stubs, or map the win32k connect SSN explicitly). Scope is
-comparable to the CSR shared-section work above. Other still-unimplemented syscalls
-in the run (`0x1E9` `NtWow64IsProcessorFeaturePresent` hammered in a loop but
-non-fatal; `NtQuerySystemInformationEx` 0x161; `NtQueryInformationThread` class
-`ThreadDynamicCodePolicyInfo`) are not (yet) on the fatal path.
+**Resolved — user32's win32k client-connect (syscall `0x2000`).** The `0x2000`
+terminus was traced (via the caller return address) to **`user32.dll`'s `DllMain`**
+(`_UserClientDllInitialize`): a CFG-protected win32k client-connect, stub `mov eax,
+0x2000; call <thunk>; ret 0x10` (4 args), whose sign-checked result aborts `DllMain`
+on failure. It is `NtUserProcessConnect` in spirit but uses user32's **internal** stub
+(SSN `0x2000`), distinct from win32u's exported `NtUserProcessConnect` (SSN `0x10e9`,
+2-arg) — the win32u export scan therefore never registered it. Landed: a
+`Win32k/NtUserProcessConnect` handler bound to SSN `0x2000` in the x86 path. The out
+buffer is a `USERCONNECT` (8-byte version header, then `SHAREDINFO` at `+0x08` —
+confirmed empirically: writing a value there is what user32 reads back as `psi`); the
+handler fills `psi` / `aheList` / `HeEntrySize` / `pDispInfo` from the emulator's
+existing `EnsureUserSharedInfo` + `EnsureUserDesktopInfo` (the same win32k
+SERVERINFO/handle-table the x64 CSR `HandleUserSrvConnect` builds) and returns
+`STATUS_SUCCESS`. user32 now passes the connect + the `test byte [psi],4` deref,
+advancing **~9.94M → ~9.98M** instructions.
+
+**Next frontier — win32k per-thread `CLIENTINFO` + x86 registry (`NtOpenKey`).** The
+run now faults deeper in win32k init at a NULL per-thread-client deref: `mov eax,
+fs:[18h]` (TEB) → `[TEB+0xFDC]` → `[+0x60]` (== 0) → `[0+0xF8]` → later `[+0x180094]`
+(a GDI shared-section offset). This is the client-side **`CLIENTINFO`** / GDI
+handle-cache the process shared section + TEB should point at — the next layer of the
+GUI-subsystem state after the SHAREDINFO. In parallel, this same DLL init issues a
+burst of `NtOpenKey` (SSN 0x12) calls that return `NOT_SUPPORTED` because the x86
+registry path is still gated to x64 — extending the registry syscalls
+(`NtOpenKey`/`NtQueryValueKey`/…) to WOW64 (32-bit `OBJECT_ATTRIBUTES` +
+`GuestPointerSize` handle writes, the same treatment the KnownDlls object-manager
+handlers got) is the sibling gap. Other still-unimplemented syscalls (`0x1E9`
+`NtWow64IsProcessorFeaturePresent`; `0x1CE`; `NtQuerySystemInformation` class 0x73)
+are not (yet) on the fatal path.
 
 **Remaining WOW64 work (mechanical continuation):** the other x64-gated `Nt*`
 handlers still return unimplemented for x86 — each needs the same treatment (unify
