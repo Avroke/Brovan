@@ -128,6 +128,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             // CanSatisfyWaitHandle agree — both return false for an absent handle).
             for (int i = 0; i < Handles.Count; i++)
             {
+                // The current-process (-1) / current-thread (-2) pseudo-handles are valid
+                // references that live outside the handle table; real Windows accepts them and
+                // simply never signals them while the thread runs (the wait blocks/times out).
+                // Treat them as valid here so they fall through to the normal wait path rather
+                // than being rejected as invalid.
+                if (Handles[i] == ulong.MaxValue || Handles[i] == ulong.MaxValue - 1)
+                    continue;
+
                 if (Instance.WinHelper.HandleManager.GetObjectByHandle(Handles[i]) == null)
                     return NTSTATUS.STATUS_INVALID_HANDLE;
             }

@@ -3187,7 +3187,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!WriteZeroMemory(Monitor, (uint)UserPrimaryMonitorSize))
                 return 0;
 
-            (int Width, int Height) = GetHostPrimaryMonitorSize();
+            (int Width, int Height) = VirtualPrimaryMonitorSize();
 
             UserPrimaryMonitorInfo MonitorInfo = new UserPrimaryMonitorInfo
             {
@@ -3212,23 +3212,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             return UserPrimaryMonitorAddress;
         }
 
-        private static (int Width, int Height) GetHostPrimaryMonitorSize()
+        // The guest's primary monitor is a FIXED 1920x1080 virtual display, never the host's
+        // real screen. Reflecting the analyst machine's actual resolution (via GetSystemMetrics)
+        // would (a) leak a host-specific value into the guest — non-deterministic across analyst
+        // machines, violating the run-over-run reproducibility contract — and (b) disagree with
+        // the fixed 1920x1080 bounds every other screen-space surface uses (GetCursorPos in
+        // NtUserCallTwoParam, GetDeviceCaps HORZRES). 1080p is the single most common desktop
+        // resolution, so it is a realistic, coherent, host-independent SSOT.
+        private static (int Width, int Height) VirtualPrimaryMonitorSize()
         {
-            try
-            {
-                if (OperatingSystem.IsWindows())
-                {
-                    int Width = NativeWinImports.GetSystemMetrics(SmCxScreen);
-                    int Height = NativeWinImports.GetSystemMetrics(SmCyScreen);
-
-                    if (Width > 0 && Height > 0)
-                        return (Width, Height);
-                }
-            }
-            catch
-            {
-            }
-
             return (1920, 1080);
         }
 
