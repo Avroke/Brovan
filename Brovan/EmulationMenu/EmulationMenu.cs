@@ -2351,7 +2351,7 @@ namespace Brovan.EmulationMenu
             }
         }
 
-        public static void RunEmulator(string FilePath, bool Quick, bool Silent, [AllowNull] string Command, [AllowNull] string RawProgramArguments, string[] ProgramArguments, NetworkAccessPolicy NetworkPolicyValue, bool NoHooks, EmulationBackendKind BackendKind)
+        public static void RunEmulator(string FilePath, bool Quick, bool Silent, [AllowNull] string Command, [AllowNull] string RawProgramArguments, string[] ProgramArguments, NetworkAccessPolicy NetworkPolicyValue, bool NoHooks, EmulationBackendKind BackendKind, [AllowNull] string ScreenResolutionSpec = null)
         {
             SilentMode = Silent;
 
@@ -2419,7 +2419,11 @@ namespace Brovan.EmulationMenu
                     ProgramArguments = ProgramArguments ?? Array.Empty<string>(),
                     NoHooks = NoHooks,
                     BackendKind = BackendKind,
-                    LivelockEscapeSlices = ParseLivelockEscapeSlices()
+                    LivelockEscapeSlices = ParseLivelockEscapeSlices(),
+                    // Explicit --screen argument wins; else the BROVAN_SCREEN_RESOLUTION env var
+                    // (kept as a convenience default source); else null -> the fixed 1920x1080 SSOT.
+                    ScreenResolution = WinSysHelper.ResolveScreenResolution(
+                        ScreenResolutionSpec ?? Environment.GetEnvironmentVariable("BROVAN_SCREEN_RESOLUTION"))
                 };
 
                 if (UseWindowsBlobGuest)

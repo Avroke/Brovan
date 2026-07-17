@@ -44,7 +44,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             // Screen bounds come from the shared SSOT (default 1920x1080, opt-in dynamic/host
             // via BROVAN_SCREEN_RESOLUTION) so the cursor stays coherent with the reported
             // monitor / device-caps metrics.
-            (int ScreenWidth, int ScreenHeight) = WinSysHelper.ScreenResolution();
+            (int ScreenWidth, int ScreenHeight) = Instance.WinHelper.ScreenResolution();
             // Lissajous over two coprime-ish periods so the path never sits still and
             // never trivially repeats. X sweeps ~0.34 px/ms, Y ~0.25 px/ms — human pace.
             long X = TriangleWave(Now, 9000, ScreenWidth / 10, ScreenWidth * 9L / 10);

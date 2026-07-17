@@ -300,6 +300,18 @@ namespace Brovan.Core.Emulation
         /// </summary>
         public uint LivelockEscapeSlices;
 
+        /// <summary>
+        /// Effective guest primary-screen resolution, the SSOT every screen-space surface reads
+        /// (primary-monitor MONITORINFO, GetCursorPos bounds, GetDeviceCaps HORZRES). <c>null</c>
+        /// (the default) means the fixed 1920x1080 virtual display — host-independent and
+        /// reproducible run-over-run, which a fingerprint requires. Set an explicit
+        /// <c>(Width, Height)</c> for a different deterministic resolution, or resolve the host's
+        /// real monitor via <see cref="OS.Windows.WinSysHelper.ResolveScreenResolution(string)"/>
+        /// (<c>"host"</c>/<c>"dynamic"</c>) when a non-deterministic host-tracking display is
+        /// wanted (e.g. InteractiveGui). The console exposes this as <c>--screen &lt;WxH|host&gt;</c>.
+        /// </summary>
+        public (int Width, int Height)? ScreenResolution;
+
 #pragma warning disable
         public BinaryEmulatorSettings()
         {

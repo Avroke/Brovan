@@ -128,6 +128,8 @@ namespace Brovan
             Console.WriteLine("  --net-allow=<ip>  Allow a specific IPv4 or IPv6 address in addition to the selected policy.");
             Console.WriteLine("  --no-hooks        Run the emulator with no hooks. useful when you want maximum performance and want to see some program output.");
             Console.WriteLine("  --backend=<name>  Choose the emulation backend: unicorn (default) or kvm.");
+            Console.WriteLine("  --screen=<spec>   Guest screen resolution: <W>x<H> (e.g. 2560x1440), or 'host' to track the");
+            Console.WriteLine("                    real host monitor. Default: a fixed, reproducible 1920x1080.");
             Console.WriteLine();
             Console.WriteLine("Notes:");
             Console.WriteLine("  All Brovan flags must be passed before the program path.");
@@ -327,6 +329,7 @@ namespace Brovan
             bool Silent = false;
             string Command = null;
             string FilePath = null;
+            string ScreenResolutionSpec = null;
             EmulationBackendKind BackendKind = EmulationBackendKind.Unicorn;
             NetworkAccessPolicy NetworkPolicy = new NetworkAccessPolicy(NetworkAccessMode.Loopback);
             List<string> ProgramArgumentsList = new List<string>();
@@ -363,6 +366,13 @@ namespace Brovan
                             continue;
 
                         Command = args[i + 1];
+                        i++;
+                        continue;
+                    case "--screen":
+                        if (i + 1 >= args.Length)
+                            continue;
+
+                        ScreenResolutionSpec = args[i + 1];
                         i++;
                         continue;
                     case "--net":
@@ -457,6 +467,12 @@ namespace Brovan
                     continue;
                 }
 
+                if (Arg.StartsWith("--screen=", StringComparison.OrdinalIgnoreCase))
+                {
+                    ScreenResolutionSpec = Arg.Substring("--screen=".Length);
+                    continue;
+                }
+
                 if (Arg.StartsWith("-", StringComparison.Ordinal))
                     continue;
 
@@ -480,7 +496,7 @@ namespace Brovan
 
             // Set the dll import resolver based on the platform
             NativeLibraryResolver.Register();
-            EmulationMenu.EmulationMenu.RunEmulator(FilePath, Quick, Silent, Command, RawProgramArguments, ProgramArguments, NetworkPolicy, NoHooks, BackendKind);
+            EmulationMenu.EmulationMenu.RunEmulator(FilePath, Quick, Silent, Command, RawProgramArguments, ProgramArguments, NetworkPolicy, NoHooks, BackendKind, ScreenResolutionSpec);
         }
     }
 }

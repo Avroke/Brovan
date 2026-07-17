@@ -3212,23 +3212,31 @@ namespace Brovan.Core.Emulation.OS.Windows
             return UserPrimaryMonitorAddress;
         }
 
-        // Effective guest screen resolution — the single SSOT read by every screen-space
-        // surface (primary-monitor MONITORINFO here, GetCursorPos bounds in NtUserCallTwoParam,
-        // GetDeviceCaps HORZRES) so they can never disagree.
-        //
-        // DEFAULT is a fixed 1920x1080 virtual display: host-independent and reproducible
-        // run-over-run (a fingerprint must not leak the analyst machine's real resolution).
-        // The dynamic / host resolution is OPT-IN via the BROVAN_SCREEN_RESOLUTION env var:
-        //   "host" / "dynamic"  -> reflect the real host monitor (GetSystemMetrics; meaningful
-        //                          on a Windows host, e.g. InteractiveGui — non-deterministic
-        //                          by nature, which is why it is not the default)
-        //   "<W>x<H>"           -> an explicit fixed resolution (e.g. "2560x1440"; deterministic)
-        // Anything else (or unset) -> the 1920x1080 default.
-        public static (int Width, int Height) ScreenResolution()
+        /// <summary>The fixed default virtual-display resolution when none is configured.</summary>
+        public static readonly (int Width, int Height) DefaultScreenResolution = (1920, 1080);
+
+        // Effective guest screen resolution — the single SSOT read by every screen-space surface
+        // (primary-monitor MONITORINFO here, GetCursorPos bounds in NtUserCallTwoParam,
+        // GetDeviceCaps HORZRES) so they can never disagree. Sourced from the per-emulation
+        // config (BinaryEmulatorSettings.ScreenResolution, set via the emulator constructor /
+        // the console --screen argument); null there means the fixed default.
+        public (int Width, int Height) ScreenResolution()
         {
-            string spec = Environment.GetEnvironmentVariable("BROVAN_SCREEN_RESOLUTION");
+            return Emulator.Settings.ScreenResolution ?? DefaultScreenResolution;
+        }
+
+        /// <summary>
+        /// Parse a screen-resolution spec into a concrete resolution for
+        /// <see cref="BinaryEmulatorSettings.ScreenResolution"/>. <c>null</c>/blank/unrecognised
+        /// returns <c>null</c> (fall back to <see cref="DefaultScreenResolution"/>, a
+        /// host-independent, reproducible 1920x1080). <c>"host"</c>/<c>"dynamic"</c> resolves the
+        /// real host monitor (GetSystemMetrics on a Windows host — non-deterministic, opt-in).
+        /// <c>"&lt;W&gt;x&lt;H&gt;"</c> (e.g. "2560x1440") is an explicit deterministic resolution.
+        /// </summary>
+        public static (int Width, int Height)? ResolveScreenResolution(string spec)
+        {
             if (string.IsNullOrWhiteSpace(spec))
-                return (1920, 1080);
+                return null;
 
             spec = spec.Trim();
 
@@ -3248,7 +3256,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 catch
                 {
                 }
-                return (1920, 1080);
+                return DefaultScreenResolution;
             }
 
             int sep = spec.IndexOfAny(new[] { 'x', 'X' });
@@ -3261,7 +3269,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return (cw, ch);
             }
 
-            return (1920, 1080);
+            return null;
         }
 
         public ulong EnsureUserDesktopInfo()
