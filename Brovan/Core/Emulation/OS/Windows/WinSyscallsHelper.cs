@@ -116,6 +116,18 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// <param name="ProcessHandle">The process handle or current-process pseudo handle.</param>
         /// <param name="RequiredAccess">The access mask required for the operation.</param>
         /// <returns>True if the handle references the current process and has the requested access.</returns>
+        /// <summary>
+        /// True if the handle is the NtCurrentProcess pseudo-handle. On x86 the (HANDLE)-1 pseudo-handle
+        /// arrives as 0xFFFFFFFF (zero-extended from the 32-bit stack), on x64 as 0xFFFFFFFFFFFFFFFF, so a bare
+        /// <c>== ulong.MaxValue</c> comparison misses the WOW64 case — check every form.
+        /// </summary>
+        public bool IsCurrentProcessPseudoHandle(ulong ProcessHandle)
+            => ProcessHandle == HandleManager.CurrentProcess || ProcessHandle == uint.MaxValue || ProcessHandle == ulong.MaxValue;
+
+        /// <summary>True if the handle is the NtCurrentThread pseudo-handle ((HANDLE)-2), on either bitness.</summary>
+        public bool IsCurrentThreadPseudoHandle(ulong ThreadHandle)
+            => ThreadHandle == HandleManager.CurrentThread || ThreadHandle == 0xFFFFFFFEUL || ThreadHandle == 0xFFFFFFFFFFFFFFFEUL;
+
         public bool IsCurrentProcessHandle(ulong ProcessHandle, AccessMask RequiredAccess)
         {
             if (ProcessHandle == HandleManager.CurrentProcess || ProcessHandle == uint.MaxValue)
@@ -894,6 +906,13 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// <returns></returns>
         public ulong GetArg64(int Index, bool UInt = false)
         {
+            // 32-bit (WOW64) guest: every syscall argument is a 32-bit value on the stack (there is no
+            // register fast-path). Delegating here means the ~130 handlers that read args through GetArg64
+            // without an explicit x86 branch get correct 32-bit arguments for free. Handlers still owe the
+            // caller bitness-correct OUT-pointer WRITES (4 bytes on x86) — that is a per-handler concern.
+            if (Emulator._binary.Architecture != BinaryArchitecture.x64)
+                return GetArg32(Index);
+
             if (_argCacheValid)
             {
                 switch (Index)
@@ -1425,11 +1444,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Emulator == null)
                 return;
 
-            if (Emulator._binary == null || Emulator._binary.Architecture != BinaryArchitecture.x64)
-            {
-                Emulator.TriggerEventMessage("[-] InvokeException is only implemented for x64 right now.", LogFlags.Issues);
+            if (Emulator._binary == null)
                 return;
-            }
 
             if (ExceptionInformation == null)
                 ExceptionInformation = new ExceptionInformation { Status = Exception };
@@ -1461,7 +1477,126 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return;
             }
 
-            DispatchExceptionX64(dispatcher, Exception, ExceptionInformation);
+            if (Emulator._binary.Architecture == BinaryArchitecture.x64)
+                DispatchExceptionX64(dispatcher, Exception, ExceptionInformation);
+            else
+                DispatchExceptionX86(dispatcher, Exception, ExceptionInformation);
+        }
+
+        /// <summary>
+        /// x86 (WOW64 / native-32) exception dispatch. Builds a 32-bit EXCEPTION_RECORD (0x50) and CONTEXT
+        /// (0x2CC) on the thread stack and enters KiUserExceptionDispatcher exactly as the kernel does: the
+        /// dispatcher reads <c>[esp]=PEXCEPTION_RECORD</c> and <c>[esp+4]=PCONTEXT</c> (confirmed from the
+        /// stub prologue <c>mov ecx,[esp+4]; mov ebx,[esp]</c>). Mirrors <see cref="DispatchExceptionX64"/>.
+        /// </summary>
+        private void DispatchExceptionX86(ulong DispatcherAddress, NTSTATUS Exception, ExceptionInformation ExceptionInformation)
+        {
+            const uint ExceptionRecordSize = 0x50;      // x86 EXCEPTION_RECORD
+            const uint ContextSize = 0x2CC;             // x86 CONTEXT
+            const uint PointersSize = 0x8;              // [PEXCEPTION_RECORD][PCONTEXT]
+
+            const uint CONTEXT_i386 = 0x00010000;
+            const uint CONTEXT_CONTROL = 0x00000001;
+            const uint CONTEXT_INTEGER = 0x00000002;
+            const uint CONTEXT_SEGMENTS = 0x00000004;
+            const uint CONTEXT_DEBUG_REGISTERS = 0x00000010;
+
+            uint InitialEsp = Emulator.ReadRegister32(Registers.UC_X86_REG_ESP);
+            uint InitialEip = Emulator.ReadRegister32(Registers.UC_X86_REG_EIP);
+            uint InitialEFlags = Emulator.ReadRegister32(Registers.UC_X86_REG_EFLAGS);
+
+            ulong AllocationSize = BinaryEmulator.AlignUp(PointersSize + ExceptionRecordSize + ContextSize, 0x10);
+            uint NewEsp = (uint)AlignDown(InitialEsp - AllocationSize, 0x10);
+
+            EmulatedThread Thread = Emulator.CurrentThread;
+            if (Thread != null)
+            {
+                ulong StackLow = Thread.StackAddress;
+                ulong StackHigh = Thread.StackAddress + Thread.StackSize;
+                if (NewEsp < StackLow || (NewEsp + AllocationSize) > StackHigh)
+                {
+                    if ((Emulator.Settings.Flags & LogFlags.Issues) != 0)
+                        Emulator.TriggerEventMessage($"[-] InvokeException (x86) failed: insufficient stack (ESP=0x{InitialEsp:X}, NewESP=0x{NewEsp:X}).", LogFlags.Issues);
+                    return;
+                }
+            }
+
+            if (!Emulator.IsRegionMapped(NewEsp, AllocationSize))
+            {
+                ulong PageStart = NewEsp & ~0xFFFUL;
+                ulong PageEnd = BinaryEmulator.AlignUp(NewEsp + AllocationSize, 0x1000);
+                for (ulong Page = PageStart; Page < PageEnd; Page += 0x1000)
+                {
+                    if (!Emulator.IsRegionMapped(Page, 1))
+                        Emulator._emulator.MapMemory(Page, 0x1000, MemoryProtection.ReadWrite);
+                }
+                if (!Emulator.IsRegionMapped(NewEsp, AllocationSize))
+                    return;
+            }
+
+            WriteZeroMemory(NewEsp, (uint)AllocationSize);
+
+            ulong ExceptionRecordAddress = NewEsp + PointersSize;
+            ulong ContextAddress = ExceptionRecordAddress + ExceptionRecordSize;
+
+            // Stack pointers the dispatcher reads.
+            Emulator._emulator.WriteMemory(NewEsp + 0, (uint)ExceptionRecordAddress, 4);
+            Emulator._emulator.WriteMemory(NewEsp + 4, (uint)ContextAddress, 4);
+
+            // EXCEPTION_RECORD (x86).
+            Span<byte> Record = Shared.GetSpan(ExceptionRecordSize);
+            Record.Clear();
+            WriteUInt32(Record, 0x00, (uint)Exception);      // ExceptionCode
+            WriteUInt32(Record, 0x04, 0u);                   // ExceptionFlags
+            WriteUInt32(Record, 0x08, 0u);                   // ExceptionRecord (chained)
+            WriteUInt32(Record, 0x0C, InitialEip);           // ExceptionAddress
+            ulong[] Parameters = ExceptionInformation?.Parameters ?? Array.Empty<ulong>();
+            int Count = Math.Min(Parameters.Length, 15);
+            WriteUInt32(Record, 0x10, (uint)Count);          // NumberParameters
+            for (int i = 0; i < Count; i++)
+                WriteUInt32(Record, 0x14 + (i * 4), (uint)Parameters[i]);
+            Emulator.WriteMemory(ExceptionRecordAddress, Record);
+
+            // CONTEXT (x86).
+            Span<byte> Context = Shared.GetSpan(ContextSize);
+            Context.Clear();
+            WriteUInt32(Context, 0x00, CONTEXT_i386 | CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_SEGMENTS | CONTEXT_DEBUG_REGISTERS);
+            WriteUInt32(Context, 0x04, Emulator.ReadRegister32(Registers.UC_X86_REG_DR0));
+            WriteUInt32(Context, 0x08, Emulator.ReadRegister32(Registers.UC_X86_REG_DR1));
+            WriteUInt32(Context, 0x0C, Emulator.ReadRegister32(Registers.UC_X86_REG_DR2));
+            WriteUInt32(Context, 0x10, Emulator.ReadRegister32(Registers.UC_X86_REG_DR3));
+            WriteUInt32(Context, 0x14, Emulator.ReadRegister32(Registers.UC_X86_REG_DR6));
+            WriteUInt32(Context, 0x18, Emulator.ReadRegister32(Registers.UC_X86_REG_DR7));
+            WriteUInt32(Context, 0x8C, Emulator.ReadRegister32(Registers.UC_X86_REG_GS));
+            WriteUInt32(Context, 0x90, Emulator.ReadRegister32(Registers.UC_X86_REG_FS));
+            WriteUInt32(Context, 0x94, Emulator.ReadRegister32(Registers.UC_X86_REG_ES));
+            WriteUInt32(Context, 0x98, Emulator.ReadRegister32(Registers.UC_X86_REG_DS));
+            WriteUInt32(Context, 0x9C, Emulator.ReadRegister32(Registers.UC_X86_REG_EDI));
+            WriteUInt32(Context, 0xA0, Emulator.ReadRegister32(Registers.UC_X86_REG_ESI));
+            WriteUInt32(Context, 0xA4, Emulator.ReadRegister32(Registers.UC_X86_REG_EBX));
+            WriteUInt32(Context, 0xA8, Emulator.ReadRegister32(Registers.UC_X86_REG_EDX));
+            WriteUInt32(Context, 0xAC, Emulator.ReadRegister32(Registers.UC_X86_REG_ECX));
+            WriteUInt32(Context, 0xB0, Emulator.ReadRegister32(Registers.UC_X86_REG_EAX));
+            WriteUInt32(Context, 0xB4, Emulator.ReadRegister32(Registers.UC_X86_REG_EBP));
+            WriteUInt32(Context, 0xB8, InitialEip);
+            WriteUInt32(Context, 0xBC, Emulator.ReadRegister32(Registers.UC_X86_REG_CS));
+            WriteUInt32(Context, 0xC0, InitialEFlags);
+            WriteUInt32(Context, 0xC4, InitialEsp);
+            WriteUInt32(Context, 0xC8, Emulator.ReadRegister32(Registers.UC_X86_REG_SS));
+            Emulator.WriteMemory(ContextAddress, Context);
+
+            Emulator.WriteRegister32(Registers.UC_X86_REG_ESP, NewEsp);
+            Emulator.WriteRegister32(Registers.UC_X86_REG_EIP, (uint)DispatcherAddress);
+
+            EmulatedThread EmuThread = Emulator.CurrentThread;
+            WindowsThreadState St = WinEmulatedThread.GetState(EmuThread);
+            St.DispatchException = true;
+            St.IsHandlingException = true;
+            if (St.ExceptionNesting <= 0)
+                St.ExceptionNesting = 1;
+            St.ExceptionInformation = ExceptionInformation;
+            EmuThread.ExitCode = (int)Exception;
+            Emulator.Threads[(uint)Emulator.CurrentThreadId] = EmuThread;
         }
 
         private static ulong AlignDown(ulong Value, ulong Align)

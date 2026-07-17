@@ -9,7 +9,7 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
+            if (Instance._binary.Architecture != BinaryArchitecture.x64 && Instance._binary.Architecture != BinaryArchitecture.x86)
                 return Instance.WinUnimplemented;
 
             ulong ProcessHandle = Instance.WinHelper.GetArg64(0);
@@ -17,7 +17,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong ProcessInformation = Instance.WinHelper.GetArg64(2);
             uint ProcessInformationLength = (uint)Instance.WinHelper.GetArg64(3);
 
-            bool CurrentProcess = ProcessHandle == ulong.MaxValue;
+            bool CurrentProcess = Instance.WinHelper.IsCurrentProcessPseudoHandle(ProcessHandle);
 
             if (!CurrentProcess)
                 return NTSTATUS.STATUS_NOT_SUPPORTED;

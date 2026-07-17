@@ -7,8 +7,10 @@ This file records every correction that has landed, and every frontier that has
 been diagnosed but not yet fixed, so the work can be picked up without
 re-deriving the analysis.
 
-Scope: **al-khaser x64**. al-khaser x86 does not run at all — Brovan implements
-very few x86 syscalls and no WOW64 (see Frontier F5).
+Scope: **al-khaser x64** (fully running its detection suite) and **al-khaser x86 /
+WOW64** (foundation landed — the 32-bit ntdll loader now runs deep into process
+init; see Frontier F5 for the full WOW64 model, landed primitives, and the current
+loader-TLS frontier).
 
 ## Progression
 
@@ -1382,12 +1384,153 @@ the before/after compare-return evidence (constant `-2`/`0` error → correct
 `0`/`-1`/`CSTR_*` results) — is in the landed **`b205488`** entry under *Past
 corrections* above.
 
-### F5 — x86 / WOW64 unsupported
+### F5 — x86 / WOW64 — foundation landed, loader now runs deep into process init
 
-**Symptom:** `al-khaser_x86.exe` does not run.
+**Original symptom:** `al-khaser_x86.exe` did not run at all — it died immediately
+with `ntdll.dll is not loaded` before executing a single guest instruction.
 
-**Cause:** Brovan implements very few x86 syscalls and no WOW64 thunking. Out of
-scope for the x64 work above; a separate, large effort.
+**Status now:** the WOW64 foundation is implemented and validated. A 32-bit PE
+loads the real 32-bit ntdll from the `SysWOW64` view, builds a valid 32-bit
+process environment, dispatches WOW64 system calls through a synthetic
+`sysenter` trampoline with the correct SSNs, handles CPU/software exceptions
+through the x86 `KiUserExceptionDispatcher`, and runs ntdll's `LdrInitializeThunk`
+loader **deep into process initialisation** — mapping dependent DLL sections,
+querying image/memory/process/thread information, resolving the WOW64 transition,
+and dispatching real SEH — before terminating cleanly (no spin) at the current
+frontier below. The x64 cohort is unaffected (al-khaser_x64 still sweeps its
+detection suite, ≥ 240 GOOD probes).
+
+This whole subsection is the WOW64 model. **The design decision that makes it
+tractable: emulate a 32-bit process purely in `UC_MODE_32`** — one Unicorn
+context, never the real Heaven's-Gate 0x33 mode switch. The 32-bit ntdll's
+`Nt*` stubs reach the kernel through `Wow64Transition` / `fs:[0xC0]`; Brovan
+points both at a trampoline that runs a `sysenter` it intercepts, dispatching to
+the same C# `Nt*` handlers the x64 path uses. The SSNs in the WOW64 32-bit ntdll
+are **identical to the native x64 SSNs** (NtCreateFile = 0x55, NtProtectVirtualMemory
+= 0x50 on both), so the number→name mapping is built the same way — by parsing
+the guest ntdll's `mov eax, imm32` stub prologues, now from `WindowsLibs/SysWOW64/ntdll.dll`.
+
+#### Landed WOW64 primitives
+
+- **SysWOW64 dependency view** (`GeneralHelper.Wow64GuestView`, an ambient flag
+  set from the binary architecture at guest bring-up). On a non-Windows host the
+  WindowsLibs resolver (`GetWindowsLibPath`, `TryResolveFromWindowsLibs`,
+  `TryResolveFromWindowsLibsByLeaf`) redirects a 32-bit guest's `System32`
+  requests to `WindowsLibs/SysWOW64` — the emulator-side WOW64 file-system
+  redirector. Falls back to the flat view when SysWOW64 doesn't ship a file.
+- **x86 syscall table** — `BuildWinSyscallDictionary(x86)` reads
+  `SysWOW64/ntdll.dll` + `win32u.dll` (was reading the flat 64-bit ntdll for both
+  arches).
+- **Bitness-aware GPR transfer** (`BinaryEmulator.ReadGprBatch/WriteGprBatch`).
+  Root cause of the very first crash: **Unicorn treats the 64-bit register IDs
+  (`RAX`/`RSP`/`RIP`/… ids 35, 41, 44, …) as no-ops in `MODE_32`** — writing them
+  silently does nothing, reading returns 0. So the thread context never reached a
+  32-bit CPU (ESP stayed 0 → `push` faulted at `LdrInitializeThunk`). The batch
+  now uses the 32-bit IDs (`EAX`/`ESP`/`EIP`/`EFLAGS`, 10 regs, no R8-R15) when
+  `BackendMode == MODE_32`.
+- **GDT-based FS base** (`WindowsGuest.SetupWow64Segments` + a new
+  `IEmulationBackend.WriteGdtr` MMR-write primitive on all backends). `MODE_32`
+  also ignores the `FS_BASE` pseudo-register (`fs:[0x18]` faulted), so the FS base
+  is installed through a real GDT descriptor (selector 0x50, GDT index 10) reached
+  via GDTR; the descriptor's base is rewritten to the current thread's TEB on each
+  context switch and FS reloaded. Loading a custom GDTR turns the default `SS=0`
+  into a null selector (stack pushes then `#GP`), so `SS`/`DS`/`ES` are reloaded
+  with flat DPL0 selectors. **Selectors are DPL0/RPL0, not the real WOW64 ring-3
+  values (CS 0x23, FS 0x53):** a ring-3 selector can only be loaded at CPL 3, and
+  Unicorn's `reg-write` of CS does not perform the far transfer that raises CPL, so
+  RPL-3 loads `#GP`. The FS base is still correct (all `fs:[X]` resolve); the
+  visible selector *values* differ — a known cosmetic gap, tracked below.
+- **32-bit process environment** (`WindowsGuest.BuildProcessEnvironment32`) — full
+  32-bit PEB + `RTL_USER_PROCESS_PARAMETERS` (documented x86 offsets, UNICODE_STRING
+  buffer at struct+4). Previously only a minimal PEB was built, and only for the
+  raw-blob path; a real 32-bit PE got no ProcessParameters and the loader read a
+  NULL command line.
+- **32-bit TEB** (`AllocateAndInitializeTEB`) — built for every 32-bit guest now,
+  including `WOW32Reserved` (`fs:[0xC0]`) pointed at the syscall trampoline.
+- **WOW64 syscall trampoline** (`SetupWow64SyscallTransition`) — a
+  `pop edx ; sysenter ; push edx ; ret` page. `pop` discards the ntdll-stub return
+  address that `call fs:[0xC0]` / `jmp [Wow64Transition]` leaves on top, so at the
+  `sysenter` ESP points at the *caller's* return address with the syscall args at
+  ESP+4, ESP+8, … — exactly what `GetArg32` expects. `push` restores it so the
+  final `ret` returns into the stub's `ret N`, cleaning the stdcall args. Both the
+  ntdll `Wow64Transition` global and the per-thread TEB `fs:[0xC0]` point at it; a
+  new `SYSENTER` instruction hook (registered only for `MODE_32`) routes to the
+  same `TryHandleSyscall` the x64 `SYSCALL` hook uses.
+- **32-bit thread bootstrap** (`CreateEmulatedThread` x86 path +
+  `BuildInitialContext32`) — `LdrInitializeThunk` is entered stdcall-style with a
+  `CONTEXT*` first arg; it `NtContinue`s to a 32-bit CONTEXT whose Eip is
+  `RtlUserThreadStart` with Eax = entry, Ebx = parameter (the x86 ABI).
+- **x86 CONTEXT handling** — `NtContinue`, `NtRaiseException`, and the exception
+  dispatcher (`WinSysHelper.DispatchExceptionX86` reached from `InvokeException`)
+  all read/write the 32-bit CONTEXT (0x2CC) layout with the 32-bit register IDs.
+  The x86 `KiUserExceptionDispatcher` ABI (`[esp]=PEXCEPTION_RECORD`,
+  `[esp+4]=PCONTEXT`, confirmed from its stub prologue) is built on the thread
+  stack. Before this, any fault/exception spun ~20M no-op instructions
+  (`InvokeException is only implemented for x64`); now SEH dispatches correctly and
+  the run terminates.
+- **Unified syscall argument reading** (`WinSysHelper.GetArg64` delegates to the
+  stack-based `GetArg32` in `MODE_32`) so the ~130 handlers that read args through
+  `GetArg64` without an explicit arch branch get correct 32-bit arguments for free;
+  and pointer-sized OUT writes go through new bitness-aware
+  `BinaryEmulator.ReadPointer` / `WritePointer` / `GuestPointerSize` helpers.
+- **Pseudo-handle helpers** (`WinSysHelper.IsCurrentProcessPseudoHandle` /
+  `IsCurrentThreadPseudoHandle`) — the `(HANDLE)-1` current-process pseudo-handle
+  arrives as `0xFFFFFFFF` (zero-extended) on x86, not `ulong.MaxValue`, so bare
+  `== ulong.MaxValue` comparisons missed it.
+- **Handlers made bitness-aware** (args unified, OUT structs sized to the guest):
+  `NtProtectVirtualMemory`, `NtQuerySystemInformation` (incl. the x86 44-byte
+  `SYSTEM_BASIC_INFORMATION`), `NtQueryInformationProcess`
+  (ProcessBasicInformation / ProcessCookie / ProcessDefaultHardErrorMode /
+  ProcessExecuteFlags / ProcessImageInformation — x86 `SECTION_IMAGE_INFORMATION`
+  0x30), `NtQueryVirtualMemory` (MemoryBasicInformation 0x1C / MemoryImageInformation
+  0x0C / MemoryWorkingSetExInformation 8-byte entries),
+  `NtQueryInformationThread` (ThreadBasicInformation 0x1C), `NtCreateEvent`,
+  `NtCreateSection`, `NtMapViewOfSection`, `NtSetInformationProcess`,
+  `NtContinue`, `NtRaiseException`.
+
+**Progression (instruction terminus grows as each layer landed):**
+
+| Stage | Terminus |
+|-------|----------|
+| Session start | `ntdll.dll is not loaded` — 0 guest instrs |
+| SysWOW64 view + syscall table | 32-bit ntdll loads; crash at `LdrInitializeThunk` `push ebp`, ESP=0 |
+| Bitness-aware GPR batch | thread starts; `fs:[0x18]` fault (FS base unset) |
+| GDT-based FS + 32-bit TEB/PEB/CONTEXT + trampoline | WOW64 syscalls dispatch with correct SSNs |
+| Unified args + loader-critical handlers | loader queries + maps DLL sections |
+| x86 exception dispatch | infinite no-op spin gone; SEH dispatches; clean terminus |
+| ProcessImageInformation / thread / memory classes | loader runs ~8k instrs deep into init |
+
+#### Current frontier (F5-next)
+
+The loader now terminates at an honest access-violation deep inside ntdll's
+process-init path: `mov eax, [eax]` at guest `0x4B32A880` with `eax == 0`. The
+faulting code reads `fs:[0x18]` (TEB.Self), confirms `[TEB+0x18] == TEB` (the
+"this is a 32-bit TEB" check — Self is at +0x18 on the x86 TEB, +0x30 on x64),
+then reads `[TEB+0xE38]` (= `TlsSlots[10]`, since `TlsSlots[64]` starts at TEB
+offset 0xE10 on x86) and dereferences it. That slot is zero in Brovan's TEB, so
+the deref faults. This is a loader/CRT per-thread-data (TLS) initialisation gap —
+a field the loader expects a prior init step to have populated. The `[TEB+0xFDC]`
+sign-checked `WowTebOffset`-style field (also 0 in our pure-32-bit model, since
+there is no coexisting 64-bit TEB) selects this branch. Identifying the exact
+producer of `TlsSlots[10]` (a reference x86 WOW64 TEB dump would settle it) is the
+next step; a couple of secondary handlers still return unimplemented on the way
+there (`NtQuerySystemInformation` class 0x73, `NtWow64IsProcessorFeaturePresent`
+SSN 0x1E9) but are not the fatal path.
+
+**Remaining WOW64 work (mechanical continuation):** the other ~70 `Nt*` handlers
+gated `if (Architecture == x64)` still return unimplemented for x86 — each needs
+the same treatment (unify args via `GetArg64`, size OUT pointers/structs to the
+guest, fix `(HANDLE)-1` pseudo-handle comparisons). The pattern is established;
+extend it handler-by-handler as al-khaser's detection suite exercises them.
+
+#### Reproduction (x86)
+
+```bash
+# Deps: WindowsLibs/ (+ SysWOW64/), WinReg/, apisetmap.bin next to Brovan.dll.
+# Unicorn 2.1.4 is fetched by the build (or stage libunicorn.so into .cache).
+# UC_IGNORE_REG_BREAK=1 silences MODE_32 register-deprecation warnings on stderr.
+UC_IGNORE_REG_BREAK=1 printf 'start\nexit\n' | dotnet Brovan.dll al-khaser_x86.exe
+```
 
 ## Investigation method (for the next pass)
 

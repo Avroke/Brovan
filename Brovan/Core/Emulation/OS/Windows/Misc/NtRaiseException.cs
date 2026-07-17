@@ -11,9 +11,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Instance == null || Instance._binary == null || Instance.WinHelper == null)
                 return NTSTATUS.STATUS_UNSUCCESSFUL;
 
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return NTSTATUS.STATUS_NOT_IMPLEMENTED;
-
             ulong ExceptionRecordPtr = Instance.WinHelper.GetArg64(0);
             ulong ContextRecordPtr = Instance.WinHelper.GetArg64(1);
 
@@ -22,6 +19,49 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (ExceptionRecordPtr == 0 || ContextRecordPtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            const uint CONTEXT_CONTROL = 0x00000001;
+            const uint CONTEXT_INTEGER = 0x00000002;
+
+            // x86 (WOW64 / native-32): the EXCEPTION_RECORD (0x50) and CONTEXT (0x2CC) use the 32-bit layout
+            // and the CONTEXT is applied through the 32-bit register IDs (64-bit writes are no-ops in MODE_32).
+            uint ExceptionCode;
+            ulong[] Parameters;
+            if (Instance._binary.Architecture != BinaryArchitecture.x64)
+            {
+                if (!Instance.IsRegionMapped(ExceptionRecordPtr, 0x50) || !Instance.IsRegionMapped(ContextRecordPtr, 0x2CC))
+                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                uint CtxFlags32 = Instance.ReadMemoryUInt(ContextRecordPtr + 0x00);
+                const uint CONTEXT_i386 = 0x00010000;
+                if ((CtxFlags32 & CONTEXT_i386) == 0)
+                    return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+                ExceptionCode = Instance.ReadMemoryUInt(ExceptionRecordPtr + 0x00);
+                uint NumParams32 = Math.Min(Instance.ReadMemoryUInt(ExceptionRecordPtr + 0x10), 15u);
+                Parameters = NumParams32 == 0 ? Array.Empty<ulong>() : new ulong[NumParams32];
+                for (int i = 0; i < (int)NumParams32; i++)
+                    Parameters[i] = Instance.ReadMemoryUInt(ExceptionRecordPtr + 0x14UL + (ulong)(i * 4));
+
+                if ((CtxFlags32 & CONTEXT_INTEGER) != 0)
+                {
+                    Instance.WriteRegister32(Registers.UC_X86_REG_EDI, Instance.ReadMemoryUInt(ContextRecordPtr + 0x9C));
+                    Instance.WriteRegister32(Registers.UC_X86_REG_ESI, Instance.ReadMemoryUInt(ContextRecordPtr + 0xA0));
+                    Instance.WriteRegister32(Registers.UC_X86_REG_EBX, Instance.ReadMemoryUInt(ContextRecordPtr + 0xA4));
+                    Instance.WriteRegister32(Registers.UC_X86_REG_EDX, Instance.ReadMemoryUInt(ContextRecordPtr + 0xA8));
+                    Instance.WriteRegister32(Registers.UC_X86_REG_ECX, Instance.ReadMemoryUInt(ContextRecordPtr + 0xAC));
+                    Instance.WriteRegister32(Registers.UC_X86_REG_EAX, Instance.ReadMemoryUInt(ContextRecordPtr + 0xB0));
+                }
+                if ((CtxFlags32 & CONTEXT_CONTROL) != 0)
+                {
+                    Instance.WriteRegister32(Registers.UC_X86_REG_EBP, Instance.ReadMemoryUInt(ContextRecordPtr + 0xB4));
+                    Instance.WriteRegister32(Registers.UC_X86_REG_EIP, Instance.ReadMemoryUInt(ContextRecordPtr + 0xB8));
+                    Instance.WriteRegister32(Registers.UC_X86_REG_ESP, Instance.ReadMemoryUInt(ContextRecordPtr + 0xC4));
+                    Instance.WriteRegister32(Registers.UC_X86_REG_EFLAGS, Instance.ReadMemoryUInt(ContextRecordPtr + 0xC0));
+                }
+
+                return FinishRaise(Instance, ExceptionCode, Parameters);
+            }
 
             if (!Instance.IsRegionMapped(ExceptionRecordPtr, 0x98))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -32,18 +72,16 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint ContextFlags = (uint)Instance.ReadMemoryULong(ContextRecordPtr + 0x30);
 
             const uint CONTEXT_AMD64 = 0x00100000;
-            const uint CONTEXT_CONTROL = 0x00000001;
-            const uint CONTEXT_INTEGER = 0x00000002;
 
             if ((ContextFlags & CONTEXT_AMD64) == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            uint ExceptionCode = Instance.ReadMemoryUInt(ExceptionRecordPtr + 0x00);
+            ExceptionCode = Instance.ReadMemoryUInt(ExceptionRecordPtr + 0x00);
             uint NumberParameters = Instance.ReadMemoryUInt(ExceptionRecordPtr + 0x18);
             if (NumberParameters > 15)
                 NumberParameters = 15;
 
-            ulong[] Parameters = Array.Empty<ulong>();
+            Parameters = Array.Empty<ulong>();
             if (NumberParameters != 0)
             {
                 Parameters = new ulong[NumberParameters];
@@ -85,6 +123,15 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance.WriteRegister(Registers.UC_X86_REG_EFLAGS, EFlags);
             }
 
+            return FinishRaise(Instance, ExceptionCode, Parameters);
+        }
+
+        /// <summary>
+        /// Shared tail for both bitnesses: after the CONTEXT has been applied to the CPU, flag the thread for
+        /// exception dispatch (drained via InvokeException) and stop the loop so it re-enters at the handler.
+        /// </summary>
+        private static NTSTATUS FinishRaise(BinaryEmulator Instance, uint ExceptionCode, ulong[] Parameters)
+        {
             EmulatedThread CurrentThread = Instance.CurrentThread;
             if (CurrentThread == null)
                 return NTSTATUS.STATUS_UNSUCCESSFUL;

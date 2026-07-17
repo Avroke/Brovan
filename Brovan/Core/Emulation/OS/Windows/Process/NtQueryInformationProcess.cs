@@ -726,7 +726,86 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 }
                             }
                         }
+                    case PROCESSINFOCLASS.ProcessCookie:
+                        {
+                            // 4-byte DWORD on both bitnesses. The loader queries it early to seed
+                            // RtlEncodePointer; without it LdrpInitialize fails and raises a hard error.
+                            if (OutBufferLength < 4)
+                                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                            if (!Instance.IsRegionMapped(OutBufferPtr, 4))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                            if (Instance.ProcessCookie == 0)
+                                Instance.ProcessCookie = (uint)Instance.SeededRandom.Next(1, int.MaxValue);
+                            if (!Instance._emulator.WriteMemory(OutBufferPtr, Instance.ProcessCookie, 4))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                            SetReturnLength(4);
+                            return NTSTATUS.STATUS_SUCCESS;
+                        }
+                    case PROCESSINFOCLASS.ProcessDefaultHardErrorMode:
+                        {
+                            // ULONG on both bitnesses. Default hard-error mode = 1 (SEM enabled).
+                            if (OutBufferLength < 4)
+                                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                            if (!Instance.IsRegionMapped(OutBufferPtr, 4))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                            if (!Instance._emulator.WriteMemory(OutBufferPtr, 1u, 4))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                            SetReturnLength(4);
+                            return NTSTATUS.STATUS_SUCCESS;
+                        }
+                    case PROCESSINFOCLASS.ProcessExecuteFlags:
+                        {
+                            // ULONG MEM_EXECUTE_OPTION flags. The loader (LdrpInitializeExecutionOptions)
+                            // queries this to decide NX policy. 0 = no special flags (DEP default), which keeps
+                            // the loader on its normal path.
+                            if (OutBufferLength < 4)
+                                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                            if (!Instance.IsRegionMapped(OutBufferPtr, 4))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                            if (!Instance._emulator.WriteMemory(OutBufferPtr, 0u, 4))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                            SetReturnLength(4);
+                            return NTSTATUS.STATUS_SUCCESS;
+                        }
+                    case PROCESSINFOCLASS.ProcessImageInformation:
+                        {
+                            // x86 SECTION_IMAGE_INFORMATION — 0x30 bytes (the three pointer fields
+                            // TransferAddress / MaximumStackSize / CommittedStackSize are 4 wide). The loader
+                            // queries it to validate the main image; a failure here NULL-derefs LdrpInitialize.
+                            const uint StructSize = 0x30;
+                            if (OutBufferLength < StructSize)
+                                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                            if (!Instance.IsRegionMapped(OutBufferPtr, StructSize))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                            var Pe = Instance._binary.PE;
+                            uint TransferAddress = (uint)(Instance.WinHelper.WinModules[0].MappedBase + Instance._binary.EntryPoint);
+                            uint SubSystemVersion = ((uint)Pe.OptionalHeader32.MinorSubsystemVersion << 16) | (uint)Pe.OptionalHeader32.MajorSubsystemVersion;
+
+                            Span<byte> Buffer = GetSharedWriteBuffer(Instance, StructSize);
+                            WriteUInt32(Buffer, 0x00, TransferAddress);                 // TransferAddress
+                            WriteUInt32(Buffer, 0x04, 0u);                              // ZeroBits
+                            WriteUInt32(Buffer, 0x08, (uint)Instance.StackSize);        // MaximumStackSize
+                            WriteUInt32(Buffer, 0x0C, (uint)Instance.StackSize);        // CommittedStackSize
+                            WriteUInt32(Buffer, 0x10, (uint)Pe.OptionalHeader32.Subsystem); // SubSystemType
+                            WriteUInt32(Buffer, 0x14, SubSystemVersion);                // SubSystemVersion
+                            WriteUInt32(Buffer, 0x18, 0u);                              // GpValue
+                            WriteUInt16(Buffer, 0x1C, (ushort)Pe.FileHeader.Characteristics);        // ImageCharacteristics
+                            WriteUInt16(Buffer, 0x1E, (ushort)Pe.OptionalHeader32.DllCharacteristics); // DllCharacteristics
+                            WriteUInt16(Buffer, 0x20, (ushort)Pe.FileHeader.Machine);   // Machine
+                            Buffer[0x22] = 1;                                           // ImageContainsCode
+                            Buffer[0x23] = 0;                                           // ImageFlags
+                            WriteUInt32(Buffer, 0x24, 0u);                              // LoaderFlags
+                            WriteUInt32(Buffer, 0x28, 0u);                              // ImageFileSize
+                            WriteUInt32(Buffer, 0x2C, 0u);                              // CheckSum
+
+                            if (!Instance.WriteMemory(OutBufferPtr, Buffer))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                            SetReturnLength(StructSize);
+                            return NTSTATUS.STATUS_SUCCESS;
+                        }
                     default:
+                        Instance.TriggerEventMessage($"[!] NtQueryInformationProcess (x86): InfoClass {InfoClass} (0x{(int)InfoClass:X}) not implemented", LogFlags.Issues);
                         return Instance.WinUnimplemented;
                 }
             }

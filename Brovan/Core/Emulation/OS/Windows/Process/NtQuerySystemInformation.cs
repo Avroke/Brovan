@@ -9,7 +9,11 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
+            // Runs for both bitnesses. Arguments come through GetArg64 (bitness-aware) and the class handlers
+            // that emit pointer-sized fields branch on Architecture internally (SystemBasicInformation,
+            // SystemKernelDebugger, …). This unblocks the WOW64 loader, which queries SystemBasicInformation
+            // early; class-by-class 32-bit struct-size refinements are tracked separately.
+            if (Instance._binary.Architecture == BinaryArchitecture.x64 || Instance._binary.Architecture == BinaryArchitecture.x86)
             {
                 SYSTEM_INFORMATION_CLASS SystemInformationClass = (SYSTEM_INFORMATION_CLASS)Instance.WinHelper.GetArg64(0);
                 ulong SystemInformationPtr = Instance.WinHelper.GetArg64(1);
@@ -466,7 +470,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                     case SYSTEM_INFORMATION_CLASS.SystemEmulationBasicInformation:
                     case SYSTEM_INFORMATION_CLASS.SystemBasicInformation:
                         {
-                            uint RequiredLength = 0x40;
+                            // SYSTEM_BASIC_INFORMATION has three ULONG_PTR/KAFFINITY tail fields
+                            // (MinimumUserModeAddress, MaximumUserModeAddress, ActiveProcessorsAffinityMask)
+                            // that are 8 bytes on x64 / 4 bytes on x86 — so the struct is 0x40 vs 0x2C and the
+                            // WOW64 loader passes a 44-byte buffer. Size the tail to the guest.
+                            bool Wow64 = Instance._binary.Architecture != BinaryArchitecture.x64;
+                            uint RequiredLength = Wow64 ? 0x2Cu : 0x40u;
                             if (SystemInformationLength < RequiredLength)
                             {
                                 if (ReturnLengthPtr != 0)
@@ -494,10 +503,20 @@ namespace Brovan.Core.Emulation.OS.Windows
                             Instance._emulator.WriteMemory(SystemInformationPtr + 0x14, HighestPhysicalPageNumber);
                             Instance._emulator.WriteMemory(SystemInformationPtr + 0x18, AllocationGranularity);
 
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x20, Instance.BaseAddress);
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x28, Instance.MaxAddress);
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x30, 0x1);
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x38, (byte)Environment.ProcessorCount);
+                            if (Wow64)
+                            {
+                                Instance._emulator.WriteMemory(SystemInformationPtr + 0x1C, (uint)Instance.BaseAddress);  // MinimumUserModeAddress
+                                Instance._emulator.WriteMemory(SystemInformationPtr + 0x20, (uint)Instance.MaxAddress);   // MaximumUserModeAddress
+                                Instance._emulator.WriteMemory(SystemInformationPtr + 0x24, 0x1u);                        // ActiveProcessorsAffinityMask
+                                Instance._emulator.WriteMemory(SystemInformationPtr + 0x28, (byte)Environment.ProcessorCount);
+                            }
+                            else
+                            {
+                                Instance._emulator.WriteMemory(SystemInformationPtr + 0x20, Instance.BaseAddress);
+                                Instance._emulator.WriteMemory(SystemInformationPtr + 0x28, Instance.MaxAddress);
+                                Instance._emulator.WriteMemory(SystemInformationPtr + 0x30, 0x1);
+                                Instance._emulator.WriteMemory(SystemInformationPtr + 0x38, (byte)Environment.ProcessorCount);
+                            }
 
                             if (ReturnLengthPtr != 0)
                             {
@@ -624,10 +643,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                             Instance.TriggerEventMessage($"[!] Unsupported NtQuerySystemInformation class: 0x{SystemInformationClass:X}", LogFlags.Issues);
                         break;
                 }
-            }
-            else if (Instance._binary.Architecture == BinaryArchitecture.x86)
-            {
-
             }
             return Instance.WinUnimplemented;
         }

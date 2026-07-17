@@ -1633,8 +1633,15 @@ namespace Brovan.Core.Emulation
             }
             else
             {
-                string NtdllPath = Path.Combine(GeneralHelper.WindowsLibsPath, "ntdll.dll");
-                string Win32uPath = Path.Combine(GeneralHelper.WindowsLibsPath, "win32u.dll");
+                // A 32-bit (WOW64) guest must source its system-call numbers from the 32-bit ntdll in the
+                // SysWOW64 view — its Nt* stubs carry the WOW64 SSNs (which happen to match the native x64
+                // numbers on current builds, but reading the correct image keeps this robust across builds
+                // and win32u, whose numbering can differ per bitness). x64 keeps the flat view.
+                string NtdllDir = BinaryArch == BinaryArchitecture.x86
+                    ? Path.Combine(GeneralHelper.WindowsLibsPath, "SysWOW64")
+                    : GeneralHelper.WindowsLibsPath;
+                string NtdllPath = Path.Combine(NtdllDir, "ntdll.dll");
+                string Win32uPath = Path.Combine(NtdllDir, "win32u.dll");
 
                 if (!File.Exists(NtdllPath))
                 {

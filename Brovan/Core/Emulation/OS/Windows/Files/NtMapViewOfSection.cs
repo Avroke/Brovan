@@ -94,7 +94,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
+            // Bitness-agnostic: args via GetArg64; BaseAddress (PVOID*) and ViewSize (PSIZE_T) are pointer-sized.
+            // SectionOffset is a LARGE_INTEGER (8 bytes on both). Needed for the WOW64 loader to map DLL views.
+            if (Instance._binary.Architecture != BinaryArchitecture.x64 && Instance._binary.Architecture != BinaryArchitecture.x86)
                 return Instance.WinUnimplemented;
 
             ulong SectionHandle = Instance.WinHelper.GetArg64(0);
@@ -108,13 +110,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint AllocationType = (uint)Instance.WinHelper.GetArg64(8);
             uint Win32Protect = (uint)Instance.WinHelper.GetArg64(9);
 
-            if (ProcessHandle != ulong.MaxValue)
+            if (!Instance.WinHelper.IsCurrentProcessPseudoHandle(ProcessHandle))
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
             if (BaseAddressPtr == 0 || ViewSizePtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (!Instance.IsRegionMapped(BaseAddressPtr, 8) || !Instance.IsRegionMapped(ViewSizePtr, 8))
+            if (!Instance.IsRegionMapped(BaseAddressPtr, (ulong)Instance.GuestPointerSize) || !Instance.IsRegionMapped(ViewSizePtr, (ulong)Instance.GuestPointerSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             WinSection Section = Instance.WinHelper.GetSectionByHandle(SectionHandle, AccessMask.GiveTemp);
@@ -140,8 +142,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance._emulator.WriteMemory(Instance.PEB + 0x380, Base, 8);
                 Instance._emulator.WriteMemory(Instance.PEB + 0x90, Base + 0x3000, 8);
 
-                Instance._emulator.WriteMemory(BaseAddressPtr, Base, 8);
-                Instance._emulator.WriteMemory(ViewSizePtr, Size, 8);
+                Instance.WritePointer(BaseAddressPtr, Base);
+                Instance.WritePointer(ViewSizePtr, Size);
 
                 if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                     Instance.TriggerEventMessage($"[+] NtMapViewOfSection: SharedSection Base=0x{Base:X}, Size=0x{Size:X}", LogFlags.Syscall);
@@ -149,8 +151,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            ulong RequestedBase = Instance._emulator.ReadMemoryULong(BaseAddressPtr);
-            ulong RequestedSize = Instance._emulator.ReadMemoryULong(ViewSizePtr);
+            ulong RequestedBase = Instance.ReadPointer(BaseAddressPtr);
+            ulong RequestedSize = Instance.ReadPointer(ViewSizePtr);
 
             ulong SectionOffset = 0;
             if (SectionOffsetPtr != 0)
@@ -212,10 +214,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (RequestedSize != 0 && RequestedSize < ReturnedSize)
                         ReturnedSize = BinaryEmulator.AlignUp(RequestedSize, PageSize);
 
-                    if (!Instance._emulator.WriteMemory(BaseAddressPtr, ReturnedBase, 8))
+                    if (!Instance.WritePointer(BaseAddressPtr, ReturnedBase))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                    if (!Instance._emulator.WriteMemory(ViewSizePtr, ReturnedSize, 8))
+                    if (!Instance.WritePointer(ViewSizePtr, ReturnedSize))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                     NTSTATUS Status = NTSTATUS.STATUS_SUCCESS;
@@ -250,10 +252,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             MemoryProtection Protection = Instance.WinHelper.ConvertWinProtectToInternal(Win32Protect);
             Instance._emulator.SetMemoryProtection(ReturnedBase, ReturnedSize, Protection);
 
-            if (!Instance._emulator.WriteMemory(BaseAddressPtr, ReturnedBase, 8))
+            if (!Instance.WritePointer(BaseAddressPtr, ReturnedBase))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (!Instance._emulator.WriteMemory(ViewSizePtr, ReturnedSize, 8))
+            if (!Instance.WritePointer(ViewSizePtr, ReturnedSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
