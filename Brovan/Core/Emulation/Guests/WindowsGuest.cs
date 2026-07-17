@@ -875,6 +875,14 @@ namespace Brovan.Core.Emulation.Guests
                 Instance._emulator.WriteMemory(Teb + 0x30, (uint)PEB);                                     // ProcessEnvironmentBlock
                 Instance._emulator.WriteMemory(Teb + 0x34, 0u);                                            // LastErrorValue
 
+                // TEB+0x60 = PEB. Not the documented x86 field (PEB is at +0x30 on x86), but the WOW64 GDI
+                // client code in gdi32full is compiled from the shared x64 source and reaches the PEB via the
+                // x64 layout: `mov ecx,[TEB+0xFDC]` (the delta from the 32-bit TEB to the 64-bit TEB) then
+                // `mov reg,[base+0x60]` (x64 TEB.ProcessEnvironmentBlock) → `[PEB+0xF8]` (GdiSharedHandleTable).
+                // Brovan models a single PEB and leaves TEB+0xFDC at 0 (so base stays this TEB), so publishing
+                // the PEB pointer at TEB+0x60 lets that chain resolve without a separate 64-bit TEB shadow.
+                Instance._emulator.WriteMemory(Teb + 0x60, (uint)PEB);
+
                 // WOW32Reserved (fs:[0xC0]) — the WOW64 system-call transition pointer. A 32-bit ntdll Nt*
                 // stub reaches the kernel through `call fs:[0xC0]` (or the sibling `jmp [Wow64Transition]`).
                 // Point it at our syscall trampoline so the transition dispatches to the C# handler.
@@ -1551,6 +1559,28 @@ namespace Brovan.Core.Emulation.Guests
             Instance._emulator.WriteMemory(ProcessParams + 0x4, Length, 4);                          // Length
 
             SetupCsrReadOnlySharedSection32(Instance);
+            SetupGdiSharedHandleTable32(Instance);
+        }
+
+        /// <summary>
+        /// Allocates the GDI shared handle table and publishes it at <c>PEB+0xF8</c> (the offset both
+        /// <see cref="WinSyscallsHelper.EnsureGdiHandleTable"/> and gdi32full's client init read). gdi32full's
+        /// per-thread GDI init walks <c>[TEB+0x60] (=PEB) → [PEB+0xF8] (=this table) → [table+0x180094]</c> and
+        /// aborts its DllMain if the deref faults; the table therefore has to be a mapped region large enough to
+        /// cover that offset. A fresh process's table is all-zero (no live GDI objects), which is exactly the
+        /// "no stale handle" path gdi32full's `cmp [table+0x180094], 0; je` takes. The region is sized past the
+        /// real GDI_MAX_HANDLE reserve so later client-side handle lookups stay in bounds. WOW64-only — x64
+        /// leaves PEB+0xF8 as it was.
+        /// </summary>
+        private void SetupGdiSharedHandleTable32(BinaryEmulator Instance)
+        {
+            // Big enough to cover gdi32full's 0x180094 client read with headroom for the handle array.
+            const ulong GdiSharedTableSize = 0x200000;
+            ulong Table = Instance.MapUniqueAddress(GdiSharedTableSize, MemoryProtection.ReadWrite);
+            if (Table == 0)
+                return;
+
+            Instance._emulator.WriteMemory(PEB + 0xF8, (uint)Table);
         }
 
         /// <summary>

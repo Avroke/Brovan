@@ -1525,7 +1525,8 @@ the guest ntdll's `mov eax, imm32` stub prologues, now from `WindowsLibs/SysWOW6
 | `NtSetInformationVirtualMemory` + `NtQueryInformationProcess(ProcessMitigationPolicy)` → WOW64 | CFG registration + mitigation query succeed (advisory) → later-DLL init |
 | user32 win32k client-connect (`NtUserProcessConnect`, syscall 0x2000) + SHAREDINFO | user32 DllMain passes the connect → **~9.98M** |
 | WOW64 registry family (`NtOpenKey`/`NtQueryValueKey`/… ×13) | registry works on x86 (prereq for the detection phase) |
-| *(open)* gdi32full per-thread GDI `CLIENTINFO` (`TEB+0x60`) | current terminus — GDI client subsystem, see frontier below |
+| gdi32full GDI shared handle table (`TEB+0x60`=PEB, `PEB+0xF8`=table) | gdi32full GDI init completes → **~11.15M** |
+| *(open)* ntdll `[0x14]` deref @ `0x4B2DF583` + win32k `0x1037` | current terminus — see frontier below |
 
 #### Resolved this pass (each fix is a generic WOW64 fidelity correction)
 
@@ -1649,25 +1650,30 @@ SERVERINFO/handle-table the x64 CSR `HandleUserSrvConnect` builds) and returns
 `STATUS_SUCCESS`. user32 now passes the connect + the `test byte [psi],4` deref,
 advancing **~9.94M → ~9.98M** instructions.
 
-**Next frontier — gdi32full's per-thread GDI `CLIENTINFO` (the current fatal deref).**
-Pinned precisely: the fault is in **`gdi32full.dll`** (the ~2.1 MB module the WOW64
-loader maps at `~0x10320000`; fault IP `0x1044AF1C`). Its per-thread GDI init reads
-`mov eax, fs:[18h]` (32-bit TEB, confirmed at `0x10016000`) → `mov ecx, [TEB+0xFDC]`
-(== 0, so the `jns`/`add` keeps the base at the TEB) → `mov eax, [TEB+0x60]` (== 0,
-the NULL) → `mov eax, [eax+0xF8]` (**faults**) → `cmp [eax+0x180094], …`. `TEB+0x60`
-is the per-thread GDI client-info pointer (`CLIENTINFO`/`pti`) that win32k sets on GDI
-thread-attach; it is NULL because Brovan never wires it for WOW64. The chain is a
-multi-level structure walk — `CLIENTINFO → [+0xF8] → [+0x180094]` — and `0x180094` is
-an index into the **GDI shared handle table** (0x10-byte x86 entries ⇒ ~98 K entries,
-a deliberately large reserve). The emulator already builds that table
-(`WinSyscallsHelper.EnsureGdiHandleTable` / `GdiHandleTableAddress`, used by the x64
-`HandleUserSrvConnect` path), so the remaining work is (a) allocate + zero a 32-bit
-`CLIENTINFO`, wire `TEB+0x60` (and likely `TEB+0x40` `Win32ThreadInfo`) to it during
-the WOW64 TEB/connect setup, and (b) populate the `CLIENTINFO` fields gdi32full walks
-(`[+0xF8]` → the GDI shared base, with a valid entry at `+0x180094`). This needs the
-exact 32-bit `CLIENTINFO` layout reverse-engineered from gdi32full — a bounded but
-non-trivial GDI-client-state piece; guessing the offsets would only move the fault a
-few dereferences deeper, so it wants a dedicated pass, not an incremental patch.
+**Resolved — gdi32full's GDI shared-handle-table access (`TEB+0x60` → `PEB+0xF8`).**
+The fault was in **`gdi32full.dll`** (RVA `0x5DF07`, guest IP `0x1044AF1C`). Its GDI
+init reads `mov eax, fs:[18h]` (32-bit TEB `0x10016000`) → `mov ecx, [TEB+0xFDC]`
+(== 0) → `mov eax, [TEB+0x60]` → `mov eax, [eax+0xF8]` (**faulted**) →
+`cmp [eax+0x180094], 0; je`. Disassembling the function showed the `je`-taken path is
+the fresh-process path (no stale GDI handle to clean up), so it only needs the chain
+to resolve to a mapped, zeroed region. The chain is the **shared x64 source**: on x64
+`TEB+0x60` is `TEB.ProcessEnvironmentBlock` and `[PEB+0xF8]` is `GdiSharedHandleTable`
+— the 32-bit gdi32full uses those same offsets and reaches the PEB via the
+`[TEB+0xFDC]` 32→64-bit-TEB delta (0 in Brovan's single-TEB model). Fix, WOW64-only:
+`AllocateAndInitializeTEB` now publishes `TEB+0x60 = PEB` (mirroring the x64 TEB), and
+`SetupGdiSharedHandleTable32` allocates a 0x200000 zeroed GDI shared handle table and
+writes its base to `PEB+0xF8` (the offset `EnsureGdiHandleTable` already reads) — sized
+past gdi32full's `0x180094` client read. gdi32full's per-thread GDI init now completes;
+al-khaser advances **~9.98M → ~11.15M** instructions. x64 is untouched (its `TEB+0x60`
+was already the PEB; `PEB+0xF8` stays as it was).
+
+**Next frontier — ntdll fault at `0x4B2DF583` (`[0x14]` near-NULL deref).** With GDI
+init cleared the run reaches a fresh terminus: an unmapped read of `0x14` at ntdll RVA
+`0x5F583` — a `[ptr+0x14]` deref where `ptr ≈ 0`. Nearby the run also hits an
+unimplemented **win32k syscall `0x1037`** (a real `NtUser*`/`NtGdi*` the emulator's
+win32u scan didn't bind) and more `NtQuerySystemInformationEx` (0x161) /
+`NtQuerySystemInformation` class 0x73 `NOT_SUPPORTED`; which of these is the fatal one
+needs the usual caller-return-address pinpointing.
 
 The **x86 registry** sibling gap is now closed (see below).
 
