@@ -35,6 +35,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.WinHelper.UnmapViewOfSection(BaseAddress))
                 return NTSTATUS.STATUS_INVALID_ADDRESS;
 
+            Instance.WinHelper.LdrTracker?.NotifyImageMapped();
+
             if (Flags == 0 && string.Equals(SyscallName, nameof(NtUnmapViewOfSection), StringComparison.Ordinal))
                 if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                     Instance.TriggerEventMessage($"[+] NtUnmapViewOfSection: Base=0x{BaseAddress:X}", LogFlags.Syscall);

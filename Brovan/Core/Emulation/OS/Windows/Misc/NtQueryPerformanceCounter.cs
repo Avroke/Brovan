@@ -23,8 +23,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (PerformanceCounterPtr != 0)
                 {
-                    ulong CounterValue = (ulong)System.Diagnostics.Stopwatch.GetTimestamp();
-                    Instance._emulator.WriteMemory(PerformanceCounterPtr, CounterValue, 0);
+                    Instance._emulator.WriteMemory(PerformanceCounterPtr, WinSysHelper.QueryPerformanceCounterValue(), 0);
                 }
 
                 if (PerformanceFrequencyPtr != 0 && !Instance.IsRegionMapped(PerformanceFrequencyPtr, 8))
@@ -33,7 +32,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
                 else
                 {
-                    Instance._emulator.WriteMemory(PerformanceFrequencyPtr, 10000000UL);
+                    Instance._emulator.WriteMemory(PerformanceFrequencyPtr, (ulong)KuserSharedDataManager.QpcFrequency);
                 }
                 return NTSTATUS.STATUS_SUCCESS;
             }

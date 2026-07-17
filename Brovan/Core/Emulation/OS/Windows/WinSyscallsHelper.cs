@@ -1005,6 +1005,19 @@ namespace Brovan.Core.Emulation.OS.Windows
         public List<WinModule> MappedImageViews = new List<WinModule>();
         private readonly Dictionary<string, int> ImageViewCountsByPath = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         internal KuserSharedDataManager KuserSharedData;
+
+        /// <summary>
+        /// Current performance counter, in the units <see cref="KuserSharedDataManager.QpcFrequency"/> claims.
+        /// </summary>
+        internal static ulong QueryPerformanceCounterValue()
+        {
+            long Ticks = System.Diagnostics.Stopwatch.GetTimestamp();
+            long HostFrequency = System.Diagnostics.Stopwatch.Frequency;
+            if (HostFrequency == KuserSharedDataManager.QpcFrequency)
+                return (ulong)Ticks;
+
+            return (ulong)((decimal)Ticks * KuserSharedDataManager.QpcFrequency / HostFrequency);
+        }
         internal HandleManager HandleManager = new HandleManager();
         private static string WinRegPath = Path.Combine(AppContext.BaseDirectory, "WinReg");
         public RegistryManager RegManager = new RegistryManager(WinRegPath);
@@ -2206,6 +2219,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         public void AddModule(WinModule Module, bool TriggerMessage)
         {
             bool Finished = false;
+
+            LdrTracker?.NotifyImageMapped();
+
             try
             {
                 Finished = true;
