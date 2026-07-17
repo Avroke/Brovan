@@ -931,6 +931,11 @@ namespace Brovan
         {
             private static readonly object WindowsLibsIndexLock = new();
             private static Dictionary<string, string> WindowsLibsFileIndex;
+            // Case-insensitive leaf index restricted to the SysWOW64 sub-view. The flat index above walks the
+            // whole tree "first hit wins", so a leaf that ships in both views (kernel32.dll / ntdll.dll / …)
+            // resolves to whichever the enumeration hit first — usually the flat 64-bit copy. A WOW64 guest that
+            // resolves such a leaf must get the 32-bit SysWOW64 image; this index is consulted first for that.
+            private static Dictionary<string, string> WindowsLibsSysWow64FileIndex;
 
             private static readonly object DriveMapLock = new();
             private static readonly Dictionary<char, string> DriveMappings = new();
@@ -3044,18 +3049,20 @@ namespace Brovan
                 // same leaf (ntdll.dll / kernel32.dll / … exist in both views). The flat leaf index is
                 // "first hit wins" over a recursive walk, so without this probe a 32-bit guest could bind
                 // the wrong bitness depending on enumeration order.
+                EnsureWindowsLibsIndex();
+
+                // WOW64 view: bind the 32-bit SysWOW64 image for any leaf that ships there, case-insensitively
+                // (the guest sends e.g. KERNEL32.DLL while the shipped file is kernel32.dll — a plain
+                // File.Exists on the case-preserving name misses on a case-sensitive host and would fall through
+                // to the flat 64-bit copy, which then loads as STATUS_INVALID_IMAGE_FORMAT into a 32-bit process).
                 if (Wow64GuestView)
                 {
-                    string Wow64Candidate = Path.Combine(WindowsLibsPath, "SysWOW64", Leaf);
-                    if (File.Exists(Wow64Candidate))
+                    lock (WindowsLibsIndexLock)
                     {
-                        string Full = GetSandboxedFullPath(Wow64Candidate, CreateDirectories: false);
-                        if (!string.IsNullOrEmpty(Full))
-                            return Full;
+                        if (WindowsLibsSysWow64FileIndex != null && WindowsLibsSysWow64FileIndex.TryGetValue(Leaf, out string Wow64Found))
+                            return Wow64Found;
                     }
                 }
-
-                EnsureWindowsLibsIndex();
 
                 lock (WindowsLibsIndexLock)
                 {
@@ -3077,11 +3084,15 @@ namespace Brovan
                         return;
 
                     WindowsLibsFileIndex = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    WindowsLibsSysWow64FileIndex = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
                     try
                     {
                         if (!Directory.Exists(WindowsLibsPath))
                             return;
+
+                        string SysWow64Dir = Path.Combine(WindowsLibsPath, "SysWOW64");
+                        bool HasSysWow64 = Directory.Exists(SysWow64Dir);
 
                         foreach (string FilePath in Directory.EnumerateFiles(WindowsLibsPath, "*", SearchOption.AllDirectories))
                         {
@@ -3095,6 +3106,17 @@ namespace Brovan
                                 string Full = GetSandboxedFullPath(FilePath, CreateDirectories: false);
                                 if (!string.IsNullOrEmpty(Full))
                                     WindowsLibsFileIndex[Leaf] = Full;
+                            }
+
+                            // Separately index the SysWOW64 sub-view so a WOW64 leaf resolves to the 32-bit image
+                            // regardless of case (the guest sends KERNEL32.DLL; the shipped file is kernel32.dll).
+                            if (HasSysWow64 &&
+                                FilePath.StartsWith(SysWow64Dir + Path.DirectorySeparatorChar, StringComparison.Ordinal) &&
+                                !WindowsLibsSysWow64FileIndex.ContainsKey(Leaf))
+                            {
+                                string Full = GetSandboxedFullPath(FilePath, CreateDirectories: false);
+                                if (!string.IsNullOrEmpty(Full))
+                                    WindowsLibsSysWow64FileIndex[Leaf] = Full;
                             }
                         }
                     }
