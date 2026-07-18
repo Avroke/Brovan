@@ -1529,7 +1529,8 @@ the guest ntdll's `mov eax, imm32` stub prologues, now from `WindowsLibs/SysWOW6
 | **IO_STATUS_BLOCK sized 16→8 bytes on x86 (`WriteIoStatusBlock` now bitness-aware)** | the 16-byte x64 write overran the 8-byte guest struct and zeroed an adjacent live `RTL_CRITICAL_SECTION`'s `DebugInfo` → the `RtlEnterCriticalSection DebugInfo==0` fault; **root cause of the F5 terminus** |
 | `NtOpenFile` / `NtDeviceIoControlFile` / `NtWriteFile` / `NtTerminateProcess` → WOW64 | file+terminate syscalls run on x86 → DLL init clears `DLL_INIT_FAILED`; al-khaser reaches **`main()`** and prints results → **~14.27M**, Init / TLS-Callbacks / Debugger-Detection sections, 14 GOOD |
 | `NtQueryInformationProcess(ProcessDebugObjectHandle/ProcessDebugFlags)` → WOW64 | x86 debug-object probe returns `STATUS_PORT_NOT_SET` (no debugger) → BAD→GOOD (**15 GOOD / 3 BAD**) |
-| *(open)* al-khaser `UnhandledExcepFilterTest` terminates the process | `SetUnhandledExceptionFilter` probe: `RaiseException(0xC000008E)` should reach the registered filter via `UnhandledExceptionFilter`, but the WOW64 SEH dispatch doesn't invoke it → process exits with the exception code; see below |
+| `NtQueryVirtualMemory(MemoryRegionInformation)` → WOW64 | class-3 query used by `SetUnhandledExceptionFilter`'s filter validator now works on x86 → the registered filter is stored and **actually runs** (was: filter dropped → `UnhandledExcepFilterTest` killed the process at `0xC000008E`) |
+| *(open)* `0xC0000409` (STACK_BUFFER_OVERRUN / `__fastfail`) after the filter resumes | new terminus — the `EXCEPTION_CONTINUE_EXECUTION` resume from `UnhandledExcepFilterTest` lands with a corrupted stack (GS-cookie fail-fast); see below |
 
 #### Resolved this pass (each fix is a generic WOW64 fidelity correction)
 
@@ -1717,28 +1718,39 @@ also consults. Both classes are now implemented on x86 mirroring the x64 branch
 (`ProcessDebugObjectHandle` → NULL handle + `STATUS_PORT_NOT_SET`; `ProcessDebugFlags` →
 `1` = no-debug). That flips the direct probe BAD→GOOD (**15 GOOD / 3 BAD**).
 
-**Next frontier — the `UnhandledExcepFilterTest` process termination (WOW64 SEH
-dispatch).** Even with the debug-object probe fixed, `RaiseException(0xC000008E)` still
-terminates the process with that exit code. Instrumenting the dispatch confirmed the
-32-bit `FS:[0]` SEH chain is intact and readable — three frames, innermost
-`handler=0x415D68` (the statically-linked CRT `_except_handler4` for `__scrt_common_main_seh`,
-whose filter calls `UnhandledExceptionFilter` → the `SetUnhandledExceptionFilter`-registered
-filter `0x40ee00`). Yet `0x40ee00` is **never executed** (no CFT/cross-module call to it),
-while `UnhandledExceptionFilter`'s WER path *does* run (AeDebug-key `NtOpenKey`,
-`NtQuerySystemInformation`, error-report `NtAllocateVirtualMemory`), so the top-level filter
-decodes to NULL / is skipped and the default WER path returns `EXECUTE_HANDLER` → the CRT
-`__except` runs `_exit(code)`. `SetUnhandledExceptionFilter` / `UnhandledExceptionFilter` /
-`RtlEncodePointer` / `RtlDecodePointer` all run as real guest code and `ProcessCookie` is
-stable, so the encoded-pointer round-trip *should* survive — the open question is why the
-CRT `_except_handler4` frame's filter (or `UnhandledExceptionFilter`'s
-`BasepCurrentTopLevelFilter` read) doesn't reach `0x40ee00`. The exception is raised from
-heap-copied code (`ExceptionAddress = 0x1052xxxx`, al-khaser runs its checks from RWX
-allocations), a likely-relevant wrinkle for the CRT frame's try-level/scope-table check.
-x64 handles this same probe (it is in the 244-GOOD suite), so it is specific to the
-32-bit SEH-dispatch path. Next step: single-step `RtlDispatchException` to see which
-handler is invoked and what each returns. Nearby non-fatal gaps still `NOT_SUPPORTED` on
-x86: `NtQueryInformationThread` (ThreadHideFromDebugger / ThreadDynamicCodePolicyInfo),
-`NtQueryVirtualMemory` (MemoryRegionInformation), `NtQueryInformationFile`, syscall `0x1E9`.
+**Resolved — the `UnhandledExcepFilterTest` filter never ran because
+`NtQueryVirtualMemory(MemoryRegionInformation)` was unimplemented on x86.** Even with the
+debug-object probe fixed, `RaiseException(0xC000008E)` still terminated the process.
+Instrumenting the dispatch confirmed the 32-bit `FS:[0]` SEH chain is intact (innermost
+`handler=0x415D68`, the CRT `_except_handler4`), and that `UnhandledExceptionFilter` runs but
+never calls the registered filter `0x40ee00`. Disassembling the **SysWOW64 kernelbase**
+`SetUnhandledExceptionFilter` (RVA `0x126210`) revealed its hardened filter validator
+(`0x10126311`): it `VirtualQuery`s the filter's page and — on the caching path — issues a
+**second** `NtQueryVirtualMemory` with **class 3 (`MemoryRegionInformation`)**, failing the
+whole validation (`js` on the returned `NTSTATUS`) if that errors. Brovan returned
+`STATUS_NOT_SUPPORTED` for `MemoryRegionInformation` on x86 (the "class MemoryRegionInformation
+not implemented" trace line), so the validator returned 0 → `SetUnhandledExceptionFilter`
+**silently dropped the filter** (`neg;sbb;and esi,eax` zeroes it) → `UnhandledExceptionFilter`
+found no filter → WER / `EXECUTE_HANDLER` → `_exit(0xC000008E)`. `MemoryRegionInformation` is
+now implemented on x86 (the handler existed but was x64-gated and serialized the 0x30-byte
+x64 struct; it is now in the WOW64-allowed set and writes the **0x1C-byte** x86 layout — the
+validator passes a 0x1C buffer, so a 0x30 requirement wrongly tripped `INFO_LENGTH_MISMATCH`).
+The filter `0x40ee00` now executes (its `ret 4` at `0x40EE0D` returns into
+`UnhandledExceptionFilter`) and al-khaser runs past the probe. x64 untouched (its
+`MemoryRegionInformation` path is unchanged).
+
+**Next frontier — `0xC0000409` (STACK_BUFFER_OVERRUN / `__fastfail`) after the filter
+resumes.** With the filter running, `UnhandledExcepFilterTest`'s
+`EXCEPTION_CONTINUE_EXECUTION` resume proceeds but the process then fail-fasts with
+`0xC0000409` — no `NtRaiseException` precedes it (it goes straight to `NtTerminateProcess`, the
+`int 0x29` fast-fail signature), before the probe prints its verdict. The likely cause is that
+the resume restores a subtly-wrong CPU context (ESP / a callee-saved register), so the CRT
+`__security_check_cookie` in the resuming frame sees a corrupted GS cookie and calls
+`__report_gsfailure`. Next step: capture the CONTEXT `DispatchExceptionX86` builds vs. what
+`NtContinue` restores across the `CONTINUE_EXECUTION` path and find the mismatched field.
+Nearby non-fatal gaps still `NOT_SUPPORTED` on x86: `NtQueryInformationThread`
+(ThreadHideFromDebugger / ThreadDynamicCodePolicyInfo), `NtQueryInformationFile`,
+`NtQuerySystemInformation` class `0x73`, syscall `0x1E9`.
 
 The **x86 registry** sibling gap is now closed (see below).
 

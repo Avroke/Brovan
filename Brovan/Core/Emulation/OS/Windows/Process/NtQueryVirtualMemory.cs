@@ -75,6 +75,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     MemoryInformationClass != MEMORY_INFORMATION_CLASS.MemoryBasicInformation &&
                     MemoryInformationClass != MEMORY_INFORMATION_CLASS.MemoryPrivilegedBasicInformation &&
                     MemoryInformationClass != MEMORY_INFORMATION_CLASS.MemoryImageInformation &&
+                    MemoryInformationClass != MEMORY_INFORMATION_CLASS.MemoryRegionInformation &&
                     MemoryInformationClass != MEMORY_INFORMATION_CLASS.MemoryWorkingSetExInformation)
                 {
                     Instance.TriggerEventMessage($"[!] NtQueryVirtualMemory (x86): class {MemoryInformationClass} not implemented", LogFlags.Issues);
@@ -443,7 +444,12 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (MemoryInformationClass == MEMORY_INFORMATION_CLASS.MemoryRegionInformation)
                 {
-                    ulong RequiredLength = (ulong)StructSerializer.GetStructSize<MEMORY_REGION_INFORMATION>(Instance);
+                    // MEMORY_REGION_INFORMATION: three pointer-sized fields (AllocationBase / RegionSize /
+                    // CommitSize / PartitionId / NodePreference) ⇒ 0x1C on x86, 0x30 on x64. GetStructSize
+                    // always reports the x64 size, so size to the guest bitness explicitly — a 32-bit caller
+                    // passes a 0x1C buffer (kernelbase!SetUnhandledExceptionFilter's filter validator does
+                    // exactly this), and a 0x30 requirement would wrongly reject it with INFO_LENGTH_MISMATCH.
+                    ulong RequiredLength = Wow64 ? 0x1CUL : 0x30UL;
 
                     if (ReturnLength != 0)
                     {
@@ -520,13 +526,27 @@ namespace Brovan.Core.Emulation.OS.Windows
                     };
 
                     Span<byte> Data = Instance.WinHelper.Shared.GetSpan(RequiredLength);
-                    BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x00, 8), Info.AllocationBase);
-                    BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x08, 4), Info.AllocationProtect);
-                    BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x0C, 4), Info.RegionType);
-                    BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x10, 8), Info.RegionSize);
-                    BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x18, 8), Info.CommitSize);
-                    BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x20, 8), Info.PartitionId);
-                    BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x28, 8), Info.NodePreference);
+                    if (Wow64)
+                    {
+                        // x86 MEMORY_REGION_INFORMATION — 0x1C bytes, pointer fields 4-wide.
+                        BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x00, 4), (uint)Info.AllocationBase);
+                        BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x04, 4), Info.AllocationProtect);
+                        BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x08, 4), Info.RegionType);
+                        BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x0C, 4), (uint)Info.RegionSize);
+                        BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x10, 4), (uint)Info.CommitSize);
+                        BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x14, 4), (uint)Info.PartitionId);
+                        BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x18, 4), (uint)Info.NodePreference);
+                    }
+                    else
+                    {
+                        BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x00, 8), Info.AllocationBase);
+                        BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x08, 4), Info.AllocationProtect);
+                        BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x0C, 4), Info.RegionType);
+                        BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x10, 8), Info.RegionSize);
+                        BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x18, 8), Info.CommitSize);
+                        BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x20, 8), Info.PartitionId);
+                        BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x28, 8), Info.NodePreference);
+                    }
 
                     if (!Instance.WriteMemory(MemoryInformation, Data.Slice(0, (int)RequiredLength)))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
