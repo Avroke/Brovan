@@ -76,7 +76,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     MemoryInformationClass != MEMORY_INFORMATION_CLASS.MemoryPrivilegedBasicInformation &&
                     MemoryInformationClass != MEMORY_INFORMATION_CLASS.MemoryImageInformation &&
                     MemoryInformationClass != MEMORY_INFORMATION_CLASS.MemoryRegionInformation &&
-                    MemoryInformationClass != MEMORY_INFORMATION_CLASS.MemoryWorkingSetExInformation)
+                    MemoryInformationClass != MEMORY_INFORMATION_CLASS.MemoryWorkingSetExInformation &&
+                    MemoryInformationClass != MEMORY_INFORMATION_CLASS.MemoryMappedFilenameInformation)
                 {
                     Instance.TriggerEventMessage($"[!] NtQueryVirtualMemory (x86): class {MemoryInformationClass} not implemented", LogFlags.Issues);
                     return Instance.WinUnimplemented;
@@ -285,18 +286,22 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Encoding.Unicode.GetBytes(Path.AsSpan(), StringData);
                     StringData[StringByteCount - 2] = 0;
                     StringData[StringByteCount - 1] = 0;
-                    ulong RequiredLength = 0x10UL + (ulong)StringByteCount;
+
+                    // UNICODE_STRING layout — 8 bytes on x86 (Length/MaxLen/Buffer4), 16 on x64
+                    // (Length/MaxLen/pad4/Buffer8). The string body follows immediately after the header.
+                    ulong HeaderSize = Wow64 ? 8UL : 0x10UL;
+                    ulong RequiredLength = HeaderSize + (ulong)StringByteCount;
 
                     if (ReturnLength != 0)
                     {
-                        if (!Instance._emulator.WriteMemory(ReturnLength, RequiredLength))
+                        if (!Instance.WritePointer(ReturnLength, RequiredLength))
                             return NTSTATUS.STATUS_ACCESS_VIOLATION;
                     }
 
                     if (MemoryInformationLength < RequiredLength)
                         return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
-                    ulong Buffer = MemoryInformation + 0x10;
+                    ulong Buffer = MemoryInformation + HeaderSize;
                     ushort Length = (ushort)(StringByteCount - 2);
                     ushort MaximumLength = (ushort)StringByteCount;
 
@@ -306,11 +311,19 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (!Instance._emulator.WriteMemory(MemoryInformation + 0x2, MaximumLength, 2))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                    if (!Instance._emulator.WriteMemory(MemoryInformation + 0x4, 0u, 4))
-                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                    if (Wow64)
+                    {
+                        if (!Instance._emulator.WriteMemory(MemoryInformation + 0x4, (uint)Buffer, 4))
+                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                    }
+                    else
+                    {
+                        if (!Instance._emulator.WriteMemory(MemoryInformation + 0x4, 0u, 4))
+                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                    if (!Instance._emulator.WriteMemory(MemoryInformation + 0x8, Buffer, 8))
-                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                        if (!Instance._emulator.WriteMemory(MemoryInformation + 0x8, Buffer, 8))
+                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                    }
 
                     if (!Instance.WriteMemory(Buffer, StringData.Slice(0, StringByteCount)))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
