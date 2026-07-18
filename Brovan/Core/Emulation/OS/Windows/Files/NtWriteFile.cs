@@ -36,7 +36,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             ulong StdOut = Instance.WinHelper.STD_OUT.Handle;
-            if (FileHandle == StdOut)
+            ulong ConsoleH = Instance.WinHelper.ConsoleHandle?.Handle ?? 0;
+            // STD_OUT, STD_ERROR (aliased to STD_OUT in ProcessParameters) and any handle the guest
+            // obtained by opening CONOUT$ / \Device\ConDrv (NtCreateFile hands back ConsoleHandle for
+            // those) all denote the console output surface. A managed runtime writes its console text
+            // and its unhandled-exception report through whichever of these it resolved, so every one
+            // must reach the console mirror — otherwise the write silently dropped down the Device
+            // branch below as STATUS_INVALID_DEVICE_REQUEST.
+            if (FileHandle == StdOut || (ConsoleH != 0 && FileHandle == ConsoleH))
                 return HandleStdOut(Instance, IoStatusBlockPtr, BufferPtr, Length);
 
             WinFile FileObj = Instance.WinHelper.GetFileByHandle(FileHandle, AccessMask.GiveTemp);
@@ -48,6 +55,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (FileObj.Device)
             {
+                if (IsConsoleDevice(FileObj))
+                    return HandleStdOut(Instance, IoStatusBlockPtr, BufferPtr, Length);
+
                 if (NullDevice.IsNullDevicePath(FileObj.Path))
                 {
                     if (!HasWriteAccess(Instance, FileHandle))
@@ -151,6 +161,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
+
+        private static bool IsConsoleDevice(WinFile FileObj)
+        {
+            if (FileObj == null || !FileObj.Device)
+                return false;
+
+            return string.Equals(FileObj.Path, "\\Device\\ConDrv", StringComparison.OrdinalIgnoreCase);
+        }
 
         private static bool HasWriteAccess(BinaryEmulator Instance, ulong FileHandle)
         {

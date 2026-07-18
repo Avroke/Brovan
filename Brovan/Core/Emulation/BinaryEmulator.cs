@@ -2069,6 +2069,10 @@ namespace Brovan.Core.Emulation
             Thread.WaitDeadline = -1;
             Thread.State = EmulatedThreadState.Terminated;
             SchedulerRefreshRequested = true;
+
+            if ((Settings.Flags & LogFlags.General) != 0)
+                TriggerEventMessage($"[!] TryTerminateThread {Thread.ThreadId} ({Thread.Name}) exit=0x{(uint)ExitCode:X}.", LogFlags.General);
+
             return true;
         }
 
@@ -2642,6 +2646,8 @@ namespace Brovan.Core.Emulation
                             if (Debug)
                                 if (Debug)
                                     TriggerDebugMessage($"scheduler: finished no live threads total={Total} slices={Slices}");
+                            if ((Settings.Flags & LogFlags.General) != 0)
+                                TriggerEventMessage($"[!] Scheduler finished: no live threads (all terminated) total={Total}.", LogFlags.General);
                             return true;
                         }
 
@@ -2669,6 +2675,17 @@ namespace Brovan.Core.Emulation
                         if (Debug)
                             if (Debug)
                                 TriggerDebugMessage($"scheduler: no runnable thread and no pending wakeup total={Total} slices={Slices}");
+
+                        if ((Settings.Flags & LogFlags.General) != 0)
+                        {
+                            foreach (EmulatedThread Parked in Threads.Values)
+                            {
+                                if (Parked == null || Parked.State == EmulatedThreadState.Terminated)
+                                    continue;
+                                TriggerEventMessage($"[!] Scheduler ending with parked thread {Parked.ThreadId} ({Parked.Name}) state={Parked.State} rip=0x{Parked.Context?.RIP ?? 0:X} deadline={Parked.WaitDeadline}.", LogFlags.General);
+                            }
+                        }
+
                         return true;
                     }
                 }
@@ -2716,6 +2733,9 @@ namespace Brovan.Core.Emulation
 
                     ImmaBeEmulatedOOO.State = EmulatedThreadState.Terminated;
                     SchedulerRefreshRequested = true;
+
+                    if ((Settings.Flags & LogFlags.General) != 0)
+                        TriggerEventMessage($"[!] Thread {ImmaBeEmulatedOOO.ThreadId} ({ImmaBeEmulatedOOO.Name}) died in slice via {ex.GetType().Name}: {ex.Message}; rip=0x{RipBeforeSlice:X} exit=0x{(uint)ImmaBeEmulatedOOO.ExitCode:X}.", LogFlags.General);
                 }
                 finally
                 {
@@ -2789,6 +2809,9 @@ namespace Brovan.Core.Emulation
                         ImmaBeEmulatedOOO.ExitCode = unchecked((int)(uint)ImmaBeEmulatedOOO.Context?.RAX);
 
                     ImmaBeEmulatedOOO.State = EmulatedThreadState.Terminated;
+
+                    if ((Settings.Flags & LogFlags.General) != 0)
+                        TriggerEventMessage($"[!] Thread {ImmaBeEmulatedOOO.ThreadId} ({ImmaBeEmulatedOOO.Name}) returned to the entry sentinel; exit code 0x{(uint)ImmaBeEmulatedOOO.ExitCode:X}; last-slice-rip=0x{RipBeforeSlice:X}.", LogFlags.General);
                 }
                 else if (ImmaBeEmulatedOOO.State == EmulatedThreadState.Running)
                 {
