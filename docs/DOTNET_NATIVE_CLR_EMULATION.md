@@ -667,9 +667,21 @@ le problème est la **livraison du travail** (comme le worker-factory de la voie
 via un event manuel plutôt qu'`NtWaitForWorkViaWorkerFactory`). Un
 `NtSetEvent → RequestSchedulerWakeupScan` (tenté puis **reverté** : ne résout pas ce cas —
 le waiter n'attend pas l'event signalé — et non-régression non vérifiable) ne suffit pas.
-**Prochain pas** : tracer au niveau instruction la boucle de spin du main (quelle
-condition mémoire il attend, pourquoi il ne signale jamais `0x4C`) pour modéliser
-fidèlement le hand-off loader/CLR — le levier **commun aux deux voies**.
+
+**Localisation à l'instruction (stack-walk `[SET-EVENT-SPIN]`).** Après 20 000
+`NtSetEvent` consécutifs sur le même thread, un stack-walk mappe les adresses de retour aux
+modules : la boucle est dans **`mscoreei.dll` (0xECE0/0xED12)**, un **thunk de résolution
+paresseuse par ordinal** — il compare un pointeur global à lui-même, sinon appelle
+`KERNEL32!GetProcAddress(hModule, 0x8E)` (= **ordinal 142**), cache le résultat, puis
+`call rbx` (la fonction résolue, qui fait le `SetEvent`). Stack ntdll associée :
+`LdrGetProcedureAddressForCaller`, `RtlAllocateHeap`, `RtlInitializeCriticalSection`.
+C'est donc un **hand-off loader/CLR** : mscoreei résout/appelle des fonctions runtime par
+ordinal pendant que le worker loader (9024) dort sur `0x4C`. **Le fix précis** exige soit
+les **symboles PDB mscoreei** (nommer la fonction ordinal-142 + la condition de boucle),
+soit un trace complet d'une itération — au-delà du tractable de façon fiable sans risquer
+un changement scheduler/loader spéculatif (interdit faute de pouvoir lancer la suite de
+tests Brovan). Le détecteur `[SET-EVENT-SPIN]` (stack-walk d'un thread qui signale en
+boucle) est livré comme outil permanent (gated `LogFlags.General`).
 
 **Bilan.** La voie Framework est **provisionnée et le CLR classique démarre son shim** ;
 elle **partage** la frontière de threading coopératif de la voie Core, donc — comme

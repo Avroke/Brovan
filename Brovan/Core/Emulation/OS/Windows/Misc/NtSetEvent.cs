@@ -4,6 +4,50 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal class NtSetEvent : IWinSyscall
     {
+        private static int _spinTid = -1;
+        private static long _spinCount;
+        private static bool _spinDumped;
+
+        // When a thread signals events in a tight loop without ever blocking (the mscoree/CLR
+        // startup hand-off spin), walk its stack once and map the return-address-looking slots to
+        // module+offset so the spinning function is legible.
+        private static void MaybeDumpSpin(BinaryEmulator Instance, ulong EventHandle)
+        {
+            int Tid = Instance.CurrentThreadId;
+            if (Tid != _spinTid) { _spinTid = Tid; _spinCount = 1; _spinDumped = false; return; }
+            _spinCount++;
+            if (_spinDumped || _spinCount < 20000 || (Instance.Settings.Flags & LogFlags.General) == 0)
+                return;
+            _spinDumped = true;
+
+            ulong Rip = Instance.ReadRegister(Registers.UC_X86_REG_RIP);
+            ulong Rsp = Instance.ReadRegister(Registers.UC_X86_REG_RSP);
+            System.Text.StringBuilder Sb = new System.Text.StringBuilder();
+            Sb.Append($"[!] [SET-EVENT-SPIN] tid={Tid} handle=0x{EventHandle:X} count={_spinCount} rip={Describe(Instance, Rip)} stack:");
+            int Found = 0;
+            for (ulong off = 0; off <= 0x400 && Found < 12; off += 8)
+            {
+                if (!Instance.IsRegionMapped(Rsp + off, 8)) continue;
+                ulong Val = Instance.ReadMemoryULong(Rsp + off);
+                string M = Describe(Instance, Val);
+                if (M != null) { Sb.Append($" +0x{off:X}={M}"); Found++; }
+            }
+            Instance.TriggerEventMessage(Sb.ToString(), LogFlags.General);
+        }
+
+        // If <addr> lies inside a loaded module's image, return "name+0xrva", else null.
+        private static string Describe(BinaryEmulator Instance, ulong Addr)
+        {
+            if (Instance.WinHelper?.WinModules == null) return null;
+            foreach (WinModule M in Instance.WinHelper.WinModules)
+            {
+                if (M == null || M.SizeOfImage == 0) continue;
+                if (Addr >= M.MappedBase && Addr < M.MappedBase + M.SizeOfImage)
+                    return $"{M.Name}+0x{Addr - M.MappedBase:X}";
+            }
+            return null;
+        }
+
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
@@ -46,6 +90,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (Signaled && Instance.WakeWorkerFactoryWaitersForObject(EventHandle))
                 Instance._emulator.StopEmulation();
+
+            if (Signaled)
+                MaybeDumpSpin(Instance, EventHandle);
 
             return NTSTATUS.STATUS_SUCCESS;
         }
