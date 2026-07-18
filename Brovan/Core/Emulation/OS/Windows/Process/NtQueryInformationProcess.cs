@@ -882,6 +882,29 @@ namespace Brovan.Core.Emulation.OS.Windows
                             return NTSTATUS.STATUS_SUCCESS;
                         }
 
+                    case PROCESSINFOCLASS.ProcessEnclaveInformation:
+                        {
+                            // A PROCESS_ENCLAVE_INFORMATION struct is 0x28 bytes on x86 and describes the
+                            // enclave a process runs in (SGX / VBS). A non-enclave process — Brovan's default —
+                            // returns STATUS_NOT_FOUND with the caller's buffer left zero-initialised. combase's
+                            // CoInitializeSecurity probes this class during its VBS-security path and treats
+                            // STATUS_NOT_SUPPORTED as "kernel too old, bail" (leaves an internal singleton NULL
+                            // and later NULL-derefs); STATUS_NOT_FOUND is "kernel understood the query, the
+                            // process just isn't in an enclave" and takes the normal (non-enclave) path.
+                            const uint StructSize = 0x28;
+                            if (OutBufferLength < StructSize)
+                            {
+                                SetReturnLength(StructSize);
+                                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                            }
+                            if (OutBufferPtr == 0 || !Instance.IsRegionMapped(OutBufferPtr, StructSize))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                            if (!Instance.WinHelper.WriteZeroMemory(OutBufferPtr, StructSize))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                            SetReturnLength(StructSize);
+                            return NTSTATUS.STATUS_NOT_FOUND;
+                        }
+
                     default:
                         Instance.TriggerEventMessage($"[!] NtQueryInformationProcess (x86): InfoClass {InfoClass} (0x{(int)InfoClass:X}) not implemented", LogFlags.Issues);
                         return Instance.WinUnimplemented;

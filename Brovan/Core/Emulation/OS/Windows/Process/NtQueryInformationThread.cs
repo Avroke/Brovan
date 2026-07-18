@@ -18,12 +18,26 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint ThreadInformationLength = (uint)Instance.WinHelper.GetArg64(3);
             ulong ReturnLengthPtr = Instance.WinHelper.GetArg64(4);
 
-            // Only ThreadBasicInformation carries the bitness-aware x86 layout below; the other classes still
-            // emit x64 structures, so gate them to x64 rather than corrupt a 32-bit caller's buffer.
-            if (Wow64 && (THREADINFOCLASS)ThreadInformationClass != THREADINFOCLASS.ThreadBasicInformation)
+            // ThreadBasicInformation is the one class with an explicit bitness-aware layout below. Every OTHER
+            // class in the switch either writes a fixed-size scalar (DWORD/byte) that's bitness-invariant
+            // (ThreadIsIoPending / ThreadDynamicCodePolicyInfo / ThreadIsTerminated / ThreadPriorityBoost /
+            // ThreadHideFromDebugger / ThreadAmILastThread) or a Windows struct that's the same shape on both
+            // (ThreadIdealProcessorEx = PROCESSOR_NUMBER, 0x28 bytes). Only the three pointer-sized-buffer
+            // classes (ThreadQuerySetWin32StartAddress / ThreadAffinityMask / ThreadUmsInformation) still emit
+            // an 8-byte value that would overrun a 4-byte x86 caller buffer — those stay gated to x64. Note
+            // the previous blanket gate rejected class 42 (ThreadDynamicCodePolicyInfo) on x86, which combase's
+            // CoInitializeSecurity probes; the STATUS_NOT_SUPPORTED it received drove the "kernel too old"
+            // branch that left an internal singleton NULL.
+            if (Wow64)
             {
-                Instance.TriggerEventMessage($"[!] NtQueryInformationThread (x86): class {(THREADINFOCLASS)ThreadInformationClass} not implemented", LogFlags.Issues);
-                return Instance.WinUnimplemented;
+                switch ((THREADINFOCLASS)ThreadInformationClass)
+                {
+                    case THREADINFOCLASS.ThreadQuerySetWin32StartAddress:
+                    case THREADINFOCLASS.ThreadAffinityMask:
+                    case THREADINFOCLASS.ThreadUmsInformation:
+                        Instance.TriggerEventMessage($"[!] NtQueryInformationThread (x86): class {(THREADINFOCLASS)ThreadInformationClass} not implemented", LogFlags.Issues);
+                        return Instance.WinUnimplemented;
+                }
             }
 
             if (ReturnLengthPtr != 0 && !Instance.IsRegionMapped(ReturnLengthPtr, 4))
