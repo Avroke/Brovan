@@ -6,6 +6,7 @@ namespace Brovan.Core.Emulation
     {
         Unicorn = 0,
         Kvm = 1,
+        Whp = 2,
     }
 
     public enum BackendError

@@ -290,6 +290,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int OffsetProcessorFeatures = 0x274;
         private const int OffsetXStateConfiguration = 0x3D8;
         private const int OffsetQpcFrequency = 0x300;
+        private const int OffsetQpcData = 0x3C6;
         private const int OffsetSystemCallX86 = 0x300;
         private const int OffsetSystemCallX64 = 0x308;
 
@@ -437,6 +438,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 WriteUInt32(Page, OffsetNtMajorVersion, WindowsVersionInfo.MajorVersion);
                 WriteUInt32(Page, OffsetNtMinorVersion, WindowsVersionInfo.MinorVersion);
                 WriteUInt32(Page, OffsetCookie, (uint)RandomNumberGenerator.GetInt32(int.MaxValue));
+
+                Page[OffsetQpcData] = 0;
+                Page[OffsetQpcData + 1] = 0;
             }
             else
             {
