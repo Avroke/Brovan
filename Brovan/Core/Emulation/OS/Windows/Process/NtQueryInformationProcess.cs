@@ -685,6 +685,50 @@ namespace Brovan.Core.Emulation.OS.Windows
                         {
                             return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
                         }
+                    case PROCESSINFOCLASS.ProcessDebugObjectHandle:
+                        // WOW64: the debug-object HANDLE is pointer-sized (4 bytes on x86). A process that is
+                        // not being debugged has no debug object, so ntdll writes a NULL handle and returns
+                        // STATUS_PORT_NOT_SET (mirrors the x64 branch above). al-khaser's ProcessDebugObjectHandle
+                        // probe reads (SUCCESS && handle!=0) as "debugger present"; more importantly
+                        // kernel32!UnhandledExceptionFilter queries this class to decide whether a debugger is
+                        // attached — leaving it unimplemented made UEF believe a debugger was present, skip the
+                        // SetUnhandledExceptionFilter-registered filter, and let the UnhandledExcepFilterTest
+                        // exception go unhandled → process terminated with STATUS_FLOAT_DIVIDE_BY_ZERO.
+                        if (OutBufferLength < 4)
+                        {
+                            SetReturnLength(4);
+                            return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                        }
+                        if (OutBufferPtr == 0 || !Instance.IsRegionMapped(OutBufferPtr, 4))
+                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                        if (!CurrentProcess)
+                        {
+                            if (!Instance.WinHelper.ValidProcessHandle(ProcessHandle))
+                                return NTSTATUS.STATUS_INVALID_HANDLE;
+                            if (Instance.WinHelper.GetProcessByHandle(ProcessHandle, AccessMask.ProcessQueryLimitedInformation | AccessMask.ProcessQueryInformation) == null)
+                                return NTSTATUS.STATUS_ACCESS_DENIED;
+                        }
+                        if (!Instance.WinHelper.WriteZeroMemory(OutBufferPtr, 4))
+                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                        SetReturnLength(4);
+                        if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                            Instance.TriggerEventMessage($"[!] NtQueryInformationProcess (x86): Queried debug object handle.", LogFlags.Syscall);
+                        return NTSTATUS.STATUS_PORT_NOT_SET;
+                    case PROCESSINFOCLASS.ProcessDebugFlags:
+                        // NoDebugInherit flag (DWORD): 1 = normal (no debugger), 0 = debugger with inherit set.
+                        // al-khaser treats (SUCCESS && value==0) as detected, so SUCCESS+1 is the honest answer
+                        // and matches the x64 branch.
+                        if (OutBufferLength < 4)
+                        {
+                            SetReturnLength(4);
+                            return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                        }
+                        if (OutBufferPtr == 0 || !Instance.IsRegionMapped(OutBufferPtr, 4))
+                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                        if (!Instance._emulator.WriteMemory(OutBufferPtr, 1u, 4))
+                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                        SetReturnLength(4);
+                        return NTSTATUS.STATUS_SUCCESS;
                     case PROCESSINFOCLASS.ProcessWow64Information:
                         if (OutBufferLength < 4)
                         {
