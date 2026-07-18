@@ -613,6 +613,55 @@ nom de type via les structures coreclr, version-spécifiques) OU bissecter par
 env `DOTNET_*` (p.ex. désactiver tiered-compilation, EventPipe, diagnostics) pour isoler
 le sous-système d'init qui lève `E_INVALIDARG`.
 
+### 8bis.6 — Voie Framework (.NET Framework 4.x, CLR classique) : provisionnée, le shim bootstrappe
+
+En parallèle de la voie **Core** (coreclr, self-contained), la voie **Framework** exécute
+un PE managé net4x via le **CLR classique OS** : `mscoree → mscoreei → clr → clrjit →
+mscorlib → Main`. État livré : **provisionnée jusqu'au bootstrap du shim** ; frontière =
+un spin de synchro thread dans l'init du shim.
+
+**Le blocage `mscoree.dll` + le pont mscoreei.** Un net4x x64 importe
+`mscoree.dll!_CorExeMain` ; sans le fichier, le loader guest termine sur
+**`0xC0000135` (STATUS_DLL_NOT_FOUND)** à ~91 k instr. Or `mscoree.dll` est un composant
+**Windows OS** (System32) — il n'est **ni** dans les deps fournies **ni** dans
+l'installeur .NET (qui ne livre que `mscoreei.dll`). **Résolution** : sur Windows moderne
+`mscoree.dll` est un stub qui **forwarde vers `mscoreei.dll`** — lequel exporte toute la
+surface requise (`_CorExeMain` / `_CorExeMain2` / `_CorDllMain` / `CorExitProcess` /
+`CLRCreateInstance`, 125 exports). On **stage `mscoreei.dll` en tant que
+`WindowsLibs/mscoree.dll`** (pont). Mesuré : l'import résout, **`Loaded MSCOREE.DLL`**, et
+le shim **bootstrappe** (KERNEL32/KERNELBASE/ADVAPI32/RPCRT4, port CSR `NtConnectPort`,
+`NtInitializeNlsFiles`, accès registre) — plus de DLL_NOT_FOUND.
+
+**Provisioning livré (committable).**
+1. **`scripts/Import-FrameworkRuntime.sh`** : stage `clr.dll` / `clrjit.dll` /
+   `mscoreei.dll` / `mscorlib.dll` (+ `mscordacwks` / `mscordbi` / `mscorrc` /
+   `mscorsecimpl`, amd64 4.0.15744.551) dans le VFS guest
+   `C:\Windows\Microsoft.NET\Framework64\v4.0.30319\`, et pose le pont
+   `WindowsLibs\mscoree.dll ← mscoreei.dll`. Source = payload de l'installeur .NET 4.8
+   (`ndp48-*.exe`) expansé (WinSxS `amd64_netfx4-*`).
+2. **Clés registre de découverte du runtime** (seedées en code, `WinSyscallsHelper.cs`) :
+   `HKLM\SOFTWARE\Microsoft\.NETFramework\InstallRoot` = `…\Framework64\`,
+   `…\policy\v4.0`, `NET Framework Setup\NDP\v4\{Full,Client}` (`Install`=1,
+   `Release`=528040, `Version`=`4.8.04084`, `InstallPath`). Sans elles le shim ne peut
+   localiser `clr.dll`.
+
+**Frontière (spin de synchro à l'init du shim).** Après le bootstrap, le shim crée un
+thread et fait un **hand-off event qui ne se connecte pas** : le thread principal (ex.
+21435) **spin `NtSetEvent`** en boucle serrée sans jamais bloquer, tandis que le worker
+(ex. 9024) est parqué sur un **unique `NtWaitForSingleObject` (PENDING)** — jamais
+ré-ordonnancé. `clr.dll` n'est pas encore chargé. Diagnostic : `NtWaitForSingleObject`
+n'est appelé **qu'une fois** de tout le run ; le waiter n'attend donc **pas** l'event que
+le spinner signale (objet différent : handle de thread / sémaphore / keyed-event via
+SRWLock/CV). C'est la **même classe de frontière coopérative-threading (F-THREAD)** que le
+worker-factory de la voie Core — un `NtSetEvent → RequestSchedulerWakeupScan` (tenté puis
+**reverté**, non-régression non vérifiable + ne résout pas ce cas précis) ne suffit pas :
+il faut modéliser l'objet de synchro réel sur lequel le worker parque.
+
+**Bilan.** La voie Framework est **provisionnée et le CLR classique démarre son shim** ;
+elle **partage** la frontière de threading coopératif de la voie Core, donc — comme
+anticipé — **pas un raccourci vers `Main`**. Test : `dotnet Brovan.dll <net4x-x64.exe>`
+puis commande **`start`** (cf. piège n°2 §8bis.4).
+
 ### Reproduction
 
 ```bash

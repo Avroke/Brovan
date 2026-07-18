@@ -4364,6 +4364,28 @@ namespace Brovan.Core.Emulation.OS.Windows
             const string ProductOptionsKey = "\\Registry\\Machine\\System\\CurrentControlSet\\Control\\ProductOptions";
             AddSyntheticRegistryKeyTrusted(ProductOptionsKey, KeyCache, DefaultHive);
             SetSyntheticRegistryStringTrusted(ProductOptionsKey, "ProductType", 1, WindowsVersionInfo.RegistryProductType, KeyCache, DefaultHive);
+
+            // .NET Framework 4.x runtime discovery keys. The mscoree/mscoreei shim reads InstallRoot
+            // to locate the framework directory (then appends v4.0.30319), and NDP\v4\Full to confirm
+            // the runtime is installed. Without these a managed .NET Framework PE's shim cannot resolve
+            // clr.dll and stalls in runtime detection. Framework files are staged under the guest VFS at
+            // C:\Windows\Microsoft.NET\Framework64\v4.0.30319 (see scripts/Import-FrameworkRuntime.sh).
+            const string NetFxKey = "\\Registry\\Machine\\Software\\Microsoft\\.NETFramework";
+            AddSyntheticRegistryKeyTrusted(NetFxKey, KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(NetFxKey, "InstallRoot", 2, "C:\\Windows\\Microsoft.NET\\Framework64\\", KeyCache, DefaultHive);
+            const string NetFxPolicyKey = NetFxKey + "\\policy\\v4.0";
+            AddSyntheticRegistryKeyTrusted(NetFxPolicyKey, KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(NetFxPolicyKey, "30319", 1, "30319", KeyCache, DefaultHive);
+            foreach (string NdpLeaf in new[] { "Full", "Client" })
+            {
+                string NdpKey = "\\Registry\\Machine\\Software\\Microsoft\\NET Framework Setup\\NDP\\v4\\" + NdpLeaf;
+                AddSyntheticRegistryKeyTrusted(NdpKey, KeyCache, DefaultHive);
+                SetSyntheticRegistryDwordTrusted(NdpKey, "Install", 1, KeyCache, DefaultHive);
+                SetSyntheticRegistryDwordTrusted(NdpKey, "Release", 528040, KeyCache, DefaultHive);
+                SetSyntheticRegistryStringTrusted(NdpKey, "Version", 1, "4.8.04084", KeyCache, DefaultHive);
+                SetSyntheticRegistryStringTrusted(NdpKey, "TargetVersion", 1, "4.0.0", KeyCache, DefaultHive);
+                SetSyntheticRegistryStringTrusted(NdpKey, "InstallPath", 2, "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\", KeyCache, DefaultHive);
+            }
         }
 
         private void AddSyntheticRegistryKey(string NtPath, Dictionary<string, bool> KeyCache, Hive DefaultHive)
