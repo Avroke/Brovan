@@ -1530,7 +1530,8 @@ the guest ntdll's `mov eax, imm32` stub prologues, now from `WindowsLibs/SysWOW6
 | `NtOpenFile` / `NtDeviceIoControlFile` / `NtWriteFile` / `NtTerminateProcess` → WOW64 | file+terminate syscalls run on x86 → DLL init clears `DLL_INIT_FAILED`; al-khaser reaches **`main()`** and prints results → **~14.27M**, Init / TLS-Callbacks / Debugger-Detection sections, 14 GOOD |
 | `NtQueryInformationProcess(ProcessDebugObjectHandle/ProcessDebugFlags)` → WOW64 | x86 debug-object probe returns `STATUS_PORT_NOT_SET` (no debugger) → BAD→GOOD (**15 GOOD / 3 BAD**) |
 | `NtQueryVirtualMemory(MemoryRegionInformation)` → WOW64 | class-3 query used by `SetUnhandledExceptionFilter`'s filter validator now works on x86 → the registered filter is stored and **actually runs** (was: filter dropped → `UnhandledExcepFilterTest` killed the process at `0xC000008E`) |
-| *(open)* `0xC0000409` (STACK_BUFFER_OVERRUN / `__fastfail`) after the filter resumes | new terminus — the `EXCEPTION_CONTINUE_EXECUTION` resume from `UnhandledExcepFilterTest` lands with a corrupted stack (GS-cookie fail-fast); see below |
+| WOW64 exception-resume EIP off-by-+2 (`NtRaiseException` syscall advance) | the CONTINUE_EXECUTION resume landed 2 bytes into the next instruction (kernelbase!RaiseException's GS-cookie reload) → `0xC0000409` fail-fast; fixed → **23 GOOD** (8 exception-based probes unblocked) |
+| *(open)* `0xC0000005` (ACCESS_VIOLATION) later in Debugger Detection | new terminus at ~15.27M instructions; see below |
 
 #### Resolved this pass (each fix is a generic WOW64 fidelity correction)
 
@@ -1739,23 +1740,30 @@ The filter `0x40ee00` now executes (its `ret 4` at `0x40EE0D` returns into
 `UnhandledExceptionFilter`) and al-khaser runs past the probe. x64 untouched (its
 `MemoryRegionInformation` path is unchanged).
 
-**Next frontier — `0xC0000409` (STACK_BUFFER_OVERRUN) after the filter resumes.** With the
-filter running, `UnhandledExcepFilterTest`'s `EXCEPTION_CONTINUE_EXECUTION` resume proceeds
-but the process then fail-fasts with `0xC0000409` before the probe prints its verdict. The
-termination is an explicit `NtTerminateProcess(NtCurrentProcess, 0xC0000409)` (not `int 0x29`,
-which Brovan maps to a plain stop) from kernelbase code — a canary value sits on the stack at
-the call, the `RtlFailFast` / `__report_gsfailure` signature — so a stack GS-cookie check has
-failed. **The exception resume itself is not the cause**: instrumenting the
-`CONTINUE_EXECUTION` path showed the CONTEXT `DispatchExceptionX86` builds and the CONTEXT
-`NtContinue` restores are byte-identical (EIP `0x1052B5B4`, ESP `0x100F8C00`, EBP, EAX, ECX
-all match), and `DispatchExceptionX86` writes its record/context strictly below the resume ESP
-(`[0x100F88D0, 0x100F8BF4)` vs the cookie slot near `0x100F8C54`), so it clobbers nothing live.
-The cookie failure therefore comes from *post-resume* code — either the resuming frame's cookie
-slot was disturbed by a subtlety earlier in the dispatch, or (more likely) al-khaser's next
-Debugger-Detection check runs into a distinct emulation gap whose corruption surfaces as the
-GS check. Next step: identify which function's epilogue fails (map the kernelbase/CRT load
-bases — the `modules` command only lists ntdll today — and single-step from the resume to the
-`RtlFailFast` call). Nearby non-fatal gaps still `NOT_SUPPORTED` on x86: `NtQueryInformationThread`
+**Resolved — the `0xC0000409` was a WOW64 exception-resume EIP off-by-+2.** With the filter
+running, `UnhandledExcepFilterTest`'s `EXCEPTION_CONTINUE_EXECUTION` resume fail-fasted with
+`0xC0000409` — an explicit `NtTerminateProcess(NtCurrentProcess, 0xC0000409)` from kernelbase's
+`__report_gsfailure`/`RtlFailFast` (canary on the stack). A control-flow trace armed on the
+`0xC000008E` raise pinned it precisely: `NtContinue` resumed at **`0x1052B5B4`**, which — with
+the correct kernelbase base `0x10400000` (from the filter-return `0x105BEB32` = UEF RVA
+`0x1BEB32`) — is **2 bytes into** `kernelbase!RaiseException`'s `mov ecx,[esp+0x54]` at
+`0x1052B5B2` (the return address of its `call RtlRaiseException`). Resuming mid-instruction
+skips the GS-cookie reload into ECX, so the immediately-following `xor ecx,esp; call
+__security_check_cookie` fails and fail-fasts (the terminate caller `0x105304F6` = RVA
+`0x1304F6` sits inside `__report_gsfailure`). Instrumenting `NtRaiseException` showed the CONTEXT
+`RtlRaiseException` passed had the **correct** `Eip=0x1052B5B2`; the `+2` was Brovan's — this
+handler runs inside the sysenter INSN hook, and Unicorn advances EIP by the 2-byte syscall
+instruction after the hook returns, so the exception dispatcher read the post-advance EIP as the
+resume target. `NtContinue` counteracts the same `+2` via `LoadContext`'s `-2` on
+`SwitchingContext`, but the raise path reads the CPU EIP directly, so `FinishRaise` now
+pre-subtracts the syscall length on the MODE_32 path (x64's direct-syscall path was already
+correct and is untouched). This unblocked **8 exception-based Debugger-Detection probes at once
+(15 → 23 GOOD)** and advanced the run to ~15.27M instructions.
+
+**Next frontier — `0xC0000005` (ACCESS_VIOLATION) later in Debugger Detection.** The run now
+reaches a fresh terminus at ~15.27M; another Debugger-Detection probe faults with an access
+violation that isn't caught. Next step: capture the faulting EIP + address and trace the probe.
+Nearby non-fatal gaps still `NOT_SUPPORTED` on x86: `NtQueryInformationThread`
 (ThreadHideFromDebugger / ThreadDynamicCodePolicyInfo), `NtQueryInformationFile`,
 `NtQuerySystemInformation` class `0x73`, syscall `0x1E9`.
 

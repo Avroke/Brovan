@@ -166,6 +166,17 @@ namespace Brovan.Core.Emulation.OS.Windows
             WinEmulatedThread.GetState(CurrentThread).ExceptionInformation = Info;
             CurrentThread.ExitCode = unchecked((int)ExceptionCode);
 
+            // WOW64: this handler runs inside the sysenter INSN hook, so after we return Unicorn advances
+            // EIP by the 2-byte syscall instruction. The exception dispatcher then reads that post-advance
+            // EIP as both the ExceptionAddress and the CONTINUE_EXECUTION resume target — landing 2 bytes
+            // into the caller's next instruction (e.g. kernelbase!RaiseException's `mov ecx,[esp+0x54]`
+            // GS-cookie reload), which corrupts the cookie check and fail-fasts with 0xC0000409. Pre-subtract
+            // the syscall length so the net dispatched EIP is exactly the CONTEXT.Eip the guest asked to
+            // resume at — the same +2 that LoadContext's -2 counteracts for NtContinue's normal resume.
+            // x64's direct-syscall exception path is already correct, so this is scoped to WOW64/native-32.
+            if (Instance.BackendMode == Mode.MODE_32)
+                Instance.WriteRegister32(Registers.UC_X86_REG_EIP, (uint)Instance.ReadRegister(Registers.UC_X86_REG_EIP) - 2);
+
             Instance.Threads[(uint)Instance.CurrentThreadId] = CurrentThread;
             if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
                 Instance.TriggerEventMessage($"[!] NtRaiseException triggered with Exception Code: 0x{ExceptionCode:X}", LogFlags.Issues);
