@@ -882,6 +882,46 @@ namespace Brovan.Core.Emulation.OS.Windows
                             return NTSTATUS.STATUS_SUCCESS;
                         }
 
+                    case PROCESSINFOCLASS.ProcessImageFileNameWin32:
+                        // Bitness-aware helper (uses StructSerializer.GetStructSize<UNICODE_STRING64> which
+                        // returns 8 bytes on x86). Same output shape and semantics as the x64 branch above.
+                        return QueryProcessImageFileNameWin32(Instance, ProcessHandle, OutBufferPtr, OutBufferLength, SetReturnLength);
+
+                    case PROCESSINFOCLASS.ProcessQuotaLimits:
+                        {
+                            // QUOTA_LIMITS on x86: 5 * SIZE_T (4) + LARGE_INTEGER (8) = 28 bytes (0x1C).
+                            // Fields: PagedPoolLimit / NonPagedPoolLimit / MinimumWorkingSetSize /
+                            // MaximumWorkingSetSize / PagefileLimit / TimeLimit. A real Win10 desktop
+                            // process reports "unlimited" pool/pagefile limits (SIZE_T max value),
+                            // 200-page min working set, ~1345-page max, TimeLimit=0. al-khaser's
+                            // Generic-Sandbox/VM check looks for anomalies — returning honest
+                            // "unlimited/default" values keeps it on the not-detected path.
+                            const uint StructSize = 0x1C;
+                            if (OutBufferLength < StructSize)
+                            {
+                                SetReturnLength(StructSize);
+                                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                            }
+                            if (OutBufferPtr == 0 || !Instance.IsRegionMapped(OutBufferPtr, StructSize))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                            Span<byte> Buffer = GetSharedWriteBuffer(Instance, StructSize);
+                            Buffer.Slice(0, (int)StructSize).Clear();
+                            const uint SizeMax = 0xFFFFFFFFu;   // "unlimited" on 32-bit
+                            const uint MinWs   = 200 * 4096;    // 200 pages
+                            const uint MaxWs   = 1345 * 4096;   // 1345 pages (standard Win10 default)
+                            WriteUInt32(Buffer, 0x00, SizeMax); // PagedPoolLimit
+                            WriteUInt32(Buffer, 0x04, SizeMax); // NonPagedPoolLimit
+                            WriteUInt32(Buffer, 0x08, MinWs);   // MinimumWorkingSetSize
+                            WriteUInt32(Buffer, 0x0C, MaxWs);   // MaximumWorkingSetSize
+                            WriteUInt32(Buffer, 0x10, SizeMax); // PagefileLimit
+                            // TimeLimit (LARGE_INTEGER at +0x14): left zero — "no CPU time limit".
+                            if (!Instance.WriteMemory(OutBufferPtr, Buffer))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                            SetReturnLength(StructSize);
+                            return NTSTATUS.STATUS_SUCCESS;
+                        }
+
                     case PROCESSINFOCLASS.ProcessImageFileName:
                         {
                             // 32-bit UNICODE_STRING is 8 bytes (Length 2, Max 2, Buffer 4). Callers query with
