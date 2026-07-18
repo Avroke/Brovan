@@ -1532,7 +1532,8 @@ the guest ntdll's `mov eax, imm32` stub prologues, now from `WindowsLibs/SysWOW6
 | `NtQueryVirtualMemory(MemoryRegionInformation)` → WOW64 | class-3 query used by `SetUnhandledExceptionFilter`'s filter validator now works on x86 → the registered filter is stored and **actually runs** (was: filter dropped → `UnhandledExcepFilterTest` killed the process at `0xC000008E`) |
 | WOW64 exception-resume EIP off-by-+2 (`NtRaiseException` syscall advance) | the CONTINUE_EXECUTION resume landed 2 bytes into the next instruction (kernelbase!RaiseException's GS-cookie reload) → `0xC0000409` fail-fast; fixed → **23 GOOD** (8 exception-based probes unblocked) |
 | `0xC0000005` (ACCESS_VIOLATION) in Debugger Detection: `user32!GetWindowThreadProcessId(NULL)` read a bad `aheList` | `NtUserProcessConnect` published the 32-bit-packed SHAREDINFO; this WOW64 build carries the **64-bit** SHAREDINFO (aheList@+0x08 / HeEntrySize@+0x10 / pDispInfo@+0x18). Corrected offsets → `GetWindowThreadProcessId(NULL)` returns 0 → **15.27M → ~37.7M**, into DLL Injection Detection (**41 GOOD / 5 BAD**) |
-| *(open)* DLL Injection Detection: al-khaser's `LdrEnumerateLoadedModules` callback NULL-derefs at `0x40E300` | new terminus at ~37.7M instructions; see below |
+| `NtReadVirtualMemory` (SSN 0x3F) → WOW64 (was **empty x86 branch**) | ReadProcessMemory-on-self was returning `WinUnimplemented` on x86, so al-khaser's DLL-Injection-Detection callback (which walks its own `InLoadOrderModuleList` via `ReadProcessMemory`) printed "Error reading entry" for every module and left its result vector empty → NULL-deref iterating the empty vector at `0x40E300`. Refactored the handler to a single bitness-agnostic body (`GetArg64` + `IsCurrentProcessPseudoHandle` + `GuestPointerSize`-sized `NumberOfBytesRead` write). Advances **~37.7M → ~232M**, past DLL Injection Detection into **Generic Sandbox/VM Detection** (**76 GOOD / 10 BAD**) |
+| *(open)* Generic Sandbox/VM Detection: NULL-relative write at `0x0C` from `0x10A9FBD4` (kernelbase/user32 client-side range) | new terminus at ~232M instructions; see below |
 
 #### Resolved this pass (each fix is a generic WOW64 fidelity correction)
 
@@ -1795,18 +1796,35 @@ both bitnesses (x64 stays 244 GOOD). al-khaser advances **15.27M → ~37.7M** in
 the Parent-Process (explorer.exe) and the rest of Debugger-Detection into **DLL Injection Detection**
 (**23 GOOD / 3 BAD → 41 GOOD / 5 BAD**).
 
-**Next frontier — DLL Injection Detection: al-khaser's own module walk NULL-derefs at
-`0x40E300`.** After `CreateToolhelp32Snapshot` fails (`Failed to get snapshot. Last error: 31`),
-al-khaser falls back to `LdrEnumerateLoadedModules`; its per-module callback then hits
-`[!] Error reading entry.` and reads NULL at its own image RVA `0xE300` (`0x40E300`), which
-`KiUserExceptionDispatcher` surfaces and the process terminates with exit code `0xC0000005`. The
-snapshot failure (ToolHelp) and/or an incomplete `LdrEnumerateLoadedModules` module entry (missing
-`FullDllName` / base) is the likely root cause — next step is to pin which field the callback derefs
-at `0x40E300` and make the module-enumeration surface (ToolHelp `Module32First`/`Next` or the
-`LDR_DATA_TABLE_ENTRY` the enumerate callback passes) return a complete entry. Nearby non-fatal gaps
-still `NOT_SUPPORTED` on x86: `NtQueryVirtualMemory` (MemoryMappedFilenameInformation),
-`NtQueryInformationThread` (ThreadHideFromDebugger / ThreadDynamicCodePolicyInfo),
-`NtQueryInformationFile`, `NtQuerySystemInformation` class `0x73`, syscall `0x1E9`.
+**Landed — `NtReadVirtualMemory` on WOW64 (was an empty x86 branch).** The DLL Injection
+Detection terminus was traced by disassembling al-khaser: its enumeration callback (called for every
+`LDR_DATA_TABLE_ENTRY` by `LdrEnumerateLoadedModules`) uses `ReadProcessMemory(GetCurrentProcess(),
+entry-8, buf, 0x48, ...)` to copy the loader entry, checks the return, and prints
+`[!] Error reading entry.` on failure. The x86 branch of `NtReadVirtualMemory` was `{ }` (empty)
+and returned `WinUnimplemented`, so **every** RPM-on-self returned FALSE, al-khaser's result vector
+stayed empty, and the code path that decrements `vec.end` unconditionally NULL-derefed at RVA
+`0xE300`. Rewrote the handler as a single bitness-agnostic body (`GetArg64` +
+`IsCurrentProcessPseudoHandle` + `WritePointer`/`GuestPointerSize`-sized `NumberOfBytesRead` write),
+so x86 shares the same self-read / cross-process-random-data logic as x64. Advances al-khaser
+**~37.7M → ~232M** instructions, past DLL Injection Detection into **Generic Sandbox/VM Detection**
+(**41 GOOD / 5 BAD → 76 GOOD / 10 BAD**). The section actually surfaces `[!] Injected library:
+C:\Windows\System32\...` for every real system DLL loaded by the loader (kernel32 / user32 / ole32 /
+shell32 / shlwapi / powrprof / …) — that is faithful behaviour: al-khaser flags any DLL not on its
+minimal-launch whitelist as "injected", and Brovan legitimately loads the full transitive import
+closure at startup.
+
+**Next frontier — Generic Sandbox/VM Detection: NULL-relative write at `[NULL+0xC]` from
+`0x10A9FBD4`.** After the DLL Injection Detection section prints its verdicts, execution advances
+into "Generic Sandboxe/VM Detection" (spelling per the sample banner) and immediately faults with
+`Invalid memory write related to the address 0xC at 0x10A9FBD4`. `0x10A9FBD4` lies in the
+`0x10000000+` range Brovan uses as the base for the WOW64 kernelbase / user32 client-side stubs
+(kernelbase live-DLL was earlier reported at base `0x10400000`), so a client-side stub is derefing a
+NULL structure at offset `+0xC`. Next step: identify the exact module + RVA at `0x10A9FBD4`
+(disassemble against the resolved base), then trace which structure the caller assumes to be
+initialised at that IP. Nearby non-fatal gaps still `NOT_SUPPORTED` on x86:
+`NtQueryVirtualMemory` (MemoryMappedFilenameInformation), `NtQueryInformationThread`
+(ThreadHideFromDebugger / ThreadDynamicCodePolicyInfo), `NtQueryInformationFile`,
+`NtQuerySystemInformation` class `0x73`, syscall `0x1E9`.
 
 The **x86 registry** sibling gap is now closed (see below).
 
