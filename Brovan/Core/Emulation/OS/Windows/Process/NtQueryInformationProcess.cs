@@ -882,6 +882,63 @@ namespace Brovan.Core.Emulation.OS.Windows
                             return NTSTATUS.STATUS_SUCCESS;
                         }
 
+                    case PROCESSINFOCLASS.ProcessImageFileName:
+                        {
+                            // 32-bit UNICODE_STRING is 8 bytes (Length 2, Max 2, Buffer 4). Callers query with
+                            // OutBufferPtr=NULL first to get the required length, so a null buffer + non-zero
+                            // length is legitimate. Mirrors the x64 branch above but uses UNICODE_STRING32 and
+                            // a pointer-sized Buffer.
+                            const uint HeaderSize = 8;
+                            if (OutBufferLength < HeaderSize)
+                            {
+                                SetReturnLength(HeaderSize);
+                                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                            }
+
+                            string GuestDos;
+                            if (CurrentProcess)
+                            {
+                                GuestDos = Instance.WinHelper.WinModules.Count > 0 && !string.IsNullOrEmpty(Instance.WinHelper.WinModules[0].Path)
+                                    ? Instance.WinHelper.WinModules[0].Path
+                                    : Instance._binary.Location;
+                            }
+                            else
+                            {
+                                if (!Instance.WinHelper.ValidProcessHandle(ProcessHandle))
+                                    return NTSTATUS.STATUS_INVALID_HANDLE;
+                                WinProcess Process = Instance.WinHelper.GetProcessByHandle(ProcessHandle, AccessMask.ProcessQueryLimitedInformation | AccessMask.ProcessQueryInformation);
+                                if (Process == null)
+                                    return NTSTATUS.STATUS_ACCESS_DENIED;
+                                GuestDos = Process.Path;
+                            }
+
+                            string Path = Instance.WinHelper.DosPathToNtDevicePath(GuestDos ?? string.Empty);
+                            int PathByteCount = Encoding.Unicode.GetByteCount(Path);
+                            uint TotalSize = HeaderSize + (uint)PathByteCount;
+                            SetReturnLength(TotalSize);
+
+                            if (OutBufferLength < TotalSize)
+                                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                            if (OutBufferPtr == 0 || !Instance.IsRegionMapped(OutBufferPtr, TotalSize))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                            // Convention on WOW64: the caller passes a single flat buffer; the kernel puts the
+                            // UNICODE_STRING at buffer[0..8) with Buffer pointing at buffer+8 where the string
+                            // bytes live. Mirrors what NtQueryInformationProcess/ProcessImageFileNameWin32 does
+                            // for a query-into-user-buffer.
+                            ulong StringBufferAddr = OutBufferPtr + HeaderSize;
+                            Instance._emulator.WriteMemory(OutBufferPtr + 0, (ushort)PathByteCount, 2);
+                            Instance._emulator.WriteMemory(OutBufferPtr + 2, (ushort)PathByteCount, 2);
+                            Instance._emulator.WriteMemory(OutBufferPtr + 4, (uint)StringBufferAddr, 4);
+
+                            Span<byte> PathBytes = Instance.WinHelper.Shared.GetSpan((uint)PathByteCount);
+                            Encoding.Unicode.GetBytes(Path.AsSpan(), PathBytes);
+                            if (!Instance.WriteMemory(StringBufferAddr, PathBytes.Slice(0, PathByteCount)))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                            return NTSTATUS.STATUS_SUCCESS;
+                        }
+
                     case PROCESSINFOCLASS.ProcessEnclaveInformation:
                         {
                             // A PROCESS_ENCLAVE_INFORMATION struct is 0x28 bytes on x86 and describes the
