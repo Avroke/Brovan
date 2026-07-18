@@ -1760,10 +1760,19 @@ pre-subtracts the syscall length on the MODE_32 path (x64's direct-syscall path 
 correct and is untouched). This unblocked **8 exception-based Debugger-Detection probes at once
 (15 → 23 GOOD)** and advanced the run to ~15.27M instructions.
 
-**Next frontier — `0xC0000005` (ACCESS_VIOLATION) later in Debugger Detection.** The run now
-reaches a fresh terminus at ~15.27M; another Debugger-Detection probe faults with an access
-violation that isn't caught. Next step: capture the faulting EIP + address and trace the probe.
-Nearby non-fatal gaps still `NOT_SUPPORTED` on x86: `NtQueryInformationThread`
+**Next frontier — `0xC0000005` (ACCESS_VIOLATION) NULL+0x18 deref at `0x69E42BE4`.** The run
+now reaches a fresh terminus at ~15.27M: a genuine hardware access violation (`Invalid memory
+read related to the address 0x18 at 0x69E42BE4`) goes unhandled and ntdll's unhandled-exception
+path (`NtTerminateProcess(-1, 0xC0000005)` from ntdll RVA `0xA48CD`) ends the process. The
+faulting instruction lives in a module loaded at `0x69E4xxxx` (not al-khaser / ntdll / kernel32
+`0x6B82xxxx` / kernelbase `0x10400000`) and dereferences `[reg+0x18]` with `reg == 0` — a
+pointer that should be valid is NULL, most likely an API/structure Brovan hands back as NULL for
+one of the Debugger-Detection probes that ran just before (the "Memory Breakpoints PAGE GUARD" /
+"Parent Process is explorer.exe" checks printed last). Guard-page handling itself is faithful
+(`TryHandleGuardPageViolation` clears the guard bit + raises `STATUS_GUARD_PAGE_VIOLATION`), so
+this is a distinct NULL-pointer gap. Next step: identify the `0x69E4xxxx` module and which
+probe's API return is NULL. Nearby non-fatal gaps still `NOT_SUPPORTED` on x86:
+`NtQueryVirtualMemory` (MemoryMappedFilenameInformation), `NtQueryInformationThread`
 (ThreadHideFromDebugger / ThreadDynamicCodePolicyInfo), `NtQueryInformationFile`,
 `NtQuerySystemInformation` class `0x73`, syscall `0x1E9`.
 
