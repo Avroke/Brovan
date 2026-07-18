@@ -1193,7 +1193,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const ulong UserDesktopInfoSize = 0x48;
         private const ulong UserPrimaryMonitorSize = 0x1000;
         private const ulong Win32ClientInfoX64Base = 0x800;
-        private const ulong Win32ClientInfoX86Base = 0x6CC;
+        // The 32-bit (WOW64) TEB's Win32ClientInfo base for the loaded SysWOW64 user32 build: user32's
+        // client-side stubs read pDeskInfo at TEB+0x820 and the paired field at TEB+0x828 (confirmed by
+        // disassembling GetShellWindow, RVA 0x42BB0: `mov ecx,[eax+0x820]; mov eax,[eax+0x828]`). With the
+        // slot model (pDeskInfo = slot 2, Desktop = slot 4, 4-byte slots) that pins the base to 0x818
+        // (0x818 + 2*4 = 0x820, 0x818 + 4*4 = 0x828). The old 0x6CC was an earlier-build offset that no
+        // loaded user32 export actually reads, so writes there were inert and GetShellWindow NULL-derefed
+        // pDeskInfo. Nothing in the emulator reads this base — it exists only for the guest user32 to read.
+        private const ulong Win32ClientInfoX86Base = 0x818;
         private const int Win32ClientInfoPDeskInfoSlot = 2;
         private const int Win32ClientInfoDesktopSlot = 4;
         private const int Win32ClientInfoActiveWindowSlot = 8;

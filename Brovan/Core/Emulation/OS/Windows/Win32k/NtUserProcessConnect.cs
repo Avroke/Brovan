@@ -67,6 +67,13 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 }
             }
 
+            // Publish the per-thread client desktop info into this thread's TEB Win32ClientInfo (pDeskInfo
+            // at TEB+0x820 on the WOW64 user32 build) so user32 client-side stubs that read it directly —
+            // e.g. GetShellWindow — find a valid (zeroed) DESKTOPINFO instead of NULL-dereferencing it
+            // before any window has been created. Without a window the DESKTOPINFO's shell-window fields
+            // stay 0, so GetShellWindow returns NULL just as it would in a headless / no-shell session.
+            Instance.WinHelper.EnsureUserClientThreadInfo(Instance.CurrentThread, 0);
+
             Instance.SetRawSyscallReturn(0); // STATUS_SUCCESS — the connect succeeded.
             return NTSTATUS.STATUS_SUCCESS;
         }

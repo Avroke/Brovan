@@ -1760,18 +1760,31 @@ pre-subtracts the syscall length on the MODE_32 path (x64's direct-syscall path 
 correct and is untouched). This unblocked **8 exception-based Debugger-Detection probes at once
 (15 → 23 GOOD)** and advanced the run to ~15.27M instructions.
 
-**Next frontier — `0xC0000005` (ACCESS_VIOLATION) NULL+0x18 deref at `0x69E42BE4`.** The run
-now reaches a fresh terminus at ~15.27M: a genuine hardware access violation (`Invalid memory
-read related to the address 0x18 at 0x69E42BE4`) goes unhandled and ntdll's unhandled-exception
-path (`NtTerminateProcess(-1, 0xC0000005)` from ntdll RVA `0xA48CD`) ends the process. The
-faulting instruction lives in a module loaded at `0x69E4xxxx` (not al-khaser / ntdll / kernel32
-`0x6B82xxxx` / kernelbase `0x10400000`) and dereferences `[reg+0x18]` with `reg == 0` — a
-pointer that should be valid is NULL, most likely an API/structure Brovan hands back as NULL for
-one of the Debugger-Detection probes that ran just before (the "Memory Breakpoints PAGE GUARD" /
-"Parent Process is explorer.exe" checks printed last). Guard-page handling itself is faithful
-(`TryHandleGuardPageViolation` clears the guard bit + raises `STATUS_GUARD_PAGE_VIOLATION`), so
-this is a distinct NULL-pointer gap. Next step: identify the `0x69E4xxxx` module and which
-probe's API return is NULL. Nearby non-fatal gaps still `NOT_SUPPORTED` on x86:
+**Resolved (partial) — the `0xC0000005` was `user32!GetShellWindow` reading a NULL
+`pDeskInfo`; the CLIENTINFO base was wrong for the loaded WOW64 user32 build.** The faulting
+module is `USER32.dll` (base `0x69E00000`); the fault (`Invalid memory read at 0x18`) is inside
+`GetShellWindow` (RVA `0x42BB0`), which does `mov ecx,[TEB+0x820]` (pDeskInfo) then
+`mov esi,[ecx+0x18]` — with pDeskInfo NULL it derefs `0x18`. Brovan wrote the Win32ClientInfo
+slots at base `0x6CC` (an earlier-build offset), but this user32 reads pDeskInfo at `TEB+0x820`
+and the paired field at `TEB+0x828`, which pins the base to **`0x818`** (slot 2 → `0x820`,
+slot 4 → `0x828`). Fixed: `Win32ClientInfoX86Base` → `0x818`, and `NtUserProcessConnect` now
+calls `EnsureUserClientThreadInfo` so the main thread's pDeskInfo is populated during USER32's
+client-connect (it was previously only set on window creation). `GetShellWindow` no longer
+NULL-derefs (nothing in the emulator reads this base — it exists only for guest user32).
+
+**Next frontier — `user32!GetWindowThreadProcessId(NULL)` reads a bad `aheList` (SHAREDINFO
+layout).** With GetShellWindow returning NULL (correct for a headless/no-shell session),
+al-khaser calls `GetWindowThreadProcessId(NULL, …)`, which faults at RVA `0x3CF25`
+(`cmp byte [ecx+edx+0x18],1`): `edx` is user32's cached `aheList` global (`[0x69EA8A00]`) and it
+holds **`0x20`**, not a valid handle-table base, so entry-0 (`hWnd==NULL` → index 0) derefs
+`[0x20+0x18]`. `0x20` is exactly the `HeEntrySize` value Brovan writes into the USERCONNECT
+SHAREDINFO — i.e. user32 reads `aheList` from the slot where Brovan wrote `HeEntrySize`, an
+off-by-one-field mismatch in the SHAREDINFO layout `NtUserProcessConnect` publishes (Brovan:
+psi@+0x00 / aheList@+0x04 / HeEntrySize@+0x08; this build appears to want aheList one slot
+later). Next step: disassemble user32's client-connect caching (it block-copies the SHAREDINFO,
+no plain `mov [global]` store) to pin the exact aheList/HeEntrySize offsets for this build, then
+correct the writes in `NtUserProcessConnect` (and set up a valid entry-0 so
+`GetWindowThreadProcessId(NULL)` returns 0). Nearby non-fatal gaps still `NOT_SUPPORTED` on x86:
 `NtQueryVirtualMemory` (MemoryMappedFilenameInformation), `NtQueryInformationThread`
 (ThreadHideFromDebugger / ThreadDynamicCodePolicyInfo), `NtQueryInformationFile`,
 `NtQuerySystemInformation` class `0x73`, syscall `0x1E9`.
