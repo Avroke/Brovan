@@ -642,6 +642,30 @@ threads parkent indéfiniment sur un event (`0x8C`, `deadline=-1`), le scheduler
 F-THREAD** que la voie Framework (§8bis.6) : le hand-off loader/CLR multi-thread. Régression
 native vérifiée nulle (`hello_native.exe` : init CRT → `fputc` → `exit`, propre).
 
+**F-THREAD, couche 1 — pelée : réveil worker-factory sur release.** En symbolisant les RIP
+de park via les PDB ntdll, la frontière s'est disséquée : le thread principal (7977) spinne
+dans `ZwWaitForAlertByThreadId` (le primitif derrière `WaitOnAddress` / SRW / `Lock`/`Monitor`
+.NET), tandis que les workers du thread-pool parkent dans `ZwWaitForWorkViaWorkerFactory`
+(deadline INFINITE). Cause : **`NtReleaseWorkerFactoryWorker` enfilait bien le travail dans la
+file de complétion de la factory, mais ne réveillait aucun worker déjà parké** — `EnsureWorkerThreads`
+ne *crée* que de nouveaux threads, il ne réveille pas les existants. Le worker restait donc
+bloqué indéfiniment, le travail relâché ne s'exécutait jamais, et le rendez-vous du thread-pool
+ne se faisait pas. **Fix** : `WakeWorkerFactoryWaitersForFactory` réveille un worker parké pour
+la factory (il re-exécute son wait, dépile la release, exécute le travail) — appelé depuis
+`NtReleaseWorkerFactoryWorker` après `EnqueueReleaseCompletion`. Comportement fidèle à Windows
+(une release réveille un worker), étroit (ne se déclenche que sur le chemin worker-factory,
+donc zéro effet sur les samples natifs), validé sans régression native.
+
+**Effet mesuré** : la voie Core **initialise désormais le runtime .NET complètement** — les
+threads `.NET Finalizer` (idle sur un `Sleep(Timeout.Infinite)`) et `.NET Tiered Compilation
+Worker` (poll 1 s) apparaissent, preuve que le startup runtime va bien plus loin qu'avant (il
+deadlockait avant même leur création). Il reste **une couche F-THREAD** : le thread principal
+reste bloqué sur l'event auto-reset `0x8C` (créé par lui-même via `NtCreateEvent`, `eventType=1`),
+un rendez-vous final qu'un thread de fond doit signaler. Émettre plus de comportement (plus de
+threads, syscalls, grams) est un gain net pour l'analyse comportementale, même sans atteindre
+`Main`. Prochaine couche : tracer le signaleur de `0x8C` (probablement le thread pool /
+DiagnosticServer une fois son propre wait satisfait).
+
 ### 8bis.6 — Voie Framework (.NET Framework 4.x, CLR classique) : provisionnée, le shim bootstrappe
 
 En parallèle de la voie **Core** (coreclr, self-contained), la voie **Framework** exécute

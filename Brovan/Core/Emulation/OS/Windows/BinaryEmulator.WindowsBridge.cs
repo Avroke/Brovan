@@ -503,6 +503,49 @@ namespace Brovan.Core.Emulation
             return WokeThread;
         }
 
+        /// <summary>
+        /// Wakes a worker parked in NtWaitForWorkViaWorkerFactory for the given factory after work
+        /// (a release completion or a queued packet) has been posted directly to the factory's I/O
+        /// completion queue — the NtReleaseWorkerFactoryWorker path, which enqueues work but does not
+        /// itself signal any waitable object. Without this, a worker that is already parked (deadline
+        /// INFINITE) never re-runs its wait to dequeue the work, so the released work never executes:
+        /// the .NET thread pool then never runs the item that would alert the main thread (WaitOnAddress
+        /// / NtWaitForAlertByThreadId), and the process deadlocks in runtime startup before Main.
+        /// </summary>
+        internal bool WakeWorkerFactoryWaitersForFactory(ulong WorkerFactoryHandle)
+        {
+            bool WokeThread = false;
+
+            if (WinHelper == null || WorkerFactoryHandle == 0)
+                return false;
+
+            WindowsWakeThreadSnapshot.Clear();
+            foreach (EmulatedThread Thread in Threads.Values)
+                WindowsWakeThreadSnapshot.Add(Thread);
+
+            for (int i = 0; i < WindowsWakeThreadSnapshot.Count; i++)
+            {
+                EmulatedThread Thread = WindowsWakeThreadSnapshot[i];
+                if (Thread == null || Thread.State != EmulatedThreadState.Waiting || !Thread.WaitActive)
+                    continue;
+
+                WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
+                if (State == null || !State.WorkerFactoryWaitActive || State.WorkerFactoryHandle != WorkerFactoryHandle)
+                    continue;
+
+                if (!TrySatisfyThreadWait(Thread))
+                    continue;
+
+                CompleteThreadWait(Thread);
+                WokeThread = true;
+                break; // one release wakes one worker
+            }
+
+            WindowsWakeThreadSnapshot.Clear();
+
+            return WokeThread;
+        }
+
         internal void MaterializeSignaledWaitPackets(ulong IoCompletionHandle)
         {
             if (WinHelper == null)
