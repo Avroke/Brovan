@@ -883,8 +883,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                         }
 
                     case PROCESSINFOCLASS.ProcessImageFileNameWin32:
-                        // Bitness-aware helper (uses StructSerializer.GetStructSize<UNICODE_STRING64> which
-                        // returns 8 bytes on x86). Same output shape and semantics as the x64 branch above.
+                        // Bitness-aware helper: writes an 8-byte UNICODE_STRING (Buffer @ +4) on x86 and a
+                        // 16-byte one (Buffer @ +8) on x64. Same output shape and semantics as the x64 branch.
                         return QueryProcessImageFileNameWin32(Instance, ProcessHandle, OutBufferPtr, OutBufferLength, SetReturnLength);
 
                     case PROCESSINFOCLASS.ProcessQuotaLimits:
@@ -1021,7 +1021,19 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(FullPath))
                 FullPath = Process.Path ?? string.Empty;
 
-            uint StructSize = StructSerializer.GetStructSize<UNICODE_STRING64>(Instance);
+            // UNICODE_STRING header size is pointer-width-dependent: 8 bytes on x86
+            // (Length 2 / MaxLength 2 / Buffer 4 @ +4) vs 16 on x64 (Length 2 / MaxLength 2 /
+            // pad 4 / Buffer 8 @ +8). `UNICODE_STRING64` is a fixed 16-byte blittable struct
+            // (its `ulong Buffer` is 8 bytes on BOTH bitnesses — StructSerializer.GetStructSize
+            // is NOT pointer-aware for a plain `ulong`), so writing it to a WOW64 caller put the
+            // Buffer pointer at +8, which the 32-bit caller reads at +4 (the pad word) as NULL —
+            // then kernelbase!QueryFullProcessImageNameW memcpy's the name from NULL and faults
+            // (the al-khaser parent-process "is explorer.exe" check). Size the header + the OUT
+            // Buffer pointer to the guest bitness.
+            bool Is64 = Instance._binary.Architecture == BinaryArchitecture.x64;
+            uint StructSize = Is64 ? 16u : 8u;
+            ulong BufferFieldOffset = Is64 ? 8ul : 4ul;
+
             int PathByteCount = Encoding.Unicode.GetByteCount(FullPath) + 2;
             Span<byte> PathBytes = Instance.WinHelper.Shared.GetSpan((uint)PathByteCount);
             Encoding.Unicode.GetBytes(FullPath.AsSpan(), PathBytes);
@@ -1046,14 +1058,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance._emulator.WriteMemory(BufferPtr, PathBytes.Slice(0, PathByteCount)))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            UNICODE_STRING64 Unicode = new UNICODE_STRING64()
-            {
-                Length = Length,
-                MaximumLength = MaximumLength,
-                Buffer = BufferPtr
-            };
-
-            if (!StructSerializer.WriteStruct(Instance, OutBufferPtr, Unicode).Success)
+            // Zero the whole header first so the x64 pad word (+4..+8, between MaxLength and the
+            // 8-byte Buffer) is clean; then lay down Length / MaxLength / the bitness-sized Buffer.
+            Instance.WinHelper.WriteZeroMemory(OutBufferPtr, StructSize);
+            Instance._emulator.WriteMemory(OutBufferPtr + 0, Length, 2);
+            Instance._emulator.WriteMemory(OutBufferPtr + 2, MaximumLength, 2);
+            if (!Instance.WritePointer(OutBufferPtr + BufferFieldOffset, BufferPtr))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             return NTSTATUS.STATUS_SUCCESS;
