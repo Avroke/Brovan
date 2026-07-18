@@ -1739,16 +1739,23 @@ The filter `0x40ee00` now executes (its `ret 4` at `0x40EE0D` returns into
 `UnhandledExceptionFilter`) and al-khaser runs past the probe. x64 untouched (its
 `MemoryRegionInformation` path is unchanged).
 
-**Next frontier — `0xC0000409` (STACK_BUFFER_OVERRUN / `__fastfail`) after the filter
-resumes.** With the filter running, `UnhandledExcepFilterTest`'s
-`EXCEPTION_CONTINUE_EXECUTION` resume proceeds but the process then fail-fasts with
-`0xC0000409` — no `NtRaiseException` precedes it (it goes straight to `NtTerminateProcess`, the
-`int 0x29` fast-fail signature), before the probe prints its verdict. The likely cause is that
-the resume restores a subtly-wrong CPU context (ESP / a callee-saved register), so the CRT
-`__security_check_cookie` in the resuming frame sees a corrupted GS cookie and calls
-`__report_gsfailure`. Next step: capture the CONTEXT `DispatchExceptionX86` builds vs. what
-`NtContinue` restores across the `CONTINUE_EXECUTION` path and find the mismatched field.
-Nearby non-fatal gaps still `NOT_SUPPORTED` on x86: `NtQueryInformationThread`
+**Next frontier — `0xC0000409` (STACK_BUFFER_OVERRUN) after the filter resumes.** With the
+filter running, `UnhandledExcepFilterTest`'s `EXCEPTION_CONTINUE_EXECUTION` resume proceeds
+but the process then fail-fasts with `0xC0000409` before the probe prints its verdict. The
+termination is an explicit `NtTerminateProcess(NtCurrentProcess, 0xC0000409)` (not `int 0x29`,
+which Brovan maps to a plain stop) from kernelbase code — a canary value sits on the stack at
+the call, the `RtlFailFast` / `__report_gsfailure` signature — so a stack GS-cookie check has
+failed. **The exception resume itself is not the cause**: instrumenting the
+`CONTINUE_EXECUTION` path showed the CONTEXT `DispatchExceptionX86` builds and the CONTEXT
+`NtContinue` restores are byte-identical (EIP `0x1052B5B4`, ESP `0x100F8C00`, EBP, EAX, ECX
+all match), and `DispatchExceptionX86` writes its record/context strictly below the resume ESP
+(`[0x100F88D0, 0x100F8BF4)` vs the cookie slot near `0x100F8C54`), so it clobbers nothing live.
+The cookie failure therefore comes from *post-resume* code — either the resuming frame's cookie
+slot was disturbed by a subtlety earlier in the dispatch, or (more likely) al-khaser's next
+Debugger-Detection check runs into a distinct emulation gap whose corruption surfaces as the
+GS check. Next step: identify which function's epilogue fails (map the kernelbase/CRT load
+bases — the `modules` command only lists ntdll today — and single-step from the resume to the
+`RtlFailFast` call). Nearby non-fatal gaps still `NOT_SUPPORTED` on x86: `NtQueryInformationThread`
 (ThreadHideFromDebugger / ThreadDynamicCodePolicyInfo), `NtQueryInformationFile`,
 `NtQuerySystemInformation` class `0x73`, syscall `0x1E9`.
 
