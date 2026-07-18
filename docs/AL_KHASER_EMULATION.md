@@ -1813,13 +1813,42 @@ shell32 / shlwapi / powrprof / …) — that is faithful behaviour: al-khaser fl
 minimal-launch whitelist as "injected", and Brovan legitimately loads the full transitive import
 closure at startup.
 
+**Landed alongside — five WOW64 gap-fills exposed while root-causing the combase frontier.**
+`NtOpenEvent` (SSN `0x40`) was unimplemented — mirrors `NtOpenMutant` / `NtOpenSemaphore` now,
+bitness-agnostic, returns `STATUS_OBJECT_NAME_NOT_FOUND` for unregistered names. `NtOpenThreadToken`
+(SSN `0x24`) had a blanket x86 gate to `WinUnimplemented` — refactored to a single bitness-agnostic
+body so combase's `CoInitializeSecurity` sub-A path (which gates on `LastError == ERROR_NO_TOKEN`)
+takes its success branch instead of erroring on `ERROR_NOT_SUPPORTED`. `NtQueryInformationThread`'s
+blanket WOW64 gate rejected every class except `ThreadBasicInformation` — narrowed to only the
+three genuinely-bitness-sensitive classes (`ThreadQuerySetWin32StartAddress` / `ThreadAffinityMask` /
+`ThreadUmsInformation`) so `ThreadDynamicCodePolicyInfo` / `ThreadHideFromDebugger` / friends can
+run on x86. `NtQueryInformationProcess(ProcessEnclaveInformation)` returns `STATUS_NOT_FOUND` with a
+zero-filled 0x28-byte struct (the honest "not in an enclave" answer) so combase's VBS-security probe
+takes its non-enclave path. `NtQueryInformationProcess(ProcessImageFileName, 0x1B)` on x86 emits
+`UNICODE_STRING32` + string bytes into the flat caller buffer via `DosPathToNtDevicePath`. Three
+previously-unhandled WOW64 syscalls landed too: `NtWow64CsrGetProcessId` (0x1DF; returns a synthetic
+CSRSS-like PID = 500, **distinct** from the caller — an earlier draft that returned the caller's PID
+flipped the Parent-Process probe BAD), `NtWow64GetCurrentProcessorNumberEx` (0x1E2; single-group /
+single-core PROCESSOR_NUMBER), `NtWow64IsProcessorFeaturePresent` (0x1E9; mirrors the KUSER_SHARED_DATA
+ProcessorFeatures bits). None of these move the combase terminus (see below) but each closes a real
+WOW64 gap that will surface on other samples.
+
 **Next frontier — Generic Sandbox/VM Detection: `combase.dll` NULL-`this` fault in an internal
 COM helper.** After the DLL Injection Detection section prints its verdicts, al-khaser calls
 `CoInitializeEx` (combase export at RVA `0xA7F20`) and then `CoInitializeSecurity` (RVA `0xA727D0`).
 Deep inside the second call the process faults with `Invalid memory write related to the address
 0xC at 0x10A9FBD4`. Pinned by scanning back for the `MZ` header (base **`0x109E0000`**, matches
 combase from the export-name scan) and reading the export directory name: the module is **combase.dll**,
-fault RVA **`0xBFBD4`** inside an internal `__thiscall` helper at RVA `0xBFBBF`. The helper's
+fault RVA **`0xBFBD4`** inside an internal `__thiscall` helper at RVA `0xBFBBF`. Traced the caller
+chain: `sub_10B119C0` calls `sub_10B0C8C9` which is a 3-step init (sub_A: `OpenThreadToken` +
+`SetThreadToken` impersonation prep — now succeeds after the `NtOpenThreadToken` fix landed above;
+sub_B: `RegOpenCurrentUser` + `RegOpenKeyExW(HKCU\Software\Classes\Local Settings)` — returns
+`NAME_NOT_FOUND` because that key doesn't exist in Brovan's virtual HKCU; sub_C: `SetThreadToken`
+restore + `CloseHandle`). Sub_10B119C0 tolerates the `NAME_NOT_FOUND` (no error propagation) but
+then `cmp [ebp-4], 0; je skip_init` — the OUT `PHKEY` never got populated because sub_B failed —
+so the interlocked-init at `sub_10AA0528` that would have written to the singleton at combase
+runtime `0x10C020D8` (pref-based `0x102420D8`, RVA `0x2420D8`) is SKIPPED. The later caller at
+combase RVA `0xC030D` (`mov ecx, [0x102420D8]; call 0xBFBBD`) reads NULL and NULL-derefs. The helper's
 prologue is `push ebp / mov ebp,esp / and esp,~7 / sub esp,0x14 / push ebx,esi,edi / mov edi,ecx /
 mov eax,0xFFFF / xor ebx,ebx / mov [edi+0xC],ax` — it dereferences `this` without any NULL check.
 Register dump at fault: `ECX=0 EDX=0 EDI=0 EBX=0`. Immediate caller lives at combase RVA `0xC030D`:
@@ -1832,7 +1861,18 @@ its dependency is a small NT call we already understand, implement it faithfully
 `CoInitializeSecurity` at the export boundary and return `S_OK` without invoking combase's own
 implementation — pragmatic but a real deviation from "run the real DLL". Option (1) is the codebase
 convention; option (2) is a fallback if (1) blooms. The current terminus is a genuine unmet-dependency
-boundary (COM/RPC subsystem), not a Brovan bug in the fault path itself. Nearby non-fatal gaps still `NOT_SUPPORTED` on x86:
+boundary (COM/RPC subsystem), not a Brovan bug in the fault path itself.
+The two credible next steps in priority order:
+1. **Add the specific HKCU key** (`HKCU\Software\Classes\Local Settings`) to the virtual registry
+   so sub_B populates the OUT `PHKEY` → sub_10B119C0's `cmp [ebp-4], 0; je` doesn't short-circuit
+   → `sub_10AA0528` runs and writes the singleton. Requires either extending the hive bootstrap
+   or synthesising the key at first-open time; still may need `sub_10AA0528` to actually complete
+   (it takes multiple args and probably has its own dependencies).
+2. **Intercept `CoInitializeSecurity` at the export boundary** and return `S_OK` with a
+   pre-populated singleton (either a valid COM class-factory-table stub or a NULL sentinel that
+   the fault site can then NULL-check post-intercept). Requires new export-hook infrastructure
+   (combase is not a Brovan-registered `WinModule`, so its runtime base has to be discovered via
+   the `LoadWinLibrary` path). Nearby non-fatal gaps still `NOT_SUPPORTED` on x86:
 `NtQueryVirtualMemory` (MemoryMappedFilenameInformation), `NtQueryInformationThread`
 (ThreadHideFromDebugger / ThreadDynamicCodePolicyInfo), `NtQueryInformationFile`,
 `NtQuerySystemInformation` class `0x73`, syscall `0x1E9`.
