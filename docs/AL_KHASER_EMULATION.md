@@ -1531,7 +1531,8 @@ the guest ntdll's `mov eax, imm32` stub prologues, now from `WindowsLibs/SysWOW6
 | `NtQueryInformationProcess(ProcessDebugObjectHandle/ProcessDebugFlags)` → WOW64 | x86 debug-object probe returns `STATUS_PORT_NOT_SET` (no debugger) → BAD→GOOD (**15 GOOD / 3 BAD**) |
 | `NtQueryVirtualMemory(MemoryRegionInformation)` → WOW64 | class-3 query used by `SetUnhandledExceptionFilter`'s filter validator now works on x86 → the registered filter is stored and **actually runs** (was: filter dropped → `UnhandledExcepFilterTest` killed the process at `0xC000008E`) |
 | WOW64 exception-resume EIP off-by-+2 (`NtRaiseException` syscall advance) | the CONTINUE_EXECUTION resume landed 2 bytes into the next instruction (kernelbase!RaiseException's GS-cookie reload) → `0xC0000409` fail-fast; fixed → **23 GOOD** (8 exception-based probes unblocked) |
-| *(open)* `0xC0000005` (ACCESS_VIOLATION) later in Debugger Detection | new terminus at ~15.27M instructions; see below |
+| `0xC0000005` (ACCESS_VIOLATION) in Debugger Detection: `user32!GetWindowThreadProcessId(NULL)` read a bad `aheList` | `NtUserProcessConnect` published the 32-bit-packed SHAREDINFO; this WOW64 build carries the **64-bit** SHAREDINFO (aheList@+0x08 / HeEntrySize@+0x10 / pDispInfo@+0x18). Corrected offsets → `GetWindowThreadProcessId(NULL)` returns 0 → **15.27M → ~37.7M**, into DLL Injection Detection (**41 GOOD / 5 BAD**) |
+| *(open)* DLL Injection Detection: al-khaser's `LdrEnumerateLoadedModules` callback NULL-derefs at `0x40E300` | new terminus at ~37.7M instructions; see below |
 
 #### Resolved this pass (each fix is a generic WOW64 fidelity correction)
 
@@ -1772,22 +1773,40 @@ calls `EnsureUserClientThreadInfo` so the main thread's pDeskInfo is populated d
 client-connect (it was previously only set on window creation). `GetShellWindow` no longer
 NULL-derefs (nothing in the emulator reads this base — it exists only for guest user32).
 
-**Next frontier — `user32!GetWindowThreadProcessId(NULL)` reads a bad `aheList` (SHAREDINFO
-layout).** With GetShellWindow returning NULL (correct for a headless/no-shell session),
-al-khaser calls `GetWindowThreadProcessId(NULL, …)`, which faults at RVA `0x3CF25`
+**Landed — `NtUserProcessConnect` publishes the 64-bit SHAREDINFO layout (WOW64).**
+`user32!GetWindowThreadProcessId(NULL, …)` was faulting at RVA `0x3CF25`
 (`cmp byte [ecx+edx+0x18],1`): `edx` is user32's cached `aheList` global (`[0x69EA8A00]`) and it
-holds **`0x20`**, not a valid handle-table base, so entry-0 (`hWnd==NULL` → index 0) derefs
-`[0x20+0x18]`. `0x20` is exactly the `HeEntrySize` value Brovan writes into the USERCONNECT
-SHAREDINFO — i.e. user32 reads `aheList` from the slot where Brovan wrote `HeEntrySize`, an
-off-by-one-field mismatch in the SHAREDINFO layout `NtUserProcessConnect` publishes (Brovan:
-psi@+0x00 / aheList@+0x04 / HeEntrySize@+0x08; this build appears to want aheList one slot
-later). Next step: disassemble user32's client-connect caching (it block-copies the SHAREDINFO,
-no plain `mov [global]` store) to pin the exact aheList/HeEntrySize offsets for this build, then
-correct the writes in `NtUserProcessConnect` (and set up a valid entry-0 so
-`GetWindowThreadProcessId(NULL)` returns 0). Nearby non-fatal gaps still `NOT_SUPPORTED` on x86:
-`NtQueryVirtualMemory` (MemoryMappedFilenameInformation), `NtQueryInformationThread`
-(ThreadHideFromDebugger / ThreadDynamicCodePolicyInfo), `NtQueryInformationFile`,
-`NtQuerySystemInformation` class `0x73`, syscall `0x1E9`.
+held **`0x20`** — exactly the `HeEntrySize` value Brovan wrote — because `NtUserProcessConnect`
+published the *classic 32-bit-packed* SHAREDINFO (psi@+0x00 / aheList@+0x04 / HeEntrySize@+0x08),
+but this WOW64 build carries the **64-bit** SHAREDINFO in the shared section (win32k.sys is 64-bit
+and maps the same section into the 32-bit view, so every field is pointer-sized). Root-caused by
+disassembling user32's client-connect `rep movsd` (copies `siClient` from the USERCONNECT into the
+globals at dest base `0x…A89F8`) and cross-checking a raw byte-scan of `.text` for references to
+each derived global: `aheList` sits at `siClient+0x08` (35 refs at `0x…A8A00`), `HeEntrySize` at
+`siClient+0x10` (37 refs at `0x…A8A08`), `pDispInfo` at `siClient+0x18` (20 refs at `0x…A8A10`),
+`ulSharedDelta` at `siClient+0x20`; the `+0x0C` / `+0x14` "packing" slots have **0** refs (padding).
+Fix (`NtUserProcessConnect`): `SharedInfoAheListOffset = base+0x08`, `HeEntrySizeOffset = base+0x10`,
+`DispInfoOffset = base+0x18` (low 32 bits hold the < 4 GB guest pointer, high dword stays 0 from the
+zero-fill; `ulSharedDelta` left 0 — Brovan stores user-mode pointers directly, so user32's
+`userPtr = storedPtr - ulSharedDelta` fix-up must be identity). With a valid `aheList`, entry-0's
+zeroed `bType != TYPE_WINDOW` fails the type check → `GetWindowThreadProcessId(NULL)` returns 0
+(correct). The offsets are the *native* x64 SHAREDINFO layout too, so the handler is now correct on
+both bitnesses (x64 stays 244 GOOD). al-khaser advances **15.27M → ~37.7M** instructions, clearing
+the Parent-Process (explorer.exe) and the rest of Debugger-Detection into **DLL Injection Detection**
+(**23 GOOD / 3 BAD → 41 GOOD / 5 BAD**).
+
+**Next frontier — DLL Injection Detection: al-khaser's own module walk NULL-derefs at
+`0x40E300`.** After `CreateToolhelp32Snapshot` fails (`Failed to get snapshot. Last error: 31`),
+al-khaser falls back to `LdrEnumerateLoadedModules`; its per-module callback then hits
+`[!] Error reading entry.` and reads NULL at its own image RVA `0xE300` (`0x40E300`), which
+`KiUserExceptionDispatcher` surfaces and the process terminates with exit code `0xC0000005`. The
+snapshot failure (ToolHelp) and/or an incomplete `LdrEnumerateLoadedModules` module entry (missing
+`FullDllName` / base) is the likely root cause — next step is to pin which field the callback derefs
+at `0x40E300` and make the module-enumeration surface (ToolHelp `Module32First`/`Next` or the
+`LDR_DATA_TABLE_ENTRY` the enumerate callback passes) return a complete entry. Nearby non-fatal gaps
+still `NOT_SUPPORTED` on x86: `NtQueryVirtualMemory` (MemoryMappedFilenameInformation),
+`NtQueryInformationThread` (ThreadHideFromDebugger / ThreadDynamicCodePolicyInfo),
+`NtQueryInformationFile`, `NtQuerySystemInformation` class `0x73`, syscall `0x1E9`.
 
 The **x86 registry** sibling gap is now closed (see below).
 

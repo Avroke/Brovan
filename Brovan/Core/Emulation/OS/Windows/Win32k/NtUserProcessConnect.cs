@@ -26,15 +26,28 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         // The out buffer is a USERCONNECT: an 8-byte header (ulVersion, ulCurrentVersion) followed by the
         // SHAREDINFO (siClient) at +0x08. user32's _UserClientDllInitialize copies the SHAREDINFO (from
         // buffer+0x08) wholesale into its gSharedInfo global, then reads gSharedInfo[+0x00] as psi
-        // (PSERVERINFO) and [+0x04] as aheList — the very first thing it does is `test byte [psi], 4`, so psi
-        // MUST be a valid readable SERVERINFO pointer. Confirmed empirically: writing EntrySize at +0x08 made
-        // user32 read it back as psi, so the SHAREDINFO base is buffer+0x08.
+        // (PSERVERINFO) — the very first thing it does is `test byte [psi], 4`, so psi MUST be a valid
+        // readable SERVERINFO pointer. Confirmed empirically: writing at +0x08 made user32 read it back as
+        // psi, so the SHAREDINFO base is buffer+0x08.
+        //
+        // On the WOW64 (19041) build the shared section carries the *64-bit* SHAREDINFO layout — win32k.sys
+        // is 64-bit and maps the same section into the WOW64 process, so every field is pointer-sized (8
+        // bytes) even in the 32-bit view. user32's client-connect copies siClient into its globals at
+        // 0x...A89F8 and then reads aheList from siClient+0x08 (global 0x...A8A00) and HeEntrySize from
+        // siClient+0x10 (global 0x...A8A08) — NOT the classic 32-bit packing (aheList+0x04 / HeEntrySize+0x08).
+        // Verified by disassembling user32!GetWindowThreadProcessId (`mov edx,[A8A00]` = aheList,
+        // `mov ecx,[A8A08]` = HeEntrySize, `cmp byte [ecx+edx+0x18],1`) and the connect-time `rep movsd`
+        // that populates those globals from siClient (dest base 0x...A89F8, +0x0C/+0x14 padding unreferenced).
+        // The low 32 bits of each 8-byte field hold the (< 4 GB) guest pointer; the high dword stays 0 because
+        // the SHAREDINFO region is zero-filled first. ulSharedDelta (siClient+0x20) is deliberately left 0:
+        // Brovan stores user-mode guest pointers directly in the handle entries (no separate kernel mapping),
+        // so user32's `userPtr = storedPtr - ulSharedDelta` fixup must be an identity.
         private const uint SharedInfoBase = 0x08;
         private const uint SharedInfoPsiOffset = SharedInfoBase + 0x00;
-        private const uint SharedInfoAheListOffset = SharedInfoBase + 0x04;
-        private const uint SharedInfoHeEntrySizeOffset = SharedInfoBase + 0x08;
-        private const uint SharedInfoDispInfoOffset = SharedInfoBase + 0x0C;
-        private const uint SharedInfoMinSize = SharedInfoBase + 0x10;
+        private const uint SharedInfoAheListOffset = SharedInfoBase + 0x08;
+        private const uint SharedInfoHeEntrySizeOffset = SharedInfoBase + 0x10;
+        private const uint SharedInfoDispInfoOffset = SharedInfoBase + 0x18;
+        private const uint SharedInfoMinSize = SharedInfoBase + 0x28;
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
