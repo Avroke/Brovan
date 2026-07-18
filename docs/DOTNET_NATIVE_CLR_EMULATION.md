@@ -849,17 +849,39 @@ n'est qu'une question de *quelle enveloppe de bootstrap* attaquer en premier.
   + un headroom (1 MiB) et ne **commit** que le haut, laissant le bas réservé pour la
   garde du guest (chemin reserve→commit de `CommitMemory`). Pile utile inchangée pour
   le natif ; débloque le chargement de `clrjit` + l'exécution managée (§8bis.3).
-- **F-CLRMANAGED — exception managée non gérée au démarrage runtime, avant `Main` (frontière J5 active).**
-  Mesuré (binaire frais SDK 8.0.423 + commande `start` + staging Desktop original, cf.
-  §8bis.4 pour les deux pièges méthodo) : la chaîne host s'exécute **intégralement**
-  (`apphost→hostfxr→hostpolicy→coreclr→clrjit`, **J4**), puis ~**158 M instructions** de
-  managé, terminus **`NtTerminateProcess(0xE0434352)`** (exception CLR non gérée pendant
-  l'init runtime, **avant `Main`** — inchangé avec `Main` = `return 5`). **Couche 1
-  pelée (§8bis.5)** : le diagnostic `[SEH-FILTER]` a identifié un `BadImageFormatException`
-  (`0x800700C1`), root-causé au rejet du mapping `SEC_IMAGE` des assemblies managés AnyCPU
-  (`Machine=I386`) par `NtMapViewOfSection` — **corrigé**. coreclr progresse (init
-  multi-thread) et bute sur la **couche 2** : `E_INVALIDARG` (`0x80070057`), exception
-  CoreLib générique non liée à un syscall. Bloque J5.
+- **F-CLRMANAGED — ✅ J5 ATTEINT (managé `Main` exécuté, valeur de retour observée).**
+  Historique : la chaîne host s'exécute **intégralement**
+  (`apphost→hostfxr→hostpolicy→coreclr→clrjit→System.Private.CoreLib→System.Runtime`, **J4**),
+  puis le managé JIT-é. **Couche 1 pelée (§8bis.5)** : `[SEH-FILTER]` a identifié un
+  `BadImageFormatException` (`0x800700C1`), root-causé au rejet du mapping `SEC_IMAGE` des
+  assemblies managés AnyCPU (`Machine=I386`) par `NtMapViewOfSection` — **corrigé**. **Couche 2 :**
+  `E_INVALIDARG` (`0x80070057`) au chargement des façades ILONLY AnyCPU — `LoadWinLibrary`
+  rejetait le mismatch d'architecture ; **corrigé** (accepte les images managées malgré
+  l'arch). **Couche 3 (threading, F-THREAD) :** le pool de threads .NET / loader parallèle
+  se coordonne via worker-factory + événements ; `NtReleaseWorkerFactoryWorker` n'éveillait
+  pas un worker déjà parké — **corrigé** (`WakeWorkerFactoryWaitersForFactory`). **Couche 4
+  (staging) :** un échantillon .NET Core auto-contenu stagé sous le VFS était aplati sur un
+  Desktop synthétique, séparé de son runtime coreclr —
+  l'apphost échouait à `hostfxr` (« application does not exist ») avant coreclr ; **corrigé**
+  (reverse-map du chemin hôte VFS → chemin lecteur invité, runtime co-localisé). **Résultat :**
+  managé `Main` (`class P { static int Main() { return 5; } }`) s'exécute et le thread principal
+  se termine avec le code de sortie **`0x5`** — **J5 franchi**, aucune exception `0xE0434352`
+  avant `Main`.
+- **F-CLRINIT-AV — déterminisme de J5 : AV de thread runtime → deadlock loader (frontière active).**
+  J5 est **atteignable mais pas encore fiable** : la frontière est **non-déterministe**. Sur un
+  run, `Main` atteint `Exit(5)` ; sur un autre, à ~19 M instructions un thread worker du runtime
+  lève **`NtRaiseException 0xC0000005` (ACCESS_VIOLATION)** et meurt. Ce worker était celui qui
+  devait compléter le travail loader et **signaler l'événement work-complete** (`LdrpWorkCompleteEvent`,
+  vu handle `0x8C`/`0x4C` selon le run, auto/notification) ; sans lui, `Main` + le **.NET Finalizer**
+  parkent sur cet événement pour toujours → deadlock (`Scheduler ending` avec threads parkés). Le
+  trace `[EVT-SET]`/`[WAIT-PARK]`/`[EVT-WAKE]` confirme que **la machinerie d'événements est correcte**
+  (rendez-vous observés tous satisfaits) — la cause racine est **le crash du worker en amont**, pas un
+  bug de wake. Prochaine étape : symboliser le RIP de l'AV (module+rva via llvm-symbolizer sur
+  coreclr/clrjit) pour identifier la fonction runtime qui faute et le gap émulateur sous-jacent
+  (probable : mécanisme d'AV matérielle utilisé par coreclr — null-check / write-barrier / suspension
+  GC via redirection — dont le VEH n'est pas correctement ré-entré). **`NtTerminateProcess(NULL)`**
+  (reap des threads de fond au shutdown) est **corrigé** en amont, pour que le chemin de sortie propre
+  post-`Main` soit prêt une fois le déterminisme rétabli.
 - **F-FRAMEWORK — surface BCL réelle.** Selon ce que l'assembly touche, le CLR
   charge de plus en plus d'assemblies système ⇒ plus de fichiers VFS + plus de
   syscalls. La couverture croît avec le corpus, pas d'un coup.
