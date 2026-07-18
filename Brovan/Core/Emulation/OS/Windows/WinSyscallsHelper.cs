@@ -4437,6 +4437,16 @@ namespace Brovan.Core.Emulation.OS.Windows
             AddSyntheticRegistryKeyTrusted("\\Registry\\User\\.DEFAULT", KeyCache, DefaultHive);
             AddSyntheticRegistryKeyTrusted(UserRoot + "\\" + CurrentUserSid, KeyCache, DefaultHive);
             AddSyntheticRegistryKeyTrusted(ExplorerRoot + "\\SessionInfo\\0", KeyCache, DefaultHive);
+            // HKCU\Software\Classes\Local Settings — exists on every fresh Windows install; combase's
+            // CoInitializeSecurity singleton-init helper (sub_10B0C8C9 -> sub_B) opens this key via
+            // RegOpenCurrentUser + RegOpenKeyExW and stores the returned HKEY in its class-factory-table
+            // singleton (combase RVA 0x2420D8). Without this key the RegOpenKeyExW call returns
+            // NAME_NOT_FOUND, the OUT PHKEY stays NULL, sub_10B119C0 short-circuits past the interlocked-
+            // init at sub_10AA0528, and a later __thiscall through the still-NULL singleton NULL-derefs
+            // during CoInitializeSecurity — al-khaser_x86's Generic-Sandbox/VM-Detection frontier before
+            // this fix. Adding the key is a real realism improvement (matches every real Win10 system),
+            // not a per-sample workaround.
+            AddSyntheticRegistryKeyTrusted(UserRoot + "\\Software\\Classes\\Local Settings", KeyCache, DefaultHive);
             SetSyntheticRegistryStringTrusted(UserRoot + "\\Volatile Environment", "USERPROFILE", 2, UserProfile, KeyCache, DefaultHive);
             SetSyntheticRegistryStringTrusted(UserRoot + "\\Volatile Environment", "HOMEDRIVE", 1, "C:", KeyCache, DefaultHive);
             SetSyntheticRegistryStringTrusted(UserRoot + "\\Volatile Environment", "HOMEPATH", 1, "\\Users\\User", KeyCache, DefaultHive);
