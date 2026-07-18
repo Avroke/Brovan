@@ -306,7 +306,7 @@ Format volontairement calqué sur la table de progression d'`AL_KHASER_EMULATION
 | **J1 — Provisioning** 🟡 **partiel** | Déposer le runtime cible dans `WindowsLibs` + framework dans le VFS ; résolution de chemins OK. | Le loader guest mappe `clr.dll`/`clrjit.dll` (ou `coreclr.dll`) sans `STATUS_DLL_NOT_FOUND` ; modules visibles dans la LDR list. **Mesuré (§8bis)** : Brovan **construit et tourne sur hôte Linux**, émule un PE natif de bout en bout ; mais le bundle deps ne contient **aucun runtime CLR** → à ajouter. Un publish **self-contained** (runtime app-local) est mappé et exécuté par l'apphost. |
 | **J2 — Bind d'entrée** ✅ **FAIT (.NET Core)** | .NET Framework : l'import `mscoree!_CorExeMain` bind. .NET Core : l'apphost natif résout son chemin et charge la chaîne host. | **Mesuré (§8bis.2)** : après le fix `NtQueryFullAttributesFile`, l'apphost self-contained résout `pal::realpath` puis charge **`hostfxr.dll` → `hostpolicy.dll` → `coreclr.dll`**. |
 | **J3 — Survie init CLR** ✅ **FAIT** | Le CLR initialise GC/TLS/heaps sans faute non gérée. | **Mesuré (§8bis.2-3)** : trois blocages corrigés — réserve GC 2 To (sparse), gros reserve VirtualAlloc (espace haut), **modèle de pile** (réserve+garde) — plus le contournement W^X (`DOTNET_EnableWriteXorExecute=0`). `coreclr_initialize` **réussit**. |
-| **J4 — Première méthode JIT-ée** ✅ **ATTEINT** | `clrjit` compile et exécute au moins une méthode managée. | **Mesuré (§8bis.3)** : **`clrjit.dll` + `System.Private.CoreLib.dll` chargés**, code managé JIT-é exécuté. Terminus **reclassé (§8bis.4)** : le thread initial **revient au sentinel avant `Main`** (~5,77 M instr, exit 0, depuis ntdll) — coreclr s'initialise mais **ne transfère pas vers `Main`**. L'exception managée `0xE0434352` de §8bis.3 n'est **pas** reproductible depuis le commit (binaire périmé — piège SDK). → frontière J5. |
+| **J4 — Première méthode JIT-ée** ✅ **ATTEINT** | `clrjit` compile et exécute au moins une méthode managée. | **Mesuré (§8bis.3-4, binaire frais + commande `start`)** : chaîne host complète `apphost→hostfxr→hostpolicy→coreclr→clrjit` (toute la narration `COREHOST_TRACE` visible grâce au fix console-device), **`clrjit.dll` chargé**, ~**158 M instructions** de code managé JIT-é. Terminus : exception managée non gérée `0xE0434352` **avant `Main`** → frontière J5. |
 | **J5 — `Main()` managé** | Exécution du point d'entrée managé. | Effet de bord observable d'un `Console.WriteLine("...")` capté par `NtWriteFile`/console. |
 | **J6 — Terminaison propre** | Sortie via l'`ExitProcess` du CLR. | Statut de sortie honnête ; trace syscalls exploitable. |
 | **J7 — Robustesse** | Étendre au-delà du « hello world » (exceptions managées, threads, P/Invoke, réseau). | Un corpus de petits managés variés atteint J5/J6. |
@@ -511,61 +511,66 @@ d'exception user-mode (ou marcher la TLS Thread de coreclr) pour lire le type/me
 et/ou identifier les classes des **8× `NtQueryInformationProcess → NOT_SUPPORTED`** —
 pour atteindre **J5** (`Main` managé + sortie observable).
 
-### 8bis.4 — Correction : le vrai blocage J5 (retour-au-sentinel avant `Main`), et un piège de build
+### 8bis.4 — Deux corrections méthodo (SDK + commande `run` vs `start`), console-device fix validé, J5 reconfirmé
 
-**⚠️ Piège de build critique (à connaître avant tout).** Dans cet environnement,
-`/usr/bin/dotnet` est le SDK **8.0.129** (Roslyn 4.8) qui **ne peut pas** compiler
-`Brovan.Generators` (source generator Roslyn ≥ 4.10) : le build **échoue silencieusement**
-si l'on masque la sortie (`-v q | tail`), et l'exit code observé vient du `tail`, pas de
-`dotnet` — laissant en place un **binaire périmé**. Le SDK correct est
-**`/root/.dotnet-new/dotnet` (8.0.423)**. Toute mesure faite sans lui teste l'ancien
-binaire. (C'est ce piège qui explique l'écart 116 M vs 5,77 M ci-dessous.)
+Cette section corrige deux **erreurs de méthode** commises en cours de session, puis
+reconfirme le blocage J5 avec la bonne procédure.
 
-**Reclassement du blocage J5.** Avec un binaire **fraîchement compilé** (SDK 8.0.423,
-console-device fix + diagnostics de cycle de vie des threads), l'état **committé** ne
-reproduit **pas** l'exception managée à 116 M de §8bis.3 (qui provenait d'un binaire
-d'une session antérieure, probablement avec du code diagnostic non-committé). Le
-comportement **déterministe et reproductible** est :
+**⚠️ Piège n°1 — SDK de build.** Dans cet environnement, `/usr/bin/dotnet` est le SDK
+**8.0.129** (Roslyn 4.8) qui **ne peut pas** compiler `Brovan.Generators` (source
+generator Roslyn ≥ 4.10) : le build **échoue silencieusement** si l'on masque la sortie
+(`-v q | tail`), et l'exit code observé vient du `tail`, pas de `dotnet` — laissant en
+place un **binaire périmé**. **SDK correct : `/root/.dotnet-new/dotnet` (8.0.423)**.
+Toujours vérifier le vrai exit code (`${PIPESTATUS[0]}`) + le mtime du `Brovan.dll`.
 
-- le **thread initial** (celui créé par `run`) exécute le loader ntdll + `coreclr_initialize`
-  (les deux **worker factories** sont créées, les workers démarrent), puis **revient au
-  sentinel d'entrée** (`ret` vers `RIP = 0`) avec **exit code 0**, à **~5,77 M instructions**,
-  **avant `Main`** (le `last-slice-rip` est **dans ntdll**, `0x180052630`) ;
-- les deux threads coreclr (loader worker + worker de thread-pool) **parquent** sur
-  `NtWaitForWorkViaWorkerFactory` avec **deadline infinie** ;
-- Brovan **ne convertit pas** le retour du thread initial en `ExitProcess`, donc le
-  scheduler continue, ne trouve plus de thread runnable, et **termine** (« Ran 5771424
-  instructions ») **sans** `NtTerminateProcess`, **sans** exception, **sans** message.
+**⚠️ Piège n°2 — commande du menu : `run` ≠ `start`.** En mode `--quick` **sans** `-s`,
+le menu démarre sans thread initial. La commande **`run`** (→ `RunMlfqScheduler`) crée
+alors un thread via `CreateEmulatedThread(IP)` dont le **contexte initial est incomplet**
+pour un vrai démarrage de processus Windows : le loader ntdll tourne mais **l'entrée de
+l'image ne s'exécute jamais** (0 ligne `[ENTRY]` / `[CFT]` depuis l'EXE, ~5,77 M instr,
+`ret` au sentinel). La commande **`start`** (`Emulator.Start()`) démarre correctement le
+thread initial via `RtlUserThreadStart` → entrée. **Toute mesure de bring-up .NET/natif
+doit passer par `start`** (ou le mode `-s`), jamais par `run` sur un binaire fraîchement
+chargé. (L'ancienne lecture « retour-au-sentinel à 5,77 M / deadlock thread » était
+**entièrement** un artefact du piège n°2 — il n'y a ni deadlock ni retour-avant-`Main`.)
 
-**Interprétation (mesurée).** Le thread pool parqué est un **faux-fuyard** : aucun
-`NtSetIoCompletion` n'est émis → aucun travail posté → un pool idle est **normal** pour
-`return 5`. Le vrai fait est : **coreclr s'initialise mais le transfert vers `Main`
-managé n'a pas lieu** ; le thread initial revient au niveau ntdll (exit 0) avant
-d'exécuter du code managé applicatif. **Ce n'est donc pas** l'exception managée
-`0xE0434352` (non reproductible depuis le commit) — c'est une frontière de
-**bootstrap/threading coopératif** : soit un pas d'init coreclr rend la main à ntdll
-prématurément, soit `coreclr_execute_assembly` dispatche `Main` sur un thread jamais
-ré-ordonnancé pour l'exécuter.
+**Blocage J5 reconfirmé (mesuré, binaire frais + `start` + staging Desktop original).**
+La chaîne host s'exécute **intégralement et correctement** :
+`apphost → resolve fxr → hostfxr_main_startupinfo → hostpolicy → deps.json (self-contained,
+TPA complet) → coreclr.dll → clrjit.dll` (**J4**), puis ~**158 M instructions** de code
+managé JIT-é, terminus **`NtTerminateProcess(0xE0434352)`** (exception managée CLR non
+gérée pendant l'init runtime, **avant `Main`** — inchangé avec un `Main` réduit à
+`return 5`). C'est donc bien la frontière **F-CLRMANAGED** de §8bis.3, pas un blocage de
+threading.
 
-**Livré cette session (non-masquant, rule « ne pas cacher le symptôme »).**
+**Le fix console-device est validé de façon décisive.** Avec `COREHOST_TRACE=1` dans
+l'env guest, **toute** la narration hostfxr/hostpolicy devient **visible** (elle sort par
+`WriteFile(stderr)` sur un handle console que l'ancien `NtWriteFile` jetait) :
+`--- Invoked apphost [8.0.29]`, `Resolved fxr […hostfxr.dll]`,
+`Executing as a self-contained app`, `CoreCLR path = […coreclr.dll]`,
+`Launch host: …mgdcore.dll`, `--- End breadcrumb write 1` (dernier log avant
+`coreclr_execute_assembly`). Sans le fix, **zéro** de ces lignes n'apparaissait. C'est
+l'outil de diagnostic décisif pour la suite (activer `COREHOST_TRACE=1` à la demande ;
+laissé **désactivé par défaut** pour ne pas polluer les traces de malwares).
+
+**Livré cette session.**
 1. **Fix console-device** (`NtWriteFile`) : une écriture vers un handle console **autre
-   que `STD_OUT`** (obtenu en ouvrant `CONOUT$`/`\Device\ConDrv`, pour lequel
-   `NtCreateFile` renvoie `ConsoleHandle`) tombait sur la branche Device →
-   `STATUS_INVALID_DEVICE_REQUEST` → **texte jeté**. Désormais routée vers la console
-   comme `STD_OUT`. Générique (toute sortie/rapport-d'exception d'un runtime managé) ;
-   prérequis pour **voir** un futur message managé.
+   que `STD_OUT`** (celui que `NtCreateFile` rend pour `CONOUT$`/`\Device\ConDrv`, =
+   `ConsoleHandle`) tombait sur la branche Device → `STATUS_INVALID_DEVICE_REQUEST` →
+   **texte jeté**. Désormais routée vers la console comme `STD_OUT`. Générique + validé
+   ci-dessus (trace host visible, message d'exception managé futur visible).
 2. **Diagnostics de cycle de vie des threads** (gated `LogFlags.General`) : retour-au-
-   sentinel (+ `last-slice-rip`), mort en slice via exception, `TryTerminateThread`, et
-   dump des threads parqués à la fin du scheduler. C'est ce qui a permis de reclasser le
-   blocage. **Volontairement pas** de « thread initial revient → ExitProcess » : ce serait
-   masquer l'anomalie (l'apphost n'appelle ni `ExitProcess` ni `Main`).
+   sentinel (+ `last-slice-rip`), mort en slice via exception, `TryTerminateThread`, dump
+   des threads parqués en fin de scheduler — ce sont eux qui ont permis d'isoler le piège
+   n°2 (RIP de retour résolu à `RtlUserThreadStart` ntdll `0x52630`).
 
-**Prochain pas J5.** Tracer, au niveau instruction, la dernière tranche du thread initial
-(depuis `0x180052630` ntdll) pour identifier **quelle fonction rend la main** — puis
-soit modéliser la livraison de travail worker-factory (si `Main` est dispatché sur un
-worker), soit corriger le pas d'init coreclr qui retourne prématurément. La **voie
-Framework** (mscoree→clr→clrjit) partage le même modèle de thread-pool/finalizer et
-buterait vraisemblablement sur la **même** frontière ; elle n'est donc pas un raccourci.
+**Prochain pas J5.** L'exception managée ne s'imprime pas (fail-fast avant le reporting
+d'exception non gérée). Deux pistes : (a) l'exécuter avec un coreclr **checked**
+(`DOTNET_LogEnable`/stress-log) OU capter le message via le reporting managé (maintenant
+que la console est routée) ; (b) instrumenter les **8× `NtQueryInformationProcess →
+NOT_SUPPORTED`** pour identifier les classes qu'une API CoreLib d'init interroge. La
+**voie Framework** (mscoree→clr) partage le finalizer/thread-pool et buterait sans doute
+sur une frontière voisine ; pas un raccourci.
 
 ### Reproduction
 
@@ -675,21 +680,15 @@ n'est qu'une question de *quelle enveloppe de bootstrap* attaquer en premier.
   + un headroom (1 MiB) et ne **commit** que le haut, laissant le bas réservé pour la
   garde du guest (chemin reserve→commit de `CommitMemory`). Pile utile inchangée pour
   le natif ; débloque le chargement de `clrjit` + l'exécution managée (§8bis.3).
-- **F-CLRMANAGED — bootstrap managé s'arrête avant `Main` (frontière J5 active, reclassée §8bis.4).**
-  **Correction** : avec un binaire fraîchement compilé (cf. le piège SDK §8bis.4),
-  l'exception managée `0xE0434352` à 116 M **n'est pas reproductible** depuis le commit
-  (elle venait d'un binaire d'une session antérieure). Le blocage **déterministe**
-  mesuré : le **thread initial** exécute le loader ntdll + `coreclr_initialize` (worker
-  factories créées), puis **revient au sentinel d'entrée** (`RIP=0`) avec **exit 0** à
-  **~5,77 M instructions**, **avant `Main`** (`last-slice-rip` **dans ntdll** `0x180052630`) ;
-  les workers coreclr **parquent** sur la worker-factory (deadline infinie, pool **idle** =
-  bénin, aucun `NtSetIoCompletion`). Donc **coreclr s'initialise mais ne transfère pas
-  vers `Main`**. Frontière de **bootstrap/threading coopératif**, pas d'exception managée.
-  Prochain pas : tracer au niveau instruction la dernière tranche du thread initial
-  (depuis ntdll `0x52630`) pour voir **quelle fonction rend la main** ; puis modéliser la
-  livraison worker-factory (si `Main` est dispatché sur un worker) ou corriger le pas
-  d'init coreclr qui retourne tôt. **Non-masquant** : on ne convertit **pas** le retour du
-  thread initial en `ExitProcess` (ce serait cacher l'anomalie). Bloque J5.
+- **F-CLRMANAGED — exception managée non gérée au démarrage runtime, avant `Main` (frontière J5 active).**
+  Mesuré (binaire frais SDK 8.0.423 + commande `start` + staging Desktop original, cf.
+  §8bis.4 pour les deux pièges méthodo) : la chaîne host s'exécute **intégralement**
+  (`apphost→hostfxr→hostpolicy→coreclr→clrjit`, **J4**), puis ~**158 M instructions** de
+  managé, terminus **`NtTerminateProcess(0xE0434352)`** (exception CLR non gérée pendant
+  l'init runtime, **avant `Main`** — inchangé avec `Main` = `return 5`). Le message ne
+  s'imprime pas (fail-fast avant le reporting). Pistes : coreclr **checked** +
+  `DOTNET_LogEnable`/stress-log, OU capter le message managé (console désormais routée),
+  OU identifier les **8× `NtQueryInformationProcess → NOT_SUPPORTED`**. Bloque J5.
 - **F-FRAMEWORK — surface BCL réelle.** Selon ce que l'assembly touche, le CLR
   charge de plus en plus d'assemblies système ⇒ plus de fichiers VFS + plus de
   syscalls. La couverture croît avec le corpus, pas d'un coup.
