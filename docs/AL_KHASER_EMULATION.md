@@ -1813,15 +1813,26 @@ shell32 / shlwapi / powrprof / …) — that is faithful behaviour: al-khaser fl
 minimal-launch whitelist as "injected", and Brovan legitimately loads the full transitive import
 closure at startup.
 
-**Next frontier — Generic Sandbox/VM Detection: NULL-relative write at `[NULL+0xC]` from
-`0x10A9FBD4`.** After the DLL Injection Detection section prints its verdicts, execution advances
-into "Generic Sandboxe/VM Detection" (spelling per the sample banner) and immediately faults with
-`Invalid memory write related to the address 0xC at 0x10A9FBD4`. `0x10A9FBD4` lies in the
-`0x10000000+` range Brovan uses as the base for the WOW64 kernelbase / user32 client-side stubs
-(kernelbase live-DLL was earlier reported at base `0x10400000`), so a client-side stub is derefing a
-NULL structure at offset `+0xC`. Next step: identify the exact module + RVA at `0x10A9FBD4`
-(disassemble against the resolved base), then trace which structure the caller assumes to be
-initialised at that IP. Nearby non-fatal gaps still `NOT_SUPPORTED` on x86:
+**Next frontier — Generic Sandbox/VM Detection: `combase.dll` NULL-`this` fault in an internal
+COM helper.** After the DLL Injection Detection section prints its verdicts, al-khaser calls
+`CoInitializeEx` (combase export at RVA `0xA7F20`) and then `CoInitializeSecurity` (RVA `0xA727D0`).
+Deep inside the second call the process faults with `Invalid memory write related to the address
+0xC at 0x10A9FBD4`. Pinned by scanning back for the `MZ` header (base **`0x109E0000`**, matches
+combase from the export-name scan) and reading the export directory name: the module is **combase.dll**,
+fault RVA **`0xBFBD4`** inside an internal `__thiscall` helper at RVA `0xBFBBF`. The helper's
+prologue is `push ebp / mov ebp,esp / and esp,~7 / sub esp,0x14 / push ebx,esi,edi / mov edi,ecx /
+mov eax,0xFFFF / xor ebx,ebx / mov [edi+0xC],ax` — it dereferences `this` without any NULL check.
+Register dump at fault: `ECX=0 EDX=0 EDI=0 EBX=0`. Immediate caller lives at combase RVA `0xC030D`:
+`mov ecx, [0x102420D8] ; push ebx ; call 0xBFBBD` — `ecx` is loaded from a lazy-initialised singleton
+global (combase runtime address `0x10C020D8` = combase-preferred RVA `0x2420D8`). The global is
+normally populated during `CoInitializeSecurity`'s RPCSS-handshake / class-registration path,
+which Brovan doesn't model (headless sandbox, no `RPCSS` / no local ALPC port). Two credible next
+steps: (1) trace which specific write inside `CoInitializeSecurity` publishes the singleton and, if
+its dependency is a small NT call we already understand, implement it faithfully; (2) intercept
+`CoInitializeSecurity` at the export boundary and return `S_OK` without invoking combase's own
+implementation — pragmatic but a real deviation from "run the real DLL". Option (1) is the codebase
+convention; option (2) is a fallback if (1) blooms. The current terminus is a genuine unmet-dependency
+boundary (COM/RPC subsystem), not a Brovan bug in the fault path itself. Nearby non-fatal gaps still `NOT_SUPPORTED` on x86:
 `NtQueryVirtualMemory` (MemoryMappedFilenameInformation), `NtQueryInformationThread`
 (ThreadHideFromDebugger / ThreadDynamicCodePolicyInfo), `NtQueryInformationFile`,
 `NtQuerySystemInformation` class `0x73`, syscall `0x1E9`.
