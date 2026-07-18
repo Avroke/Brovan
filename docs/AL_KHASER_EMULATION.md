@@ -1533,7 +1533,8 @@ the guest ntdll's `mov eax, imm32` stub prologues, now from `WindowsLibs/SysWOW6
 | WOW64 exception-resume EIP off-by-+2 (`NtRaiseException` syscall advance) | the CONTINUE_EXECUTION resume landed 2 bytes into the next instruction (kernelbase!RaiseException's GS-cookie reload) → `0xC0000409` fail-fast; fixed → **23 GOOD** (8 exception-based probes unblocked) |
 | `0xC0000005` (ACCESS_VIOLATION) in Debugger Detection: `user32!GetWindowThreadProcessId(NULL)` read a bad `aheList` | `NtUserProcessConnect` published the 32-bit-packed SHAREDINFO; this WOW64 build carries the **64-bit** SHAREDINFO (aheList@+0x08 / HeEntrySize@+0x10 / pDispInfo@+0x18). Corrected offsets → `GetWindowThreadProcessId(NULL)` returns 0 → **15.27M → ~37.7M**, into DLL Injection Detection (**41 GOOD / 5 BAD**) |
 | `NtReadVirtualMemory` (SSN 0x3F) → WOW64 (was **empty x86 branch**) | ReadProcessMemory-on-self was returning `WinUnimplemented` on x86, so al-khaser's DLL-Injection-Detection callback (which walks its own `InLoadOrderModuleList` via `ReadProcessMemory`) printed "Error reading entry" for every module and left its result vector empty → NULL-deref iterating the empty vector at `0x40E300`. Refactored the handler to a single bitness-agnostic body (`GetArg64` + `IsCurrentProcessPseudoHandle` + `GuestPointerSize`-sized `NumberOfBytesRead` write). Advances **~37.7M → ~232M**, past DLL Injection Detection into **Generic Sandbox/VM Detection** (**76 GOOD / 10 BAD**) |
-| *(open)* Generic Sandbox/VM Detection: NULL-relative write at `0x0C` from `0x10A9FBD4` (kernelbase/user32 client-side range) | new terminus at ~232M instructions; see below |
+| `0xC0000005` (ACCESS_VIOLATION) in Generic Sandbox/VM Detection: combase.dll NULL-`this` in `CoInitializeSecurity` internal helper | combase RVA `0xBFBBF` __thiscall wrote to `[edi+0xC]` with `edi=NULL`; caller at RVA `0xC030D` (`mov ecx, [0x102420D8]; call 0xBFBBD`) loaded ECX from a lazy-initialised singleton that stayed NULL because sub_10B0C8C9's sub_B (`RegOpenKeyExW(HKCU\Software\Classes\Local Settings)`) returned NAME_NOT_FOUND → sub_10B119C0 short-circuited past the interlocked-init at sub_10AA0528. Seeded the missing HKCU key in `InitializeSyntheticRegistryDefaults` (matches real Win10 — the key exists on every install). Advances **~232M → ??**, past combase into **all 11 remaining anti-VM/anti-sandbox sections** (Hyper-V / KVM / Parallels / QEMU / Virtual PC / VirtualBox / VMWare / Wine / Xen / Timing-attacks) → **237 GOOD / 18 BAD** |
+| *(open)* Message-pump spin in a late section: `NtUserGetMessage` (0x1006) / `NtUserSetTimer` (0x1018) still gated to x64 | new terminus is a `GetMessage`/`SetTimer`-based timing probe; on x86 both return `WinUnimplemented`, al-khaser's message pump spins until MaxSteps. Adding just `NtUserGetMessage` isn't enough because `NtUserSetTimer` never fires the timer the pump waits on — need both plus the timer→WM_TIMER message-queue wiring. |
 
 #### Resolved this pass (each fix is a generic WOW64 fidelity correction)
 
@@ -1872,7 +1873,33 @@ The two credible next steps in priority order:
    pre-populated singleton (either a valid COM class-factory-table stub or a NULL sentinel that
    the fault site can then NULL-check post-intercept). Requires new export-hook infrastructure
    (combase is not a Brovan-registered `WinModule`, so its runtime base has to be discovered via
-   the `LoadWinLibrary` path). Nearby non-fatal gaps still `NOT_SUPPORTED` on x86:
+   the `LoadWinLibrary` path).
+
+**Landed — option (1) above: seeded `HKCU\Software\Classes\Local Settings`.** Added a single line
+to `InitializeSyntheticRegistryDefaults` (alongside the existing `\Volatile Environment`,
+ProfileList, Shell Folders, etc synthetic seeds) that creates the key using the shared
+`AddSyntheticRegistryKeyTrusted` helper — walks the path and creates each intermediate key
+(Software, Software\Classes) as empty. Matches real Win10 (the key exists on every install), not a
+per-sample workaround. combase's `sub_B` now returns `SUCCESS` with a valid HKEY, sub_10B119C0
+passes its `[ebp-4] != 0` gate, `sub_10AA0528` runs and writes the singleton, the later fault site
+reads a valid `this` and stores succeed. al-khaser_x86 advances from ~232M / **76 GOOD / 10 BAD** to
+a much later terminus in the message-pump loop, with **237 GOOD / 18 BAD** — the whole Generic
+Sandbox / VM detection suite runs end-to-end (Debugger, DLL Injection, Generic Sandbox/VM, Hyper-V,
+KVM, Parallels, QEMU, Timing-attacks, Virtual PC, VirtualBox, VMWare, Wine, Xen — every 15-section
+banner is now printed).
+
+**Next frontier — message-pump spin: `NtUserGetMessage` (0x1006) / `NtUserSetTimer` (0x1018)
+still gated to x64.** With combase's `CoInitializeSecurity` clean, al-khaser enters a message
+pump (`GetMessage` loop) for a timing / focus probe that expects a `WM_TIMER` fired by
+`SetTimer(hwnd, id, ms, callback)`. On WOW64 x86 both syscalls fall through to `WinUnimplemented`:
+`NtUserGetMessage` returns `STATUS_NOT_SUPPORTED` immediately (so the pump busy-loops instead of
+waiting for a message that never comes), and `NtUserSetTimer` never registers the timer that
+would have signalled a `WM_TIMER` into the queue. Removing just the `NtUserGetMessage` x64 gate
+isn't enough — the x64 handler puts the thread into `WaitState` and returns `STATUS_PENDING`,
+which without a timer/message source deadlocks the whole scheduler (Brovan drops the WOW64
+x86 into an infinite pump). Real fix needs: (a) `NtUserGetMessage` bitness-agnostic, (b)
+`NtUserSetTimer` bitness-agnostic, (c) the timer-fires-`WM_TIMER`-into-queue wiring on x86.
+Nearby non-fatal gaps still `NOT_SUPPORTED` on x86:
 `NtQueryVirtualMemory` (MemoryMappedFilenameInformation), `NtQueryInformationThread`
 (ThreadHideFromDebugger / ThreadDynamicCodePolicyInfo), `NtQueryInformationFile`,
 `NtQuerySystemInformation` class `0x73`, syscall `0x1E9`.
