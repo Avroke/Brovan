@@ -1415,7 +1415,14 @@ namespace Brovan.Core.Emulation
 
         public WinModule LoadWinLibrary(BinaryFile Library, bool TriggerMessage, bool AddToModuleList = true, ulong RequestedBase = 0, bool MapBySections = false)
         {
-            if (Library.FileFormat != BinaryFormat.PE || Library.Architecture != _binary.Architecture)
+            // A managed IL assembly can be AnyCPU (PE Machine = I386, so Architecture reads as x86) yet
+            // legitimately map into a 64-bit process — the CLR JITs its IL to the host architecture, and
+            // real Windows loads such images regardless of the Machine field. Rejecting them here made a
+            // dependency facade like System.Runtime.dll (PE32/I386/ILONLY) throw on load, which coreclr
+            // surfaced as a fatal EEFileLoadException(E_INVALIDARG) before Main. Only enforce the
+            // architecture match for NATIVE images (mirrors the NtMapViewOfSection image gate).
+            bool IsManagedLibrary = Library.PE != null && Library.PE.DotNetStatus != DotNetStatus.None;
+            if (Library.FileFormat != BinaryFormat.PE || (Library.Architecture != _binary.Architecture && !IsManagedLibrary))
                 throw new InvalidOperationException("Emulator tried to load a non-valid PE library.");
 
             ulong ImageSize = AlignToPageSize(Library.PE.SizeOfImage != 0 ? Library.PE.SizeOfImage : (uint)Library.BinarySize);
@@ -2008,6 +2015,107 @@ namespace Brovan.Core.Emulation
             return true;
         }
 
+        /// <summary>
+        /// Partial (sized) MEM_RELEASE: releases exactly the [BaseAddress, BaseAddress+Size) sub-range
+        /// of a reservation and keeps the remainder reserved. Mirrors <see cref="DecommitMemory"/>'s
+        /// Left/Mid/Right split, but the middle (overlapping) piece is fully released — its committed
+        /// host pages are unmapped and it becomes MEM_FREE — instead of staying reserved-decommitted.
+        /// This is the shape ntdll's loader / RtlpSecMemFreeVirtualMemory use when they over-reserve
+        /// for alignment and release the excess directly through the NtFreeVirtualMemory syscall.
+        /// </summary>
+        public bool ReleaseMemoryRange(ulong BaseAddress, ulong Size)
+        {
+            if (Size == 0 || WinHelper == null)
+                return false;
+
+            ulong Start = BaseAddress & ~0xFFFUL;
+            ulong End = AlignUp(BaseAddress + Size, PageSize);
+            if (End <= Start)
+                return false;
+
+            if (!TryFindMemoryRegion(Start, out MemoryRegion Anchor) || !Anchor.IsReserved)
+                return false;
+
+            ulong AllocationBase = Anchor.AllocationBase;
+
+            // Rescued/decommitted-page tracking for the released range is torn down first: the range
+            // "truly frees" and any subsequent access there must fault.
+            ReclaimRescuedPages(Start, End - Start);
+
+            List<MemoryRegion> Regions = EnumerateMemoryRegionsByBase().ToList();
+            List<MemoryRegion> NewRegions = new List<MemoryRegion>(Regions.Count + 2);
+            bool ReleasedAny = false;
+
+            foreach (MemoryRegion Region in Regions)
+            {
+                if (!Region.IsReserved || Region.AllocationBase != AllocationBase)
+                {
+                    NewRegions.Add(Region);
+                    continue;
+                }
+
+                ulong RegionStart = Region.BaseAddress;
+                ulong RegionEnd = GetRangeEnd(Region.BaseAddress, Region.Size);
+                if (RegionEnd <= Start || RegionStart >= End)
+                {
+                    NewRegions.Add(Region);
+                    continue;
+                }
+
+                ulong OverlapStart = Math.Max(RegionStart, Start);
+                ulong OverlapEnd = Math.Min(RegionEnd, End);
+                ulong LeftSize = OverlapStart - RegionStart;
+                ulong RightSize = RegionEnd - OverlapEnd;
+
+                if (LeftSize > 0)
+                {
+                    MemoryRegion Left = Region;
+                    Left.BaseAddress = RegionStart;
+                    Left.Size = LeftSize;
+                    Left.RequestedSize = LeftSize;
+                    NewRegions.Add(Left);
+                }
+
+                // Middle piece is released: unmap any committed backend pages and drop the region.
+                if (Region.IsCommitted && IsRegionMapped(OverlapStart, 1))
+                    _emulator.UnmapMemory(OverlapStart, OverlapEnd - OverlapStart);
+
+                ReleasedAny = true;
+
+                if (RightSize > 0)
+                {
+                    MemoryRegion Right = Region;
+                    Right.BaseAddress = OverlapEnd;
+                    Right.Size = RightSize;
+                    Right.RequestedSize = RightSize;
+                    NewRegions.Add(Right);
+                }
+            }
+
+            if (!ReleasedAny)
+                return false;
+
+            ReplaceMemoryRegions(NewRegions.OrderBy(R => R.BaseAddress).ToList());
+
+            _freedmemory.Add(new MemoryRegion
+            {
+                BaseAddress = Start,
+                Size = End - Start,
+                RequestedSize = End - Start,
+                AllocationBase = Start,
+                AllocationProtect = 0,
+                Protect = 0,
+                IsReserved = false,
+                IsCommitted = false,
+                InitialProtections = MemoryProtection.None,
+                Protections = MemoryProtection.None,
+                SpecialProtections = SpecialProtections.None,
+                Flags = AllocationType.None
+            });
+
+            return true;
+        }
+
         public ulong MapWinMemoryRegion(ulong Address, ulong Size, MemoryProtection Protection, SpecialProtections Special, AllocationType Flags, ulong AllocationBase = 0, uint AllocationProtect = 0, uint Protect = 0)
         {
             ulong AlignedSize = AlignToPageSize(Size);
@@ -2208,6 +2316,7 @@ namespace Brovan.Core.Emulation
         private void InstructionHandler(ulong Address, uint Size)
         {
             Instruction++;
+
             // 64-bit IRETQ (48 CF) is emulated here because Unicorn's own IRETQ diverges
             // in the flat long-mode setup (proven: with this path disabled al-khaser bails
             // 14M instructions early). Only a 2-byte instruction can be `48 CF`, and it is
@@ -2319,6 +2428,39 @@ namespace Brovan.Core.Emulation
                                     for (uint i = 0; i < NumParams && IsRegionMapped(RecAddr + 0x20UL + i * 8, 8); i++)
                                         Ps.Append($"0x{ReadMemoryULong(RecAddr + 0x20UL + i * 8):X} ");
                                     TriggerEventMessage($"[!] [SEH-FILTER] code=0x{Code:X8} raised @ 0x{ExcAddr:X} ({ExcModule?.Name ?? "?"}+0x{ExcRva:X}) nparams={NumParams} params=[ {Ps}]", LogFlags.General);
+
+                                    // For a managed CLR throw (EXCEPTION_COMPLUS) the raise-address is always
+                                    // inside KERNELBASE!RaiseException, which hides the runtime function that
+                                    // threw. SEH filters run BEFORE unwinding, so the throw-site frames are
+                                    // still live below this filter: the captured CONTEXT (ExceptionPointers->
+                                    // ContextRecord, at [RDX+8]) holds the raising RSP. Walk it and map return
+                                    // addresses to module+offset so the topmost coreclr frame — the runtime
+                                    // function that raised the exception — becomes legible.
+                                    if (Code == 0xE0434352u)
+                                    {
+                                        ulong CtxAddr = ReadMemoryULong(PtrsAddr + 0x08);
+                                        if (CtxAddr != 0 && IsRegionMapped(CtxAddr, 0x100))
+                                        {
+                                            ulong RspCtx = ReadMemoryULong(CtxAddr + 0x98);
+                                            ulong RipCtx = ReadMemoryULong(CtxAddr + 0xF8);
+                                            WinModule RipMod = FindModuleByAddress(RipCtx, Helper);
+                                            System.Text.StringBuilder Ss = new System.Text.StringBuilder();
+                                            Ss.Append($"[!] [COMPLUS-STACK] hr=0x{(NumParams > 0 ? (uint)ReadMemoryULong(RecAddr + 0x20) : 0):X8} rip=0x{RipCtx:X} ({RipMod?.Name ?? "?"}+0x{(RipMod != null ? RipCtx - RipMod.MappedBase : 0):X}) frames:");
+                                            int Found = 0;
+                                            for (ulong off = 0; off <= 0x800 && Found < 24; off += 8)
+                                            {
+                                                if (!IsRegionMapped(RspCtx + off, 8)) continue;
+                                                ulong Val = ReadMemoryULong(RspCtx + off);
+                                                WinModule FrameMod = FindModuleByAddress(Val, Helper);
+                                                if (FrameMod != null)
+                                                {
+                                                    Ss.Append($" +0x{off:X}={FrameMod.Name}+0x{Val - FrameMod.MappedBase:X}");
+                                                    Found++;
+                                                }
+                                            }
+                                            TriggerEventMessage(Ss.ToString(), LogFlags.General);
+                                        }
+                                    }
                                 }
                             }
                         }

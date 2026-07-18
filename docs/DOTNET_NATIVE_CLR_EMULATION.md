@@ -607,11 +607,40 @@ SUCCESS). C'est la nouvelle frontière J5.
 rendra lisible chaque couche suivante (l'HRESULT dans `param[0]` identifie la classe
 d'exception managée).
 
-**Prochain pas J5 (couche 2, E_INVALIDARG).** L'HRESULT générique ne suffit plus à
-localiser ; il faut lire le **type de l'objet exception managé** (marcher `MethodTable →`
-nom de type via les structures coreclr, version-spécifiques) OU bissecter par
-env `DOTNET_*` (p.ex. désactiver tiered-compilation, EventPipe, diagnostics) pour isoler
-le sous-système d'init qui lève `E_INVALIDARG`.
+**Couche 2 (E_INVALIDARG) — RÉSOLUE.** Le diagnostic `[SEH-FILTER]` a été étendu en
+`[COMPLUS-STACK]` (marche la pile capturée du `ContextRecord` du filtre — les frames de
+levée sont encore vivantes avant unwind — et mappe chaque adresse retour à `module+rva`).
+Avec les **PDB publics coreclr 8.0.29 + ntdll** (symbol server) et `llvm-symbolizer`, la
+chaîne s'est symbolisée sans ambiguïté : `coreclr_execute_assembly → CorHost2::ExecuteAssembly
+→ … → EEFileLoadException::Throw` avec `hr = HRESULT_FROM_GetLastError()`. En sondant la
+levée C++ réelle (`_CxxThrowException` → `RaiseException(0xE06D7363)`, dont le `ThrowInfo →
+CatchableType → TypeDescriptor` porte le nom de type C++), l'exception est un
+**`EEFileLoadException`** levé depuis `AppDomain::TryIncrementalLoad → Assembly::Create →
+LoadedImageLayout` (`peimagelayout.cpp:527` : `CLRLoadLibraryEx(path, NULL, …)`). La
+`LoadLibraryExW` en échec (via un hook entrée+sortie) : **`System.Runtime.dll`** — un
+**façade de type-forwarding PE32/I386/ILONLY** — retournait `NULL`/`ERROR_INVALID_PARAMETER`.
+Cause racine : `BinaryEmulator.LoadWinLibrary` **rejetait** l'image managée AnyCPU (`Machine =
+I386 ≠ hôte x64`) avec « non-valid PE library », alors que le CLR JIT-e l'IL vers l'archi
+hôte — real Windows charge une image ILONLY quel que soit le champ `Machine`. **Fix** :
+`LoadWinLibrary` n'applique désormais le contrôle d'archi qu'aux images **natives**
+(`!IsManagedLibrary`), en miroir du gate `NtMapViewOfSection` (§8bis.5). Aucun patch du champ
+`Machine` mappé n'est nécessaire (vérifié : le loader ntdll accepte l'image I386-mappée telle
+quelle ; réécrire `Machine → AMD64` tout en laissant `Magic = PE32` créait une incohérence
+que le PEDecoder de coreclr rejetait plus loin en `0x80070002`). En parallèle, un vrai bug de
+`NtFreeVirtualMemory` a été corrigé : `MEM_RELEASE` avec `RegionSize != 0` est une **release
+partielle** (le syscall découpe la réservation et garde le reste), pas une erreur — la règle
+« RegionSize doit valoir 0 » appartient au wrapper Win32 `VirtualFree`, pas au syscall
+(`RtlpSecMemFreeVirtualMemory` de ntdll et le loader over-reserve-puis-release-l'excès via le
+syscall direct) ; ajout d'un `ReleaseMemoryRange` fidèle (split-et-drop-du-milieu).
+
+**Résultat mesuré** : `System.Runtime.dll` se charge (`handle=0x400000`), l'exception
+`E_INVALIDARG` disparaît, et la voie Core **avance jusqu'à la frontière F-THREAD** : coreclr
+démarre son threading runtime complet (`.NET Finalizer`, `loader worker`, thread-pool via
+`NtCreateThreadEx`/`NtResumeThread`) puis **bute sur le mur de threading coopératif** — des
+threads parkent indéfiniment sur un event (`0x8C`, `deadline=-1`), le scheduler termine avec
+4 threads en `Waiting` + un `0xC0000005` sur un worker. C'est **exactement la même frontière
+F-THREAD** que la voie Framework (§8bis.6) : le hand-off loader/CLR multi-thread. Régression
+native vérifiée nulle (`hello_native.exe` : init CRT → `fputc` → `exit`, propre).
 
 ### 8bis.6 — Voie Framework (.NET Framework 4.x, CLR classique) : provisionnée, le shim bootstrappe
 
