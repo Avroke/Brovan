@@ -184,8 +184,20 @@ namespace Brovan.Core.Emulation.OS.Windows
                 try
                 {
                     Image = Instance.LoadBinary(SectionHostPath);
-                    if (Image.FileFormat != BinaryFormat.PE || Image.Architecture != Instance._binary.Architecture)
+                    // A managed IL assembly can be AnyCPU (PE Machine = I386, so Architecture reads as
+                    // x86) yet legitimately map into a 64-bit process — the CLR JITs its IL to the host
+                    // architecture. Real Windows maps such an image regardless of the Machine field;
+                    // rejecting it with STATUS_INVALID_IMAGE_FORMAT makes coreclr surface a fatal
+                    // BadImageFormatException (HRESULT 0x800700C1) during startup (it maps the runtime
+                    // assemblies as SEC_IMAGE). Only enforce the architecture match for NATIVE images.
+                    bool IsManagedImage = Image.PE != null && Image.PE.DotNetStatus != DotNetStatus.None;
+                    bool ArchMismatch = Image.Architecture != Instance._binary.Architecture;
+                    if (Image.FileFormat != BinaryFormat.PE || (ArchMismatch && !IsManagedImage))
+                    {
+                        if ((Instance.Settings.Flags & LogFlags.General) != 0)
+                            Instance.TriggerEventMessage($"[!] NtMapViewOfSection rejecting image '{IdentityPath}': format={Image.FileFormat} arch={Image.Architecture} managed={IsManagedImage} host={Instance._binary.Architecture}", LogFlags.General);
                         return NTSTATUS.STATUS_INVALID_IMAGE_FORMAT;
+                    }
 
                     ulong ImageSize = Instance.AlignToPageSize(Image.PE.SizeOfImage != 0 ? Image.PE.SizeOfImage : (uint)Image.BinarySize);
                     Section.Size = ImageSize;

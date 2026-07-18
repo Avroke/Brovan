@@ -2293,6 +2293,35 @@ namespace Brovan.Core.Emulation
                         WinModule PreviousModule = PreviousRip != 0 ? FindModuleByAddress(PreviousRip, Helper) : null;
                         if ((Settings.Flags & LogFlags.General) != 0)
                             TriggerEventMessage($"[!] [ENTRY] {CurrentModule.Name}!{Func} @ 0x{Address:X} from {PreviousModule?.Name} @ 0x{PreviousRip:X}", LogFlags.General);
+
+                        // Top-level CRT SEH filter: _seh_filter_exe(ULONG ExceptionNum, PEXCEPTION_POINTERS).
+                        // x64: RCX = exception code, RDX = PEXCEPTION_POINTERS. Dump the EXCEPTION_RECORD so
+                        // an exception that reached the process's last-chance filter (e.g. an unhandled
+                        // managed 0xE0434352 propagating out of coreclr) is legible: its raise-address maps
+                        // to the module/offset that threw.
+                        if ((Settings.Flags & LogFlags.General) != 0 &&
+                            _binary.Architecture == BinaryArchitecture.x64 &&
+                            Func.Contains("seh_filter", StringComparison.OrdinalIgnoreCase))
+                        {
+                            ulong PtrsAddr = ReadRegister(Registers.UC_X86_REG_RDX);
+                            if (PtrsAddr != 0 && IsRegionMapped(PtrsAddr, 0x10))
+                            {
+                                ulong RecAddr = ReadMemoryULong(PtrsAddr + 0x00);
+                                if (RecAddr != 0 && IsRegionMapped(RecAddr, 0x28))
+                                {
+                                    uint Code = ReadMemoryUInt(RecAddr + 0x00);
+                                    ulong ExcAddr = ReadMemoryULong(RecAddr + 0x10);
+                                    uint NumParams = ReadMemoryUInt(RecAddr + 0x18);
+                                    if (NumParams > 15) NumParams = 15;
+                                    WinModule ExcModule = FindModuleByAddress(ExcAddr, Helper);
+                                    ulong ExcRva = ExcModule != null ? (ExcAddr - ExcModule.MappedBase) : 0;
+                                    System.Text.StringBuilder Ps = new System.Text.StringBuilder();
+                                    for (uint i = 0; i < NumParams && IsRegionMapped(RecAddr + 0x20UL + i * 8, 8); i++)
+                                        Ps.Append($"0x{ReadMemoryULong(RecAddr + 0x20UL + i * 8):X} ");
+                                    TriggerEventMessage($"[!] [SEH-FILTER] code=0x{Code:X8} raised @ 0x{ExcAddr:X} ({ExcModule?.Name ?? "?"}+0x{ExcRva:X}) nparams={NumParams} params=[ {Ps}]", LogFlags.General);
+                                }
+                            }
+                        }
                     }
                 }
             }

@@ -572,6 +572,47 @@ NOT_SUPPORTED`** pour identifier les classes qu'une API CoreLib d'init interroge
 **voie Framework** (mscoree→clr) partage le finalizer/thread-pool et buterait sans doute
 sur une frontière voisine ; pas un raccourci.
 
+### 8bis.5 — Percée J5 (couche 1) : `BadImageFormatException` root-causé + corrigé (mapping SEC_IMAGE des assemblies managés)
+
+**Lecture de l'exception.** Un diagnostic ajouté au chokepoint `[ENTRY]` : à l'entrée du
+filtre SEH top-level du CRT (`ucrtbase!_seh_filter_exe(ULONG code, PEXCEPTION_POINTERS)`,
+x64 : RCX=code, **RDX=pointeurs**), on lit l'`EXCEPTION_RECORD` et on mappe l'adresse de
+levée à un module. Résultat :
+`code=0xE0434352 raised @ KERNELBASE+0x34F99 (RaiseException) params=[ 0x800700C1 … coreclr_base ]`.
+`param[0] = 0x800700C1 = HRESULT_FROM_WIN32(ERROR_BAD_EXE_FORMAT)` ⇒ **`BadImageFormatException`**.
+
+**Root cause (mesurée).** Deux `NtMapViewOfSection → STATUS_INVALID_IMAGE_FORMAT`
+(0xC000007B → ERROR_BAD_EXE_FORMAT → 0x800700C1) juste après « Loaded mgdcore.dll ». Cause :
+`NtMapViewOfSection` rejetait le mapping **SEC_IMAGE** dès que `Image.Architecture !=`
+l'arch du processus. Or un assembly **managé AnyCPU / IL-only** porte `Machine = I386`
+(donc `Architecture` = x86) même sur x64 — la bitness réelle est décidée par les CorFlags,
+pas le champ Machine. coreclr mappe les assemblies runtime en `SEC_IMAGE` ; le rejet
+remontait en `BadImageFormatException` fatale.
+
+**Fix (livré).** Dans `NtMapViewOfSection`, ne plus imposer l'égalité d'architecture pour
+une **image managée** (`Image.PE.DotNetStatus != None`) : on n'exige la correspondance
+d'arch que pour les images **natives** (un DLL natif x86 dans un processus x64 reste
+correctement refusé). Narrowly-scoped : le natif est inchangé par construction.
+
+**Résultat.** Le `BadImageFormatException` **disparaît**. coreclr progresse plus loin —
+il **spawn désormais des threads** (init multi-thread : un thread se termine proprement
+`status 0x0`, deux autres actifs) — puis bute sur la **couche suivante** :
+`code=0xE0434352 … param[0] = 0x80070057 = E_INVALIDARG`. Exception managée générique
+(vraisemblablement un `ArgumentException`/`E_INVALIDARG` dans l'init CoreLib), **non**
+liée à un syscall en échec (les syscalls voisins sont `NtAllocateVirtualMemory` = GC, tous
+SUCCESS). C'est la nouvelle frontière J5.
+
+**Diagnostic livré (permanent, gated `LogFlags.General`) :** le dump `[SEH-FILTER]`
+(code + adresse de levée→module + params). C'est l'outil qui a pelé la couche 1 ; il
+rendra lisible chaque couche suivante (l'HRESULT dans `param[0]` identifie la classe
+d'exception managée).
+
+**Prochain pas J5 (couche 2, E_INVALIDARG).** L'HRESULT générique ne suffit plus à
+localiser ; il faut lire le **type de l'objet exception managé** (marcher `MethodTable →`
+nom de type via les structures coreclr, version-spécifiques) OU bissecter par
+env `DOTNET_*` (p.ex. désactiver tiered-compilation, EventPipe, diagnostics) pour isoler
+le sous-système d'init qui lève `E_INVALIDARG`.
+
 ### Reproduction
 
 ```bash
@@ -685,10 +726,12 @@ n'est qu'une question de *quelle enveloppe de bootstrap* attaquer en premier.
   §8bis.4 pour les deux pièges méthodo) : la chaîne host s'exécute **intégralement**
   (`apphost→hostfxr→hostpolicy→coreclr→clrjit`, **J4**), puis ~**158 M instructions** de
   managé, terminus **`NtTerminateProcess(0xE0434352)`** (exception CLR non gérée pendant
-  l'init runtime, **avant `Main`** — inchangé avec `Main` = `return 5`). Le message ne
-  s'imprime pas (fail-fast avant le reporting). Pistes : coreclr **checked** +
-  `DOTNET_LogEnable`/stress-log, OU capter le message managé (console désormais routée),
-  OU identifier les **8× `NtQueryInformationProcess → NOT_SUPPORTED`**. Bloque J5.
+  l'init runtime, **avant `Main`** — inchangé avec `Main` = `return 5`). **Couche 1
+  pelée (§8bis.5)** : le diagnostic `[SEH-FILTER]` a identifié un `BadImageFormatException`
+  (`0x800700C1`), root-causé au rejet du mapping `SEC_IMAGE` des assemblies managés AnyCPU
+  (`Machine=I386`) par `NtMapViewOfSection` — **corrigé**. coreclr progresse (init
+  multi-thread) et bute sur la **couche 2** : `E_INVALIDARG` (`0x80070057`), exception
+  CoreLib générique non liée à un syscall. Bloque J5.
 - **F-FRAMEWORK — surface BCL réelle.** Selon ce que l'assembly touche, le CLR
   charge de plus en plus d'assemblies système ⇒ plus de fichiers VFS + plus de
   syscalls. La couverture croît avec le corpus, pas d'un coup.
