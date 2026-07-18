@@ -645,17 +645,31 @@ le shim **bootstrappe** (KERNEL32/KERNELBASE/ADVAPI32/RPCRT4, port CSR `NtConnec
    `Release`=528040, `Version`=`4.8.04084`, `InstallPath`). Sans elles le shim ne peut
    localiser `clr.dll`.
 
-**Frontière (spin de synchro à l'init du shim).** Après le bootstrap, le shim crée un
-thread et fait un **hand-off event qui ne se connecte pas** : le thread principal (ex.
-21435) **spin `NtSetEvent`** en boucle serrée sans jamais bloquer, tandis que le worker
-(ex. 9024) est parqué sur un **unique `NtWaitForSingleObject` (PENDING)** — jamais
-ré-ordonnancé. `clr.dll` n'est pas encore chargé. Diagnostic : `NtWaitForSingleObject`
-n'est appelé **qu'une fois** de tout le run ; le waiter n'attend donc **pas** l'event que
-le spinner signale (objet différent : handle de thread / sémaphore / keyed-event via
-SRWLock/CV). C'est la **même classe de frontière coopérative-threading (F-THREAD)** que le
-worker-factory de la voie Core — un `NtSetEvent → RequestSchedulerWakeupScan` (tenté puis
-**reverté**, non-régression non vérifiable + ne résout pas ce cas précis) ne suffit pas :
-il faut modéliser l'objet de synchro réel sur lequel le worker parque.
+**Frontière (spin de synchro à l'init du shim) — diagnostic précis.** Après le bootstrap,
+le thread principal (mesuré : tid 21435) crée les events et un thread worker (tid 9024),
+puis **spin `NtSetEvent`** en boucle serrée **sans jamais bloquer**, tandis que le worker
+se parque sur un **unique `NtWaitForSingleObject` (PENDING, deadline infinie)** et n'est
+jamais ré-ordonnancé. `clr.dll` n'est pas encore chargé. Les diagnostics ajoutés
+(`[NEW-EVENT]` / `[WAIT-PARK]` / `[SET-EVENT]`, gated `LogFlags.General`) donnent le détail
+exact :
+
+- le worker (9024) parque sur l'event **`0x4C`** (type 0 = **NotificationEvent /
+  manual-reset**, `initialState=False`), créé par le main ; c'est son event « travail
+  disponible ». Il n'est **jamais** signalé de tout le run.
+- le main (21435) **signale en boucle `0x90` et `0x8C`** (type 1 = auto-reset), tous deux
+  avec **`waitersOnThisHandle=0`** — donc des events **différents** de `0x4C`.
+
+Autrement dit le main pousse du travail au loader/worker mais **signale les mauvais events**
+(ou l'objet de synchro que Brovan modélise ne correspond pas à celui que le worker attend) :
+`0x4C` reste orphelin → 9024 dort → le main spin dans son drain. Les events ne sont **pas**
+aliasés à tort (`NtCreateEvent` passe `null` comme nom ⇒ chaque anonyme est bien distinct) ;
+le problème est la **livraison du travail** (comme le worker-factory de la voie Core, ici
+via un event manuel plutôt qu'`NtWaitForWorkViaWorkerFactory`). Un
+`NtSetEvent → RequestSchedulerWakeupScan` (tenté puis **reverté** : ne résout pas ce cas —
+le waiter n'attend pas l'event signalé — et non-régression non vérifiable) ne suffit pas.
+**Prochain pas** : tracer au niveau instruction la boucle de spin du main (quelle
+condition mémoire il attend, pourquoi il ne signale jamais `0x4C`) pour modéliser
+fidèlement le hand-off loader/CLR — le levier **commun aux deux voies**.
 
 **Bilan.** La voie Framework est **provisionnée et le CLR classique démarre son shim** ;
 elle **partage** la frontière de threading coopératif de la voie Core, donc — comme
