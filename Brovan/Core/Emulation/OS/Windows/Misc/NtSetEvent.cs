@@ -94,6 +94,25 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Signaled)
                 MaybeDumpSpin(Instance, EventHandle);
 
+            // [EVT-SET] instrumentation: log a signal only when it is interesting — either it
+            // transitions an auto-reset/manual event that has at least one thread parked directly
+            // on this handle (the signal that *should* wake a waiter), or it is a wasted signal on
+            // an already-signalled event with no waiter. Keeps the volume low vs logging every set.
+            if (Signaled && (Instance.Settings.Flags & LogFlags.General) != 0)
+            {
+                System.Text.StringBuilder Waiters = null;
+                foreach (EmulatedThread T in Instance.Threads.Values)
+                {
+                    if (T == null || T.State != EmulatedThreadState.Waiting || !T.WaitActive)
+                        continue;
+                    if (T.WaitHandles == null || !T.WaitHandles.Contains(EventHandle))
+                        continue;
+                    (Waiters ??= new System.Text.StringBuilder()).Append(Waiters.Length == 0 ? "" : ",").Append(T.ThreadId);
+                }
+                if (Waiters != null)
+                    Instance.TriggerEventMessage($"[!] [EVT-SET] tid={Instance.CurrentThreadId} handle=0x{EventHandle:X} type={Ev.EventType} prev={Prev} parkedWaiters=[{Waiters}]", LogFlags.General);
+            }
+
             return NTSTATUS.STATUS_SUCCESS;
         }
     }

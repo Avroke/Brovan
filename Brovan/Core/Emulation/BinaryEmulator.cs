@@ -2306,6 +2306,12 @@ namespace Brovan.Core.Emulation
                 }
                 else if (Thread.State == EmulatedThreadState.Waiting && Thread.WaitActive && TrySatisfyThreadWait(Thread))
                 {
+                    // [EVT-WAKE] instrumentation: capture the satisfied handle set before
+                    // CompleteThreadWait clears it, so the scan-driven wake of an event waiter
+                    // (the 0x8C loader-rendezvous case) is legible against [EVT-SET]/[WAIT-PARK].
+                    if ((Settings.Flags & LogFlags.General) != 0 && Thread.WaitHandles != null && Thread.WaitHandles.Count > 0)
+                        TriggerEventMessage($"[!] [EVT-WAKE] tid={Thread.ThreadId} satisfiedIndex={Thread.WaitSatisfiedIndex} timedOut={Thread.WaitTimedOut} handle0=0x{Thread.WaitHandles[0]:X}", LogFlags.General);
+
                     CompleteThreadWait(Thread);
                     Changed = true;
                 }
