@@ -1526,7 +1526,9 @@ the guest ntdll's `mov eax, imm32` stub prologues, now from `WindowsLibs/SysWOW6
 | user32 win32k client-connect (`NtUserProcessConnect`, syscall 0x2000) + SHAREDINFO | user32 DllMain passes the connect → **~9.98M** |
 | WOW64 registry family (`NtOpenKey`/`NtQueryValueKey`/… ×13) | registry works on x86 (prereq for the detection phase) |
 | gdi32full GDI shared handle table (`TEB+0x60`=PEB, `PEB+0xF8`=table) | gdi32full GDI init completes → **~11.15M** |
-| *(open)* ntdll `RtlEnterCriticalSection` on a CS with `DebugInfo==0` | current terminus — guest-ntdll `RtlpAllocateDebugInfo` returns 0, see below |
+| **IO_STATUS_BLOCK sized 16→8 bytes on x86 (`WriteIoStatusBlock` now bitness-aware)** | the 16-byte x64 write overran the 8-byte guest struct and zeroed an adjacent live `RTL_CRITICAL_SECTION`'s `DebugInfo` → the `RtlEnterCriticalSection DebugInfo==0` fault; **root cause of the F5 terminus** |
+| `NtOpenFile` / `NtDeviceIoControlFile` / `NtWriteFile` / `NtTerminateProcess` → WOW64 | file+terminate syscalls run on x86 → DLL init clears `DLL_INIT_FAILED`; al-khaser reaches **`main()`** and prints results → **~14.27M**, Init / TLS-Callbacks / Debugger-Detection sections, 14 GOOD |
+| *(open)* unhandled `STATUS_FLOAT_DIVIDE_BY_ZERO` (0xC000008E) in Debugger Detection | current terminus — an FPU/SEH divide-by-zero exception is not caught, process exits with that code; see below |
 
 #### Resolved this pass (each fix is a generic WOW64 fidelity correction)
 
@@ -1667,36 +1669,52 @@ past gdi32full's `0x180094` client read. gdi32full's per-thread GDI init now com
 al-khaser advances **~9.98M → ~11.15M** instructions. x64 is untouched (its `TEB+0x60`
 was already the PEB; `PEB+0xF8` stays as it was).
 
-**Next frontier — ntdll `RtlEnterCriticalSection` on a CS with `DebugInfo == 0`.** With
-GDI init cleared the run reaches a fresh terminus at ntdll RVA `0x5F583`
-(`inc dword [eax+0x14]`), inside `RtlEnterCriticalSection`: it loads `eax = CS->DebugInfo`
-and, when that is neither a valid pointer nor the `-1` "no-debug-info" sentinel,
-increments `DebugInfo->ContentionCount` (`+0x14`). The faulting CS (heap-resident,
-e.g. `0x105DAA40`) is **active** — `LockCount = -6` (locked, one waiter),
-`LockSemaphore = -1`, `SpinCount = 0xFA0` (initialised via
-`RtlInitializeCriticalSectionAndSpinCount(cs, 4000)`) — yet its `DebugInfo` is **0**.
-Disassembling the init path proves ntdll never *writes* 0: `RtlInitializeCriticalSectionEx`
-sets `DebugInfo = -1` up front, and on a debug-info allocation failure the failure arm
-(`RtlpAllocateDebugInfo` → `0x5FE00`, a free-list-only allocator with no heap fallback,
-plus the `0x5FDC7` handler that only bumps a failure counter) *leaves it at -1*. So a
-successfully-initialised CS carries a valid pointer or `-1`, never 0 — meaning this
-`DebugInfo = 0` is **post-init corruption of a live CS**, not an init gap. The signature
-(an actively-contended CS whose debug pointer got zeroed) points at a delete-then-reenter
-or a heap block reused while still referenced. A write-watchpoint on the CS's `DebugInfo`
-word (`0x105DAA40`) confirmed the direction: it caught **only** the `-1` init store from
-`RtlInitializeCriticalSectionEx` (`0x5FCA2`) and **no** later write, yet the enter reads
-`0` there. So the word transitioned `-1 → 0` through a path the per-address write hook
-didn't observe — i.e. the block was **freed and re-used** (a bulk heap zero / block
-recycle) with a stale pointer still treating it as a live CS, rather than any CS API
-storing 0. Next step: trace the heap free/realloc of that block (watch the containing
-heap chunk, not just the word) to find where a live-referenced CS block gets recycled —
-an emulator heap-lifecycle issue, not a missing syscall. Nearby non-fatal gaps:
-an unimplemented win32k syscall `0x1037` and more `NtQuerySystemInformationEx` (0x161) /
-`NtQuerySystemInformation` class 0x73 `NOT_SUPPORTED`.
+**Resolved — the CS `DebugInfo==0` fault was an IO_STATUS_BLOCK WOW64 overrun.** The
+GDI-cleared run reached a terminus at ntdll RVA `0x5F583` (`inc dword [eax+0x14]`) inside
+`RtlEnterCriticalSection`: `eax = CS->DebugInfo` and the code increments
+`DebugInfo->ContentionCount` (`+0x14`). The faulting CS (heap-resident `0x105DAA40`) was
+**active** — `LockCount = -6`, `LockSemaphore = -1`, `SpinCount = 0xFA0` — yet its
+`DebugInfo` was **0**. Disassembling the init path proved ntdll never *writes* 0
+(`RtlInitializeCriticalSectionEx` sets `DebugInfo = -1` up front and the alloc-failure arm
+`RtlpAllocateDebugInfo`@`0x5FE00` *leaves it at -1*), so the 0 was **post-init corruption
+of a live CS**. A write-watchpoint on the word caught **only** the `-1` init store and no
+later guest write — but Unicorn's memory hooks fire only for *guest CPU* writes, not for
+host-side `WriteMemory` from a syscall handler (`uc_mem_write` bypasses hooks). Adding a
+host-write probe at the `WriteMemory` chokepoint pinned the culprit in one shot:
+`NtNotifyChangeKey → WriteIoStatusBlock` wrote a **16-byte x64 IO_STATUS_BLOCK** at
+`0x105DAA38` for a **32-bit** guest, whose IO_STATUS_BLOCK is only **8 bytes** — the extra
+8 bytes ran into `[0x105DAA40 .. 0x105DAA48)` = the adjacent CS's `DebugInfo`+`LockCount`,
+zeroing `DebugInfo`. **Fix:** `WriteIoStatusBlock` is now bitness-aware (16 bytes on x64,
+8 on x86, dispatched by `GuestPointerSize`); every one of its ~130 callers is correct on
+both bitnesses with no call-site branching. This is the same struct-size class as the
+Wow64 registry / OBJECT_ATTRIBUTES fixes — a host writer using the x64 layout for an x86
+guest. (Also fixed en route: `PEB.NumberOfProcessors` (x86 PEB `+0x64`) was 0, now 8.)
 
-(Also fixed this pass, though not the cause: `PEB.NumberOfProcessors` (x86 PEB `+0x64`)
-was 0 — an impossible value the CS-init path branches on and anti-VM code reads
-directly — now set to 8, matching the x64 PEB.)
+With the corruption gone, DLL init runs to completion but the loader then found a genuine
+`DLL_INIT_FAILED` from a DllMain whose init sequence hit x64-gated file syscalls returning
+`NOT_SUPPORTED`: **`NtOpenFile`**, **`NtDeviceIoControlFile`**, and (once `main()` was
+reached to print results) **`NtWriteFile`**, plus **`NtTerminateProcess`** for the clean
+CRT exit. All four are now WOW64-aware (`NtOpenFile` gained a `Handle32` mirroring
+`NtCreateFile.Handle32`; the other three were already bitness-agnostic bodies behind an
+x64 gate + an `0x10`-sized `IsRegionMapped` check, now `GuestPointerSize*2`;
+`NtTerminateProcess` also needed the `IsCurrentProcessPseudoHandle` form since the x86
+`NtCurrentProcess` is `0xFFFFFFFF`, not `ulong.MaxValue`). al-khaser_x86 now reaches
+**`main()`** and prints its verdicts: **~14.27M** instructions, the **Initialisation /
+TLS-Callbacks / Debugger-Detection** sections, **14 GOOD** / 4 BAD, then a clean
+`NtTerminateProcess`. x64 is untouched (still the full 15-section suite, 244 GOOD).
+
+**Next frontier — unhandled `STATUS_FLOAT_DIVIDE_BY_ZERO` (0xC000008E) in Debugger
+Detection.** al-khaser triggers a float divide-by-zero exception during its
+debugger-detection probes; the exception is not caught (SEH dispatch or x87/SSE
+`#DE`/`#I` delivery gap on the WOW64 path), so it reaches the unhandled-exception filter
+and the process exits with that code as the exit status — stopping the x86 run three
+sections in, where x64 runs fifteen. Next step: locate the divide site (guest
+`0x40xxxx`), determine whether al-khaser wraps it in `__try/__except` (expected — an
+anti-debug probe it should survive) and why the WOW64 exception dispatch doesn't reach the
+handler. Nearby non-fatal gaps still returning `NOT_SUPPORTED` on x86: `NtQueryInformationThread`
+(class ThreadHideFromDebugger / ThreadDynamicCodePolicyInfo), `NtQueryVirtualMemory`
+(class MemoryRegionInformation), `NtQueryInformationFile`, and the unimplemented syscall
+`0x1E9`.
 
 The **x86 registry** sibling gap is now closed (see below).
 

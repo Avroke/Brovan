@@ -11,9 +11,14 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
+            if (Instance._binary.Architecture == BinaryArchitecture.x64)
+                return Handle64(Instance);
 
+            return Handle32(Instance);
+        }
+
+        private NTSTATUS Handle64(BinaryEmulator Instance)
+        {
             ulong FileHandlePtr = Instance.ReadRegister(Registers.UC_X86_REG_R10);
             ulong DesiredAccess = Instance.ReadRegister(Registers.UC_X86_REG_RDX);
             ulong ObjectAttributes = Instance.ReadRegister(Registers.UC_X86_REG_R8);
@@ -39,7 +44,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 {
                     if (VolumeStatus != NTSTATUS.STATUS_SUCCESS)
                     {
-                        Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, VolumeStatus, 0);
+                        Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, VolumeStatus, 0);
                         return VolumeStatus;
                     }
 
@@ -53,7 +58,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 if (DeviceStatus != NTSTATUS.STATUS_SUCCESS)
                 {
-                    Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, DeviceStatus, 0);
+                    Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, DeviceStatus, 0);
                     return DeviceStatus;
                 }
 
@@ -91,7 +96,92 @@ namespace Brovan.Core.Emulation.OS.Windows
             Instance.WinHelper.AddWinHandle(Handle);
 
             Instance._emulator.WriteMemory(FileHandlePtr, Handle.Handle);
-            Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 1);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 1);
+
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        private NTSTATUS Handle32(BinaryEmulator Instance)
+        {
+            // WOW64: NtOpenFile args are on the x86 stack; OBJECT_ATTRIBUTES is the 0x18-byte x86 layout
+            // and the OUT FileHandle / IO_STATUS_BLOCK are pointer-sized (4 bytes) — mirrors Handle64 but
+            // through the 32-bit readers/writers so nothing over-writes past the guest structures.
+            uint FileHandlePtr = Instance.WinHelper.GetArg32(0);
+            uint DesiredAccess = Instance.WinHelper.GetArg32(1);
+            uint ObjectAttributes = Instance.WinHelper.GetArg32(2);
+            uint IoStatusBlockPtr = Instance.WinHelper.GetArg32(3);
+            uint OpenOptions = Instance.WinHelper.GetArg32(5);
+
+            if (FileHandlePtr == 0 || ObjectAttributes == 0 || IoStatusBlockPtr == 0)
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            if (!Instance.WinHelper.TryReadObjectAttributesName32(ObjectAttributes, out uint RootDirectoryHandle, out _, out string ObjectName, out string FullName, out NTSTATUS ObjectNameStatus))
+                return ObjectNameStatus;
+
+            if (string.IsNullOrEmpty(ObjectName))
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            string Normalized = NormalizeNtObjectPath(FullName);
+
+            if (TryGetDosVolumeDevicePath(Instance, Normalized, out string VolumeDevicePath))
+            {
+                if (Instance.WinHelper.TryCreateDevice(VolumeDevicePath, Array.Empty<byte>(), out string VolumeInternalPath, out WinDeviceDelegate VolumeHandler, out NTSTATUS VolumeStatus))
+                {
+                    if (VolumeStatus != NTSTATUS.STATUS_SUCCESS)
+                    {
+                        Instance.WinHelper.WriteIoStatusBlock32(Instance, IoStatusBlockPtr, VolumeStatus, 0);
+                        return VolumeStatus;
+                    }
+
+                    return NtCreateFile.CreateDeviceHandle32(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)DesiredAccess, VolumeInternalPath, VolumeHandler);
+                }
+
+                return NtCreateFile.CreateDeviceHandle32(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)DesiredAccess, VolumeDevicePath, null);
+            }
+
+            if (Instance.WinHelper.TryCreateDevice(Normalized, Array.Empty<byte>(), out string DevicePath, out WinDeviceDelegate DeviceHandler, out NTSTATUS DeviceStatus))
+            {
+                if (DeviceStatus != NTSTATUS.STATUS_SUCCESS)
+                {
+                    Instance.WinHelper.WriteIoStatusBlock32(Instance, IoStatusBlockPtr, DeviceStatus, 0);
+                    return DeviceStatus;
+                }
+
+                return NtCreateFile.CreateDeviceHandle32(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)DesiredAccess, DevicePath, DeviceHandler);
+            }
+
+            string Path = ResolveNtPath(Instance, FullName, RootDirectoryHandle);
+            if (string.IsNullOrEmpty(Path))
+                return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
+
+            bool IsDirectory = (OpenOptions & FILE_DIRECTORY_FILE) != 0 || Path.EndsWith("\\", StringComparison.Ordinal);
+
+            if ((OpenOptions & FILE_NON_DIRECTORY_FILE) != 0 && IsDirectory)
+                return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
+
+            Path = Path.Replace('/', '\\').TrimEnd('\0');
+
+            bool Exists = IsDirectory ? IsDriveRootPath(Path) || GeneralHelper.IO.DirectoryExists(Path, BinaryFormat.PE) : GeneralHelper.IO.FileExists(Path, BinaryFormat.PE);
+            if (!Exists)
+                return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
+
+            WinFile FileObj = new WinFile
+            {
+                Path = Path,
+                Device = false,
+                Real = true,
+                Directory = IsDirectory,
+                Position = 0,
+                Handler = null
+            };
+
+            Instance.WinHelper.WinFiles.Add(FileObj);
+
+            WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(FileObj, (AccessMask)DesiredAccess);
+            Instance.WinHelper.AddWinHandle(Handle);
+
+            Instance._emulator.WriteMemory(FileHandlePtr, (uint)Handle.Handle);
+            Instance.WinHelper.WriteIoStatusBlock32(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 1);
 
             return NTSTATUS.STATUS_SUCCESS;
         }

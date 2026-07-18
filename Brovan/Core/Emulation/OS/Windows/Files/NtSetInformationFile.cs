@@ -36,13 +36,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             WinFile FileObj = Instance.WinHelper.GetFileByHandle(FileHandle, AccessMask.GiveTemp);
             if (FileObj == null)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_HANDLE, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_HANDLE, 0);
                 return NTSTATUS.STATUS_INVALID_HANDLE;
             }
 
             if (FileObj.Device)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_DEVICE_REQUEST, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_DEVICE_REQUEST, 0);
                 return NTSTATUS.STATUS_INVALID_DEVICE_REQUEST;
             }
 
@@ -69,7 +69,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 default:
                     if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                         Instance.TriggerEventMessage($"[!] NtSetInformationFile: FileInformationClass {InfoClass} (0x{FileInformationClass:X}) not implemented.", LogFlags.Syscall);
-                    Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_INFO_CLASS, 0);
+                    Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_INFO_CLASS, 0);
                     return NTSTATUS.STATUS_INVALID_INFO_CLASS;
             }
         }
@@ -78,13 +78,13 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Length < FileBasicInformationSize)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
             }
 
             if (!HasWriteAttributesAccess(Instance, FileHandle))
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_ACCESS_DENIED, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_ACCESS_DENIED, 0);
                 return NTSTATUS.STATUS_ACCESS_DENIED;
             }
 
@@ -110,7 +110,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 ApplyBasicInformation(OtherFile, Attributes, CreationTime, LastAccessTime, LastWriteTime, ChangeTime);
             }
 
-            Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FileBasicInformationSize);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FileBasicInformationSize);
             return NTSTATUS.STATUS_SUCCESS;
         }
 
@@ -118,13 +118,13 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Length < FileRenameInformationHeaderSize)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
             }
 
             if (!HasDeleteAccess(Instance, FileHandle))
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_ACCESS_DENIED, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_ACCESS_DENIED, 0);
                 return NTSTATUS.STATUS_ACCESS_DENIED;
             }
 
@@ -135,7 +135,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (Length < FileRenameInformationHeaderSize + FileNameLength)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
             }
 
@@ -143,20 +143,20 @@ namespace Brovan.Core.Emulation.OS.Windows
             string TargetName = ReadUnicodeString(Instance, FileInformation + FileRenameInformationHeaderSize, FileNameLength);
             if (string.IsNullOrEmpty(TargetName))
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_PARAMETER, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_PARAMETER, 0);
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
             }
 
             string TargetPath = ResolveRenameTargetPath(Instance, SourcePath, RootDirectory, TargetName);
             if (string.IsNullOrEmpty(TargetPath))
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_PARAMETER, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_PARAMETER, 0);
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
             }
 
             if (!IsSameVolume(SourcePath, TargetPath))
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_NOT_SAME_DEVICE, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_NOT_SAME_DEVICE, 0);
                 return NTSTATUS.STATUS_NOT_SAME_DEVICE;
             }
 
@@ -167,31 +167,31 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (TargetExists && ((FileObj.Directory && TargetFileExists) || (!FileObj.Directory && TargetDirectoryExists)))
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_ACCESS_DENIED, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_ACCESS_DENIED, 0);
                 return NTSTATUS.STATUS_ACCESS_DENIED;
             }
 
             if (TargetExists && !ReplaceIfExists)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_OBJECT_NAME_COLLISION, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_OBJECT_NAME_COLLISION, 0);
                 return NTSTATUS.STATUS_OBJECT_NAME_COLLISION;
             }
 
             if (TargetExists && !DeleteExistingVirtualPath(TargetPath, FileObj.Directory))
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_ACCESS_DENIED, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_ACCESS_DENIED, 0);
                 return NTSTATUS.STATUS_ACCESS_DENIED;
             }
 
             if (!MoveVirtualPath(SourcePath, TargetPath, FileObj.Directory))
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_ACCESS_DENIED, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_ACCESS_DENIED, 0);
                 return NTSTATUS.STATUS_ACCESS_DENIED;
             }
 
             UpdateOpenFilePaths(Instance, SourcePath, TargetPath, FileObj.Directory);
 
-            Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, Length);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, Length);
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                 Instance.TriggerEventMessage($"[+] NtSetInformationFile: Renamed '{SourcePath}' -> '{TargetPath}'.", LogFlags.Syscall);
             return NTSTATUS.STATUS_SUCCESS;
@@ -201,25 +201,25 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Length < FileDispositionInformationSize)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
             }
 
             if (!HasDeleteAccess(Instance, FileHandle))
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_ACCESS_DENIED, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_ACCESS_DENIED, 0);
                 return NTSTATUS.STATUS_ACCESS_DENIED;
             }
 
             Span<byte> Data = Instance.WinHelper.ReadMemorySpan(FileInformation, 1);
             if (Data.Length == 0)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_ACCESS_VIOLATION, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_ACCESS_VIOLATION, 0);
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
             }
 
             FileObj.DeletePending = Data[0] != 0;
-            Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FileDispositionInformationSize);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FileDispositionInformationSize);
             return NTSTATUS.STATUS_SUCCESS;
         }
 
@@ -227,20 +227,20 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Length < FileDispositionInformationExSize)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
             }
 
             if (!HasDeleteAccess(Instance, FileHandle))
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_ACCESS_DENIED, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_ACCESS_DENIED, 0);
                 return NTSTATUS.STATUS_ACCESS_DENIED;
             }
 
             uint Flags = ReadUInt32(Instance, FileInformation + 0x00);
             FileObj.DeletePending = (Flags & FILE_DISPOSITION_DELETE) != 0;
 
-            Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FileDispositionInformationExSize);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FileDispositionInformationExSize);
             return NTSTATUS.STATUS_SUCCESS;
         }
 
@@ -248,19 +248,19 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Length < FilePositionInformationSize)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
             }
 
             long Position = ReadInt64(Instance, FileInformation + 0x00);
             if (Position < 0)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_PARAMETER, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_PARAMETER, 0);
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
             }
 
             FileObj.Position = Position;
-            Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FilePositionInformationSize);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FilePositionInformationSize);
             return NTSTATUS.STATUS_SUCCESS;
         }
 
@@ -268,12 +268,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Length < FileModeInformationSize)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
             }
 
             FileObj.Mode = ReadUInt32(Instance, FileInformation + 0x00);
-            Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FileModeInformationSize);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FileModeInformationSize);
             return NTSTATUS.STATUS_SUCCESS;
         }
 
@@ -282,39 +282,39 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint RequiredSize = EndOfFile ? FileEndOfFileInformationSize : FileAllocationInformationSize;
             if (Length < RequiredSize)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
             }
 
             if (FileObj.Directory)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_FILE_IS_A_DIRECTORY, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_FILE_IS_A_DIRECTORY, 0);
                 return NTSTATUS.STATUS_FILE_IS_A_DIRECTORY;
             }
 
             if (!HasWriteDataAccess(Instance, FileHandle))
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_ACCESS_DENIED, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_ACCESS_DENIED, 0);
                 return NTSTATUS.STATUS_ACCESS_DENIED;
             }
 
             long Size = ReadInt64(Instance, FileInformation + 0x00);
             if (Size < 0)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_PARAMETER, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_PARAMETER, 0);
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
             }
 
             if (Size > int.MaxValue)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_NO_MEMORY, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_NO_MEMORY, 0);
                 return NTSTATUS.STATUS_NO_MEMORY;
             }
 
             WindowsFileStream Stream = FileObj.GetFileStream(true);
             if (Stream == null)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_ACCESS_DENIED, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_ACCESS_DENIED, 0);
                 return NTSTATUS.STATUS_ACCESS_DENIED;
             }
 
@@ -324,7 +324,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
             catch
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_ACCESS_DENIED, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_ACCESS_DENIED, 0);
                 return NTSTATUS.STATUS_ACCESS_DENIED;
             }
 
@@ -332,7 +332,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (FileObj.Position > Size)
                 FileObj.Position = Size;
 
-            Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, RequiredSize);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, RequiredSize);
             return NTSTATUS.STATUS_SUCCESS;
         }
 

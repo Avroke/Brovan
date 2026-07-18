@@ -50,11 +50,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (!Asynchronous)
                 {
-                    Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, 0);
+                    Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, 0);
                     return NTSTATUS.STATUS_SUCCESS;
                 }
 
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_PENDING, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_PENDING, 0);
                 Instance.WinHelper.RegisterRegistryNotification(new WinRegistryNotification
                 {
                     KeyPath = RegKey.FullPath,

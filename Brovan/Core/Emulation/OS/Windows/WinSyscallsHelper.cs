@@ -258,41 +258,40 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         /// <summary>
-        /// Writes a 64-bit IO_STATUS_BLOCK to emulated memory.
+        /// Writes an IO_STATUS_BLOCK sized for the guest bitness: 16 bytes on x64
+        /// ({ union { NTSTATUS Status; PVOID Pointer; }; ULONG_PTR Information; }) and 8 bytes on x86 /
+        /// WOW64 ({ NTSTATUS Status; ULONG Information; }). Writing the 16-byte form for a 32-bit guest
+        /// overruns the 8-byte guest structure and corrupts whatever follows it in memory — e.g. an
+        /// adjacent heap-resident RTL_CRITICAL_SECTION, whose zeroed DebugInfo then faults on the next
+        /// RtlEnterCriticalSection — so the written size MUST track GuestPointerSize.
         /// </summary>
+        /// <param name="Instance">The emulator instance (source of guest bitness + memory).</param>
         /// <param name="IoStatusBlockPtr">Address of the IO_STATUS_BLOCK.</param>
         /// <param name="Status">The operation status.</param>
         /// <param name="Information">The operation information value.</param>
-        public void WriteIoStatusBlock64(ulong IoStatusBlockPtr, NTSTATUS Status, ulong Information)
+        public void WriteIoStatusBlock(BinaryEmulator Instance, ulong IoStatusBlockPtr, NTSTATUS Status, ulong Information)
         {
-            Span<byte> Buffer = stackalloc byte[0x10];
-            BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x00, 8), (uint)Status);
-            BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x08, 8), Information);
-            Emulator._emulator.WriteMemory(IoStatusBlockPtr, Buffer);
+            if (Instance.GuestPointerSize == 8)
+            {
+                Span<byte> Buffer = stackalloc byte[0x10];
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x00, 8), (uint)Status);
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x08, 8), Information);
+                Instance._emulator.WriteMemory(IoStatusBlockPtr, Buffer);
+            }
+            else
+            {
+                Span<byte> Buffer = stackalloc byte[0x08];
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x00, 4), (uint)Status);
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x04, 4), (uint)Information);
+                Instance._emulator.WriteMemory(IoStatusBlockPtr, Buffer);
+            }
         }
 
         /// <summary>
-        /// Writes a 32-bit IO_STATUS_BLOCK to emulated memory.
+        /// Writes an explicit 32-bit IO_STATUS_BLOCK (8 bytes). Retained for the handlers that already
+        /// branch on bitness and select the writer themselves; new code should prefer the bitness-aware
+        /// <see cref="WriteIoStatusBlock"/>.
         /// </summary>
-        /// <param name="IoStatusBlockPtr">Address of the IO_STATUS_BLOCK.</param>
-        /// <param name="Status">The operation status.</param>
-        /// <param name="Information">The operation information value.</param>
-        public void WriteIoStatusBlock32(uint IoStatusBlockPtr, NTSTATUS Status, uint Information)
-        {
-            Span<byte> Buffer = stackalloc byte[0x08];
-            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x00, 4), (uint)Status);
-            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x04, 4), Information);
-            Emulator._emulator.WriteMemory(IoStatusBlockPtr, Buffer);
-        }
-
-        public void WriteIoStatusBlock64(BinaryEmulator Instance, ulong IoStatusBlockPtr, NTSTATUS Status, ulong Information)
-        {
-            Span<byte> Buffer = stackalloc byte[0x10];
-            BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x00, 8), (uint)Status);
-            BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x08, 8), Information);
-            Instance._emulator.WriteMemory(IoStatusBlockPtr, Buffer);
-        }
-
         public void WriteIoStatusBlock32(BinaryEmulator Instance, uint IoStatusBlockPtr, NTSTATUS Status, uint Information)
         {
             Span<byte> Buffer = stackalloc byte[0x08];
@@ -5239,7 +5238,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             foreach (WinRegistryNotification Notification in Completed)
             {
                 if (Notification.IoStatusBlock != 0 && Emulator.IsRegionMapped(Notification.IoStatusBlock, 0x10))
-                    WriteIoStatusBlock64(Emulator, Notification.IoStatusBlock, NTSTATUS.STATUS_SUCCESS, 0);
+                    WriteIoStatusBlock(Emulator, Notification.IoStatusBlock, NTSTATUS.STATUS_SUCCESS, 0);
 
                 if (Notification.EventHandle != 0)
                 {

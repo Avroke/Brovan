@@ -28,7 +28,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (!Instance.WinHelper.IsCurrentProcessHandle(ProcessHandle, AccessMask.ProcessVMOperation))
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_HANDLE, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_HANDLE, 0);
                 return NTSTATUS.STATUS_INVALID_HANDLE;
             }
 
@@ -42,7 +42,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance._emulator.WriteMemory(RegionSizePtr, FlushedSize, 8);
             }
 
-            Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, Status, FlushedSize);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, Status, FlushedSize);
             return Status;
         }
 
