@@ -6,24 +6,26 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
-
-            ulong ThreadHandlePtr = Instance.ReadRegister(Registers.UC_X86_REG_R10);
-            ulong DesiredAccess = Instance.ReadRegister(Registers.UC_X86_REG_RDX);
-            ulong ClientIdPtr = Instance.ReadRegister(Registers.UC_X86_REG_R9);
+            ulong ThreadHandlePtr = Instance.WinHelper.GetArg64(0);
+            ulong DesiredAccess = Instance.WinHelper.GetArg64(1);
+            // Arg[2] is POBJECT_ATTRIBUTES (ignored — we resolve by CID). Arg[3] is PCLIENT_ID.
+            ulong ClientIdPtr = Instance.WinHelper.GetArg64(3);
 
             if (ThreadHandlePtr == 0 || ClientIdPtr == 0)
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            ulong Tid = Instance._emulator.ReadMemoryULong(ClientIdPtr + 0x8);
+            // CLIENT_ID = { HANDLE UniqueProcess; HANDLE UniqueThread; } — pointer-sized fields.
+            // UniqueThread lives at +8 on x64, +4 on x86.
+            ulong ThreadIdField = ClientIdPtr + (ulong)Instance.GuestPointerSize;
+            ulong Tid = Instance.ReadPointer(ThreadIdField);
             EmulatedThread Thread = Instance.Threads.Values.FirstOrDefault(EmuThread => EmuThread.ThreadId == Tid);
             if (Thread == null)
                 return NTSTATUS.STATUS_INVALID_CID;
 
             WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(Thread, (AccessMask)DesiredAccess);
             Instance.WinHelper.AddWinHandle(Handle);
-            Instance._emulator.WriteMemory(ThreadHandlePtr, Handle.Handle, 8);
+            if (!Instance.WritePointer(ThreadHandlePtr, (ulong)Handle.Handle))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             return NTSTATUS.STATUS_SUCCESS;
         }
