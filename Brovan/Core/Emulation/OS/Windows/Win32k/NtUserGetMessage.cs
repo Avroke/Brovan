@@ -30,9 +30,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
-
+            // Bitness-agnostic: args come through GetArg64 (x86 stack / x64 regs) and the MSG write goes
+            // through the now-bitness-aware Win32kHelper.WriteMessage. Was gated to x64, so on WOW64 the
+            // 32-bit user32 GetMessageW wrapper got STATUS_NOT_SUPPORTED and spun its retry loop millions of
+            // times after al-khaser finished all its checks. On x64 the same pump gets STATUS_PENDING once,
+            // parks the thread, and the scheduler (no other runnable thread) terminates it cleanly — this
+            // makes WOW64 reach that same clean terminus instead of an unoptimised spin.
             ulong MessagePtr = Instance.WinHelper.GetArg64(0);
             ulong HwndFilter = Instance.WinHelper.GetArg64(1);
             uint MinMessage = (uint)Instance.WinHelper.GetArg64(2, true);
