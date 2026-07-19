@@ -176,6 +176,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         if (!Instance.ReleaseMemoryRange(BaseAddress, RegionSize))
                             return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
 
+                        Instance.WriteWatch?.Unregister(BaseAddress);
                         Instance._emulator.WriteMemory(BaseAddressPtr, (uint)(BaseAddress & ~0xFFFUL));
                         Instance._emulator.WriteMemory(RegionSizePtr, (uint)BinaryEmulator.AlignUp(RegionSize, PageSize));
                         return NTSTATUS.STATUS_SUCCESS;

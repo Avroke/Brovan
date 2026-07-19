@@ -51,7 +51,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(PipeObj, Permissions);
             Instance.WinHelper.AddWinHandle(Handle);
 
-            Instance._emulator.WriteMemory(FileHandlePtr, (ulong)Handle.Handle);
+            if (!Instance._emulator.WriteMemory(FileHandlePtr, (ulong)Handle.Handle))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
             Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, FILE_CREATED);
 
             return NTSTATUS.STATUS_SUCCESS;
