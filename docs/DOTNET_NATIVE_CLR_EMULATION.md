@@ -871,21 +871,31 @@ n'est qu'une question de *quelle enveloppe de bootstrap* attaquer en premier.
   J5 est **atteint et fiable dans le cas commun mais pas déterministe à 100 %**. Mesure : **10/11 runs
   propres** (`no live threads`, ~**110,35 M** instructions, quasi-déterministe à ±60 instr) ; **1/11**
   deadlocke tôt (~19 M instr). **Cause racine symbolisée** (llvm-symbolizer + PDB Microsoft) : sur le run
-  qui deadlocke, un thread worker faute en lisant l'adresse invalide `0x1002E0010` **à
-  `ntdll!RtlAllocateHeap+…` (RVA `0x2A9C0`)** — un **pointeur de free-list corrompu** — pendant une
-  énumération de clés registre ; l'AV (`0xC0000005`) tue le worker, qui était celui censé **signaler
-  l'événement work-complete du loader** (`LdrpWorkCompleteEvent`, handle `0x8C`/`0x4C`), d'où le park
-  éternel de `Main` + `.NET Finalizer`. **Ce n'est PAS** un null-check/write-barrier coreclr (VEH), et
-  **pas** un bug de la machinerie d'événements (`[EVT-*]` : tous les rendez-vous observés satisfaits) :
-  la ligne « Invalid memory read … at RtlAllocateHeap » **n'apparaît QUE dans le run qui deadlocke**,
-  jamais dans les 10 runs propres → **corruption de tas réelle, rare, dépendante de l'ordonnancement**,
-  pas un problème de dispatch de faute. Hypothèse principale : un **entrelacement du scheduler coopératif
-  au milieu d'une opération de tas** viole la sérialisation attendue de la section critique du heap
-  (RtlpHeap lock / keyed-event) et corrompt une free-list. Prochaine étape : instrumenter l'état de la
-  section critique du heap + les liens de free-list autour de `RtlAllocateHeap`, et capturer le run rare
-  (≈11 essais) pour identifier l'opération qui corrompt (allocation/free concurrente, ou une
-  release/decommit émulateur trop zélée — cf. `ReleaseMemoryRange`). PDB coreclr/clrjit/ntdll + chaîne
-  llvm-symbolizer déjà validés et prêts. **`NtTerminateProcess(NULL)`**
+  qui deadlocke, l'instruction fautante `ntdll!RtlAllocateHeap+0x2A9C0` est `cmp [rbx+0x10], 0xDDEEDDEE`
+  (lecture de la **signature `_SEGMENT_HEAP`**) avec `rbx=rcx=HeapHandle` **corrompu** → **ce n'est pas
+  une corruption de free-list mais un `HeapHandle` invalide passé à `RtlAllocateHeap`**. Chaîne d'appel
+  symbolisée du fautif : `ADVAPI32 → SHELL32 → ucrtbase/msvcrt!_calloc_impl → RtlAllocateHeap` — c.-à-d.
+  **`_calloc_impl` alloue depuis le `_crtheap` de msvcrt**, dont le handle (`0x100310000` / `0x100420000`
+  selon le run) tombe dans une région que **Brovan a libérée** (classifieur `[FREE-TRACK]`/`IsRegionFreed`
+  → `[freed-region: use-after-free]`). **Root cause = use-after-free du tas CRT** : le `[FREE-TRACK]`
+  identifie le libérateur comme **`coreclr!GCToOSInterface::VirtualRelease` depuis `WKS::gc_heap::initialize_gc`**
+  (la sonde de dimensionnement du GC réserve puis relâche une région, ex. `[0x100270000, 0x100320000)`)
+  **qui recouvre le `_crtheap` vivant** de msvcrt à `0x100310000`. La bande VA `0x1_00xxxxxx` est partagée
+  et brassée par les `MEM_RELEASE` partiels de `RtlCreateHeap` (→ `RtlpSecMemFreeVirtualMemory` →
+  `ReleaseMemoryRange`) **et** la sonde GC : occasionnellement (~1/22, dépend de l'ordre d'allocation donc
+  de l'ordonnancement) une allocation vivante (le `_crtheap`) se retrouve dans une plage qu'une autre
+  sous-système relâche, et l'unmap tue le tas CRT. `IsRegionMapped` consulte pourtant bien la carte des
+  régions réservées → le bug est un **écart de suivi de la carte VA** (probable mauvaise assignation
+  d'`AllocationBase` ou chevauchement réserve/relâche-partielle/réutilisation) qui laisse le `_crtheap`
+  soit non-tracké au moment de la réserve GC, soit tracké sous l'`AllocationBase` de l'allocation relâchée.
+  **Diagnostics livrés** (tous poussés) : classifieur de faute freed/decommitted/never-mapped
+  (`ClassifyFaultAddress`), dump registres+chaîne d'appelants (`DumpFaultCallStack`/`[FAULT-CTX]`),
+  traceur de libération avec appelant guest dans la bande CRT (`[FREE-TRACK]`), + `[CLR-AV]`. PDB
+  coreclr/clrjit/ntdll/msvcrt + chaîne llvm-symbolizer validés. **Prochaine étape = correctif allocateur**
+  (chantier séparé, à valider empiriquement sur tout le corpus car cœur d'allocation partagé) :
+  instrumenter `AllocationBase` aux réserves/relâches de la bande, confirmer le mécanisme exact
+  (mauvaise `AllocationBase` vs chevauchement de réutilisation), puis garantir qu'une relâche ne unmap
+  jamais les pages d'une allocation vivante d'`AllocationBase` différente. **`NtTerminateProcess(NULL)`**
   (reap des threads de fond au shutdown) est **corrigé** en amont : **validé bout-en-bout** sur un run
   où l'AV n'a pas fauté — `Main` retourne 5, `RtlExitUserProcess` → `NtTerminateProcess(NULL,5)` reape
   le finalizer + les workers (`STATUS_SUCCESS`, plus d'`ACCESS_DENIED`), self-terminate, puis
