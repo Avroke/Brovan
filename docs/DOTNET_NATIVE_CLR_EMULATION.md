@@ -867,19 +867,25 @@ n'est qu'une question de *quelle enveloppe de bootstrap* attaquer en premier.
   managé `Main` (`class P { static int Main() { return 5; } }`) s'exécute et le thread principal
   se termine avec le code de sortie **`0x5`** — **J5 franchi**, aucune exception `0xE0434352`
   avant `Main`.
-- **F-CLRINIT-AV — déterminisme de J5 : AV de thread runtime → deadlock loader (frontière active).**
-  J5 est **atteignable mais pas encore fiable** : la frontière est **non-déterministe**. Sur un
-  run, `Main` atteint `Exit(5)` ; sur un autre, à ~19 M instructions un thread worker du runtime
-  lève **`NtRaiseException 0xC0000005` (ACCESS_VIOLATION)** et meurt. Ce worker était celui qui
-  devait compléter le travail loader et **signaler l'événement work-complete** (`LdrpWorkCompleteEvent`,
-  vu handle `0x8C`/`0x4C` selon le run, auto/notification) ; sans lui, `Main` + le **.NET Finalizer**
-  parkent sur cet événement pour toujours → deadlock (`Scheduler ending` avec threads parkés). Le
-  trace `[EVT-SET]`/`[WAIT-PARK]`/`[EVT-WAKE]` confirme que **la machinerie d'événements est correcte**
-  (rendez-vous observés tous satisfaits) — la cause racine est **le crash du worker en amont**, pas un
-  bug de wake. Prochaine étape : symboliser le RIP de l'AV (module+rva via llvm-symbolizer sur
-  coreclr/clrjit) pour identifier la fonction runtime qui faute et le gap émulateur sous-jacent
-  (probable : mécanisme d'AV matérielle utilisé par coreclr — null-check / write-barrier / suspension
-  GC via redirection — dont le VEH n'est pas correctement ré-entré). **`NtTerminateProcess(NULL)`**
+- **F-CLRINIT-AV — déterminisme de J5 : corruption de tas rare → AV `RtlAllocateHeap` → deadlock loader (frontière active).**
+  J5 est **atteint et fiable dans le cas commun mais pas déterministe à 100 %**. Mesure : **10/11 runs
+  propres** (`no live threads`, ~**110,35 M** instructions, quasi-déterministe à ±60 instr) ; **1/11**
+  deadlocke tôt (~19 M instr). **Cause racine symbolisée** (llvm-symbolizer + PDB Microsoft) : sur le run
+  qui deadlocke, un thread worker faute en lisant l'adresse invalide `0x1002E0010` **à
+  `ntdll!RtlAllocateHeap+…` (RVA `0x2A9C0`)** — un **pointeur de free-list corrompu** — pendant une
+  énumération de clés registre ; l'AV (`0xC0000005`) tue le worker, qui était celui censé **signaler
+  l'événement work-complete du loader** (`LdrpWorkCompleteEvent`, handle `0x8C`/`0x4C`), d'où le park
+  éternel de `Main` + `.NET Finalizer`. **Ce n'est PAS** un null-check/write-barrier coreclr (VEH), et
+  **pas** un bug de la machinerie d'événements (`[EVT-*]` : tous les rendez-vous observés satisfaits) :
+  la ligne « Invalid memory read … at RtlAllocateHeap » **n'apparaît QUE dans le run qui deadlocke**,
+  jamais dans les 10 runs propres → **corruption de tas réelle, rare, dépendante de l'ordonnancement**,
+  pas un problème de dispatch de faute. Hypothèse principale : un **entrelacement du scheduler coopératif
+  au milieu d'une opération de tas** viole la sérialisation attendue de la section critique du heap
+  (RtlpHeap lock / keyed-event) et corrompt une free-list. Prochaine étape : instrumenter l'état de la
+  section critique du heap + les liens de free-list autour de `RtlAllocateHeap`, et capturer le run rare
+  (≈11 essais) pour identifier l'opération qui corrompt (allocation/free concurrente, ou une
+  release/decommit émulateur trop zélée — cf. `ReleaseMemoryRange`). PDB coreclr/clrjit/ntdll + chaîne
+  llvm-symbolizer déjà validés et prêts. **`NtTerminateProcess(NULL)`**
   (reap des threads de fond au shutdown) est **corrigé** en amont : **validé bout-en-bout** sur un run
   où l'AV n'a pas fauté — `Main` retourne 5, `RtlExitUserProcess` → `NtTerminateProcess(NULL,5)` reape
   le finalizer + les workers (`STATUS_SUCCESS`, plus d'`ACCESS_DENIED`), self-terminate, puis
