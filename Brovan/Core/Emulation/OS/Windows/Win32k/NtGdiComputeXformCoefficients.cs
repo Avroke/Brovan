@@ -6,9 +6,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
-
             ulong Hdc = Instance.WinHelper.GetArg64(0);
 
             if (!Win32kHelper.IsKnownDc(Instance, Hdc))

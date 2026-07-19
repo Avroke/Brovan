@@ -13,7 +13,18 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static ulong AlignDown(ulong v, ulong a) => v & ~(a - 1);
 
-        private static void InitializeWindowsSharedSection(BinaryEmulator Instance, ulong Base)
+        /// <summary>
+        /// Populates a CSR read-only shared section at <paramref name="Base"/> with the
+        /// <c>BASE_STATIC_SERVER_DATA</c> block (at <c>Base+0x1000</c>) plus a one-entry server-data pointer
+        /// descriptor (at <c>Base+0x10</c>, whose <c>+0x8</c> slot holds the BSSD pointer). The layout uses the
+        /// 64-bit field convention (16-byte UNICODE_STRINGs, 8-byte pointers, self-pointers at BSSD+0x9E8/+0xB50)
+        /// because csrss builds this section once with the native layout and both the 64-bit and the WOW64 32-bit
+        /// client map that same section. It is therefore reused verbatim by the WOW64 PEB bootstrap
+        /// (<c>WindowsGuest.SetupCsrReadOnlySharedSection32</c>) to back <c>PEB-&gt;ReadOnlySharedMemoryBase</c>
+        /// (+0x4C), <c>ReadOnlyStaticServerData</c> (+0x54 → <c>Base+0x10</c>) and the server-view base (+0x248 →
+        /// <c>Base</c>), so kernelbase's <c>Base_static_server_data</c> pointer remap resolves to the BSSD here.
+        /// </summary>
+        internal static void InitializeWindowsSharedSection(BinaryEmulator Instance, ulong Base)
         {
             Instance._emulator.WriteMemory(Base + 0x8, 0x10UL, 8);
 
@@ -94,7 +105,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
+            // Bitness-agnostic: args via GetArg64; BaseAddress (PVOID*) and ViewSize (PSIZE_T) are pointer-sized.
+            // SectionOffset is a LARGE_INTEGER (8 bytes on both). Needed for the WOW64 loader to map DLL views.
+            if (Instance._binary.Architecture != BinaryArchitecture.x64 && Instance._binary.Architecture != BinaryArchitecture.x86)
                 return Instance.WinUnimplemented;
 
             ulong SectionHandle = Instance.WinHelper.GetArg64(0);
@@ -108,13 +121,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint AllocationType = (uint)Instance.WinHelper.GetArg64(8);
             uint Win32Protect = (uint)Instance.WinHelper.GetArg64(9);
 
-            if (ProcessHandle != ulong.MaxValue)
+            if (!Instance.WinHelper.IsCurrentProcessPseudoHandle(ProcessHandle))
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
             if (BaseAddressPtr == 0 || ViewSizePtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (!Instance.IsRegionMapped(BaseAddressPtr, 8) || !Instance.IsRegionMapped(ViewSizePtr, 8))
+            if (!Instance.IsRegionMapped(BaseAddressPtr, (ulong)Instance.GuestPointerSize) || !Instance.IsRegionMapped(ViewSizePtr, (ulong)Instance.GuestPointerSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             WinSection Section = Instance.WinHelper.GetSectionByHandle(SectionHandle, AccessMask.GiveTemp);
@@ -135,13 +148,21 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Section.Initialized = true;
                 }
 
-                Instance._emulator.WriteMemory(Instance.PEB + 0x88, Base, 8);
-                Instance._emulator.WriteMemory(Instance.PEB + 0x98, Base + 0x10, 8);
-                Instance._emulator.WriteMemory(Instance.PEB + 0x380, Base, 8);
-                Instance._emulator.WriteMemory(Instance.PEB + 0x90, Base + 0x3000, 8);
+                // These four fields are the x64 PEB CSR/shared-section offsets, written pointer-wide (8).
+                // On WOW64 Instance.PEB is the 32-bit PEB (different offsets, 4-byte pointers) and its CSR
+                // fields are already published at bootstrap by WindowsGuest.SetupCsrReadOnlySharedSection32
+                // (PEB+0x4C/0x54/0x248) — writing the x64 offsets here would land on unrelated 32-bit fields
+                // and clobber 4 bytes past each. Restrict to the x64 PEB.
+                if (Instance._binary.Architecture == BinaryArchitecture.x64)
+                {
+                    Instance._emulator.WriteMemory(Instance.PEB + 0x88, Base, 8);
+                    Instance._emulator.WriteMemory(Instance.PEB + 0x98, Base + 0x10, 8);
+                    Instance._emulator.WriteMemory(Instance.PEB + 0x380, Base, 8);
+                    Instance._emulator.WriteMemory(Instance.PEB + 0x90, Base + 0x3000, 8);
+                }
 
-                Instance._emulator.WriteMemory(BaseAddressPtr, Base, 8);
-                Instance._emulator.WriteMemory(ViewSizePtr, Size, 8);
+                Instance.WritePointer(BaseAddressPtr, Base);
+                Instance.WritePointer(ViewSizePtr, Size);
 
                 if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                     Instance.TriggerEventMessage($"[+] NtMapViewOfSection: SharedSection Base=0x{Base:X}, Size=0x{Size:X}", LogFlags.Syscall);
@@ -149,8 +170,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            ulong RequestedBase = Instance._emulator.ReadMemoryULong(BaseAddressPtr);
-            ulong RequestedSize = Instance._emulator.ReadMemoryULong(ViewSizePtr);
+            ulong RequestedBase = Instance.ReadPointer(BaseAddressPtr);
+            ulong RequestedSize = Instance.ReadPointer(ViewSizePtr);
 
             ulong SectionOffset = 0;
             if (SectionOffsetPtr != 0)
@@ -212,10 +233,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (RequestedSize != 0 && RequestedSize < ReturnedSize)
                         ReturnedSize = BinaryEmulator.AlignUp(RequestedSize, PageSize);
 
-                    if (!Instance._emulator.WriteMemory(BaseAddressPtr, ReturnedBase, 8))
+                    if (!Instance.WritePointer(BaseAddressPtr, ReturnedBase))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                    if (!Instance._emulator.WriteMemory(ViewSizePtr, ReturnedSize, 8))
+                    if (!Instance.WritePointer(ViewSizePtr, ReturnedSize))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                     NTSTATUS Status = NTSTATUS.STATUS_SUCCESS;
@@ -250,10 +271,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             MemoryProtection Protection = Instance.WinHelper.ConvertWinProtectToInternal(Win32Protect);
             Instance._emulator.SetMemoryProtection(ReturnedBase, ReturnedSize, Protection);
 
-            if (!Instance._emulator.WriteMemory(BaseAddressPtr, ReturnedBase, 8))
+            if (!Instance.WritePointer(BaseAddressPtr, ReturnedBase))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (!Instance._emulator.WriteMemory(ViewSizePtr, ReturnedSize, 8))
+            if (!Instance.WritePointer(ViewSizePtr, ReturnedSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)

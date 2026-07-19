@@ -6,7 +6,7 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         internal static EmulatedThread GetTargetThread(BinaryEmulator Instance, ulong ThreadHandle)
         {
-            if (ThreadHandle == HandleManager.CurrentThread)
+            if (Instance.WinHelper.IsCurrentThreadPseudoHandle(ThreadHandle))
                 return Instance.CurrentThread;
 
             return Instance.WinHelper.HandleManager.GetObjectByHandle<EmulatedThread>(ThreadHandle);
@@ -47,9 +47,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
-
             ulong ThreadHandle = Instance.WinHelper.GetArg64(0);
             ulong ApcRoutine = Instance.WinHelper.GetArg64(1);
             ulong ApcArgument1 = Instance.WinHelper.GetArg64(2);

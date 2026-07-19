@@ -813,6 +813,29 @@ namespace Brovan.Core.Emulation
             }
         }
 
+        /// <summary>
+        /// Writes the GDTR (base + limit) via the Unicorn <c>uc_x86_mmr</c> memory-management-register struct.
+        /// Needed for 32-bit segment bases: MODE_32 ignores the FS_BASE pseudo-register, so a 32-bit FS→TEB
+        /// mapping must come from a GDT descriptor the CPU reaches through GDTR.
+        /// </summary>
+        public bool WriteGdtr(ulong Base, uint Limit)
+        {
+            if (DisposedCheck())
+                return false;
+
+            // struct uc_x86_mmr { uint16_t selector; uint64_t base; uint32_t limit; uint32_t flags; }
+            // Natural alignment ⇒ base at offset 8, limit at offset 16 (24 bytes total).
+            byte[] Mmr = new byte[24];
+            BitConverter.GetBytes(Base).CopyTo(Mmr, 8);
+            BitConverter.GetBytes(Limit).CopyTo(Mmr, 16);
+
+            lock (_registerLock)
+            {
+                _error = uc_reg_write(_uc, Registers.UC_X86_REG_GDTR, Mmr);
+                return _error == UCErrors.UC_ERR_OK;
+            }
+        }
+
         public bool WriteRegister(int Register, ulong Value)
         {
             if (DisposedCheck())

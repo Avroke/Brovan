@@ -6,9 +6,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
-
             const uint GA_PARENT = 1;
             const uint GA_ROOT = 2;
             const uint GA_ROOTOWNER = 3;

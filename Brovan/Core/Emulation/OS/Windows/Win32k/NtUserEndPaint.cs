@@ -6,9 +6,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
-
             ulong Hwnd = Instance.WinHelper.GetArg64(0);
             ulong PaintStructPtr = Instance.WinHelper.GetArg64(1);
 
@@ -19,9 +16,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            if (PaintStructPtr != 0 && Instance.IsRegionMapped(PaintStructPtr, 8))
+            // PAINTSTRUCT.hdc is the first field — pointer-sized (4 on x86, 8 on x64).
+            if (PaintStructPtr != 0 && Instance.IsRegionMapped(PaintStructPtr, (ulong)Instance.GuestPointerSize))
             {
-                ulong Hdc = Instance.ReadMemoryULong(PaintStructPtr);
+                ulong Hdc = Instance.ReadPointer(PaintStructPtr);
                 Win32kHelper.ReleaseDeviceContext(Instance, Hdc);
             }
 

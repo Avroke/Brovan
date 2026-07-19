@@ -19,13 +19,15 @@ namespace Brovan.Core.Emulation.OS.Windows
         // VIRTUAL_MEMORY_INFORMATION_CLASS: VmPrefetchInformation(0) .. VmRemoveFromWorkingSetInformation(7).
         private const uint MaxVmInfoClass = 8;
 
-        // MEMORY_RANGE_ENTRY { PVOID VirtualAddress; SIZE_T NumberOfBytes; } is 16 bytes on x64.
-        private const ulong MemoryRangeEntrySize = 0x10;
-
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
+            // Bitness-agnostic: args via GetArg64 (delegates to the x86 stack in WOW64). Only the
+            // MEMORY_RANGE_ENTRY stride and the current-process pseudo-handle differ by bitness.
+            if (Instance._binary.Architecture != BinaryArchitecture.x64 && Instance._binary.Architecture != BinaryArchitecture.x86)
                 return Instance.WinUnimplemented;
+
+            // MEMORY_RANGE_ENTRY { PVOID VirtualAddress; SIZE_T NumberOfBytes; } — 16 bytes on x64, 8 on x86.
+            ulong MemoryRangeEntrySize = (ulong)(Instance.GuestPointerSize * 2);
 
             ulong ProcessHandle = Instance.WinHelper.GetArg64(0);
             uint VmInformationClass = (uint)Instance.WinHelper.GetArg64(1);
@@ -40,7 +42,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             // Non-current process handles are rare here; the operation is advisory, so accept the
             // current-process pseudo-handle and a resolvable process handle, and fail an outright
             // bogus one the way the real service does.
-            bool CurrentProcess = ProcessHandle == ulong.MaxValue;
+            bool CurrentProcess = Instance.WinHelper.IsCurrentProcessPseudoHandle(ProcessHandle);
             if (!CurrentProcess && Instance.WinHelper.HandleManager.GetObjectByHandle<WinProcess>(ProcessHandle) == null)
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
@@ -59,8 +61,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 for (ulong i = 0; i < NumberOfEntries; i++)
                 {
                     ulong Entry = VirtualAddresses + (i * MemoryRangeEntrySize);
-                    ulong RangeVirtualAddress = Instance.ReadMemoryULong(Entry + 0x0);
-                    ulong RangeNumberOfBytes = Instance.ReadMemoryULong(Entry + 0x8);
+                    ulong RangeVirtualAddress = Instance.ReadPointer(Entry + 0x0);
+                    ulong RangeNumberOfBytes = Instance.ReadPointer(Entry + (ulong)Instance.GuestPointerSize);
                     _ = RangeVirtualAddress;
                     _ = RangeNumberOfBytes;
                 }

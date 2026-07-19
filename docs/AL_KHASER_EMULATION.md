@@ -7,8 +7,10 @@ This file records every correction that has landed, and every frontier that has
 been diagnosed but not yet fixed, so the work can be picked up without
 re-deriving the analysis.
 
-Scope: **al-khaser x64**. al-khaser x86 does not run at all — Brovan implements
-very few x86 syscalls and no WOW64 (see Frontier F5).
+Scope: **al-khaser x64** (fully running its detection suite) and **al-khaser x86 /
+WOW64** (foundation landed — the 32-bit ntdll loader now runs deep into process
+init; see Frontier F5 for the full WOW64 model, landed primitives, and the current
+loader-TLS frontier).
 
 ## Progression
 
@@ -1382,12 +1384,748 @@ the before/after compare-return evidence (constant `-2`/`0` error → correct
 `0`/`-1`/`CSTR_*` results) — is in the landed **`b205488`** entry under *Past
 corrections* above.
 
-### F5 — x86 / WOW64 unsupported
+### F5 — x86 / WOW64 — foundation landed, loader now runs deep into process init
 
-**Symptom:** `al-khaser_x86.exe` does not run.
+**Original symptom:** `al-khaser_x86.exe` did not run at all — it died immediately
+with `ntdll.dll is not loaded` before executing a single guest instruction.
 
-**Cause:** Brovan implements very few x86 syscalls and no WOW64 thunking. Out of
-scope for the x64 work above; a separate, large effort.
+**Status now:** the WOW64 foundation is implemented and validated. A 32-bit PE
+loads the real 32-bit ntdll from the `SysWOW64` view, builds a valid 32-bit
+process environment, dispatches WOW64 system calls through a synthetic
+`sysenter` trampoline with the correct SSNs, handles CPU/software exceptions
+through the x86 `KiUserExceptionDispatcher`, and runs ntdll's `LdrInitializeThunk`
+loader **all the way through image loading into DLL initialisation** — synthesising
+the WOW64INFO block, reserving the CFG bitmap, opening the process memory partition,
+creating the NT process heap, resolving the KnownDlls object-manager chain, mapping
+the real 32-bit `kernel32` / `kernelbase` / CRT from the `SysWOW64` view, running
+their DllMains **to completion** (the CSR base-server connect + read-only
+shared-section / `BASE_STATIC_SERVER_DATA` are now wired), and driving on into
+process init — reaching **~6.31M guest instructions**, up from ~8k at the start of
+this line of work. `STATUS_DLL_INIT_FAILED` is cleared; it now terminates further
+along at `APP_INIT_FAILURE` `Parameter0=0xC0000004` (`STATUS_INFO_LENGTH_MISMATCH`
+from `NtSetInformationProcess` — the current frontier below). The x64 cohort is
+structurally unaffected by these x86 fixes (every fix is either x86-only-gated or in
+a WOW64 `if`-branch).
+
+**Environment note (reproduction):** `WindowsLibs/` must be a *real* directory
+inside the emulator output dir, not a symlink pointing outside it. The path sandbox
+(`GetSandboxedFullPath`) resolves symlink targets and rejects anything outside the
+allowed roots, so a `WindowsLibs -> /elsewhere` symlink makes every system-DLL
+resolution silently miss (both bitnesses then fail to load `kernel32` with
+`STATUS_DLL_NOT_FOUND`). Copy the bundle in; don't symlink it.
+
+This whole subsection is the WOW64 model. **The design decision that makes it
+tractable: emulate a 32-bit process purely in `UC_MODE_32`** — one Unicorn
+context, never the real Heaven's-Gate 0x33 mode switch. The 32-bit ntdll's
+`Nt*` stubs reach the kernel through `Wow64Transition` / `fs:[0xC0]`; Brovan
+points both at a trampoline that runs a `sysenter` it intercepts, dispatching to
+the same C# `Nt*` handlers the x64 path uses. The SSNs in the WOW64 32-bit ntdll
+are **identical to the native x64 SSNs** (NtCreateFile = 0x55, NtProtectVirtualMemory
+= 0x50 on both), so the number→name mapping is built the same way — by parsing
+the guest ntdll's `mov eax, imm32` stub prologues, now from `WindowsLibs/SysWOW64/ntdll.dll`.
+
+#### Landed WOW64 primitives
+
+- **SysWOW64 dependency view** (`GeneralHelper.Wow64GuestView`, an ambient flag
+  set from the binary architecture at guest bring-up). On a non-Windows host the
+  WindowsLibs resolver (`GetWindowsLibPath`, `TryResolveFromWindowsLibs`,
+  `TryResolveFromWindowsLibsByLeaf`) redirects a 32-bit guest's `System32`
+  requests to `WindowsLibs/SysWOW64` — the emulator-side WOW64 file-system
+  redirector. Falls back to the flat view when SysWOW64 doesn't ship a file.
+- **x86 syscall table** — `BuildWinSyscallDictionary(x86)` reads
+  `SysWOW64/ntdll.dll` + `win32u.dll` (was reading the flat 64-bit ntdll for both
+  arches).
+- **Bitness-aware GPR transfer** (`BinaryEmulator.ReadGprBatch/WriteGprBatch`).
+  Root cause of the very first crash: **Unicorn treats the 64-bit register IDs
+  (`RAX`/`RSP`/`RIP`/… ids 35, 41, 44, …) as no-ops in `MODE_32`** — writing them
+  silently does nothing, reading returns 0. So the thread context never reached a
+  32-bit CPU (ESP stayed 0 → `push` faulted at `LdrInitializeThunk`). The batch
+  now uses the 32-bit IDs (`EAX`/`ESP`/`EIP`/`EFLAGS`, 10 regs, no R8-R15) when
+  `BackendMode == MODE_32`.
+- **GDT-based FS base** (`WindowsGuest.SetupWow64Segments` + a new
+  `IEmulationBackend.WriteGdtr` MMR-write primitive on all backends). `MODE_32`
+  also ignores the `FS_BASE` pseudo-register (`fs:[0x18]` faulted), so the FS base
+  is installed through a real GDT descriptor (selector 0x50, GDT index 10) reached
+  via GDTR; the descriptor's base is rewritten to the current thread's TEB on each
+  context switch and FS reloaded. Loading a custom GDTR turns the default `SS=0`
+  into a null selector (stack pushes then `#GP`), so `SS`/`DS`/`ES` are reloaded
+  with flat DPL0 selectors. **Selectors are DPL0/RPL0, not the real WOW64 ring-3
+  values (CS 0x23, FS 0x53):** a ring-3 selector can only be loaded at CPL 3, and
+  Unicorn's `reg-write` of CS does not perform the far transfer that raises CPL, so
+  RPL-3 loads `#GP`. The FS base is still correct (all `fs:[X]` resolve); the
+  visible selector *values* differ — a known cosmetic gap, tracked below.
+- **32-bit process environment** (`WindowsGuest.BuildProcessEnvironment32`) — full
+  32-bit PEB + `RTL_USER_PROCESS_PARAMETERS` (documented x86 offsets, UNICODE_STRING
+  buffer at struct+4). Previously only a minimal PEB was built, and only for the
+  raw-blob path; a real 32-bit PE got no ProcessParameters and the loader read a
+  NULL command line.
+- **32-bit TEB** (`AllocateAndInitializeTEB`) — built for every 32-bit guest now,
+  including `WOW32Reserved` (`fs:[0xC0]`) pointed at the syscall trampoline.
+- **WOW64 syscall trampoline** (`SetupWow64SyscallTransition`) — a
+  `pop edx ; sysenter ; push edx ; ret` page. `pop` discards the ntdll-stub return
+  address that `call fs:[0xC0]` / `jmp [Wow64Transition]` leaves on top, so at the
+  `sysenter` ESP points at the *caller's* return address with the syscall args at
+  ESP+4, ESP+8, … — exactly what `GetArg32` expects. `push` restores it so the
+  final `ret` returns into the stub's `ret N`, cleaning the stdcall args. Both the
+  ntdll `Wow64Transition` global and the per-thread TEB `fs:[0xC0]` point at it; a
+  new `SYSENTER` instruction hook (registered only for `MODE_32`) routes to the
+  same `TryHandleSyscall` the x64 `SYSCALL` hook uses.
+- **32-bit thread bootstrap** (`CreateEmulatedThread` x86 path +
+  `BuildInitialContext32`) — `LdrInitializeThunk` is entered stdcall-style with a
+  `CONTEXT*` first arg; it `NtContinue`s to a 32-bit CONTEXT whose Eip is
+  `RtlUserThreadStart` with Eax = entry, Ebx = parameter (the x86 ABI).
+- **x86 CONTEXT handling** — `NtContinue`, `NtRaiseException`, and the exception
+  dispatcher (`WinSysHelper.DispatchExceptionX86` reached from `InvokeException`)
+  all read/write the 32-bit CONTEXT (0x2CC) layout with the 32-bit register IDs.
+  The x86 `KiUserExceptionDispatcher` ABI (`[esp]=PEXCEPTION_RECORD`,
+  `[esp+4]=PCONTEXT`, confirmed from its stub prologue) is built on the thread
+  stack. Before this, any fault/exception spun ~20M no-op instructions
+  (`InvokeException is only implemented for x64`); now SEH dispatches correctly and
+  the run terminates.
+- **Unified syscall argument reading** (`WinSysHelper.GetArg64` delegates to the
+  stack-based `GetArg32` in `MODE_32`) so the ~130 handlers that read args through
+  `GetArg64` without an explicit arch branch get correct 32-bit arguments for free;
+  and pointer-sized OUT writes go through new bitness-aware
+  `BinaryEmulator.ReadPointer` / `WritePointer` / `GuestPointerSize` helpers.
+- **Pseudo-handle helpers** (`WinSysHelper.IsCurrentProcessPseudoHandle` /
+  `IsCurrentThreadPseudoHandle`) — the `(HANDLE)-1` current-process pseudo-handle
+  arrives as `0xFFFFFFFF` (zero-extended) on x86, not `ulong.MaxValue`, so bare
+  `== ulong.MaxValue` comparisons missed it.
+- **Handlers made bitness-aware** (args unified, OUT structs sized to the guest):
+  `NtProtectVirtualMemory`, `NtQuerySystemInformation` (incl. the x86 44-byte
+  `SYSTEM_BASIC_INFORMATION`), `NtQueryInformationProcess`
+  (ProcessBasicInformation / ProcessCookie / ProcessDefaultHardErrorMode /
+  ProcessExecuteFlags / ProcessImageInformation — x86 `SECTION_IMAGE_INFORMATION`
+  0x30), `NtQueryVirtualMemory` (MemoryBasicInformation 0x1C / MemoryImageInformation
+  0x0C / MemoryWorkingSetExInformation 8-byte entries),
+  `NtQueryInformationThread` (ThreadBasicInformation 0x1C), `NtCreateEvent`,
+  `NtCreateSection`, `NtMapViewOfSection`, `NtSetInformationProcess`,
+  `NtContinue`, `NtRaiseException`.
+
+**Progression (instruction terminus grows as each layer landed):**
+
+| Stage | Terminus |
+|-------|----------|
+| Session start | `ntdll.dll is not loaded` — 0 guest instrs |
+| SysWOW64 view + syscall table | 32-bit ntdll loads; crash at `LdrInitializeThunk` `push ebp`, ESP=0 |
+| Bitness-aware GPR batch | thread starts; `fs:[0x18]` fault (FS base unset) |
+| GDT-based FS + 32-bit TEB/PEB/CONTEXT + trampoline | WOW64 syscalls dispatch with correct SSNs |
+| Unified args + loader-critical handlers | loader queries + maps DLL sections |
+| x86 exception dispatch | infinite no-op spin gone; SEH dispatches; clean terminus |
+| ProcessImageInformation / thread / memory classes | loader runs ~8k instrs deep into init |
+| WOW64INFO in TEB TlsSlots[10] | CPU-feature init deref fixed → ~20k instrs (CFG-bitmap reserve reached) |
+| SystemEmulationBasicInformation MaximumUserModeAddress | CFG-bitmap span computes non-zero → ~21.6k (segment-heap init reached) |
+| NtOpenPartition | memory partition opens → segment-heap arena allocates → ~22.1k (heap tree build reached) |
+| RTL_USER_PROCESS_PARAMETERS header size (0x2A0→0x300) | HeapPartitionName no longer garbage → NT heap (not segment heap) → ~128k (KnownDlls chain reached) |
+| KnownDlls object-manager + file handlers → WOW64 | NtOpen{DirectoryObject,SymbolicLinkObject,Section}, NtQuery{SymbolicLinkObject,AttributesFile} → ~181k (DLL disk-load reached) |
+| SysWOW64 case-insensitive leaf resolution | 32-bit kernel32/kernelbase/CRT bind (not the 64-bit copy) → ~1.34M (DLL init reached) |
+| CSR base-server connect (`NtWow64CsrClientConnectToServer`, SSN 0x1D7) | kernel32/kernelbase `BaseDllInitialize` reaches the CSR handshake |
+| CSR read-only shared section + `BASE_STATIC_SERVER_DATA` (PEB +0x4C/+0x54/+0x248) | `BaseDllInitialize` completes → **~6.31M** (`DLL_INIT_FAILED` cleared) |
+| `NtSetInformationProcess(ProcessTlsInformation)` WOW64 element size (0xC not 0x18) | ntdll deferred-TLS setup succeeds → **~9.93M** (`INFO_LENGTH_MISMATCH` cleared) |
+| `NtSetInformationVirtualMemory` + `NtQueryInformationProcess(ProcessMitigationPolicy)` → WOW64 | CFG registration + mitigation query succeed (advisory) → later-DLL init |
+| user32 win32k client-connect (`NtUserProcessConnect`, syscall 0x2000) + SHAREDINFO | user32 DllMain passes the connect → **~9.98M** |
+| WOW64 registry family (`NtOpenKey`/`NtQueryValueKey`/… ×13) | registry works on x86 (prereq for the detection phase) |
+| gdi32full GDI shared handle table (`TEB+0x60`=PEB, `PEB+0xF8`=table) | gdi32full GDI init completes → **~11.15M** |
+| **IO_STATUS_BLOCK sized 16→8 bytes on x86 (`WriteIoStatusBlock` now bitness-aware)** | the 16-byte x64 write overran the 8-byte guest struct and zeroed an adjacent live `RTL_CRITICAL_SECTION`'s `DebugInfo` → the `RtlEnterCriticalSection DebugInfo==0` fault; **root cause of the F5 terminus** |
+| `NtOpenFile` / `NtDeviceIoControlFile` / `NtWriteFile` / `NtTerminateProcess` → WOW64 | file+terminate syscalls run on x86 → DLL init clears `DLL_INIT_FAILED`; al-khaser reaches **`main()`** and prints results → **~14.27M**, Init / TLS-Callbacks / Debugger-Detection sections, 14 GOOD |
+| `NtQueryInformationProcess(ProcessDebugObjectHandle/ProcessDebugFlags)` → WOW64 | x86 debug-object probe returns `STATUS_PORT_NOT_SET` (no debugger) → BAD→GOOD (**15 GOOD / 3 BAD**) |
+| `NtQueryVirtualMemory(MemoryRegionInformation)` → WOW64 | class-3 query used by `SetUnhandledExceptionFilter`'s filter validator now works on x86 → the registered filter is stored and **actually runs** (was: filter dropped → `UnhandledExcepFilterTest` killed the process at `0xC000008E`) |
+| WOW64 exception-resume EIP off-by-+2 (`NtRaiseException` syscall advance) | the CONTINUE_EXECUTION resume landed 2 bytes into the next instruction (kernelbase!RaiseException's GS-cookie reload) → `0xC0000409` fail-fast; fixed → **23 GOOD** (8 exception-based probes unblocked) |
+| `0xC0000005` (ACCESS_VIOLATION) in Debugger Detection: `user32!GetWindowThreadProcessId(NULL)` read a bad `aheList` | `NtUserProcessConnect` published the 32-bit-packed SHAREDINFO; this WOW64 build carries the **64-bit** SHAREDINFO (aheList@+0x08 / HeEntrySize@+0x10 / pDispInfo@+0x18). Corrected offsets → `GetWindowThreadProcessId(NULL)` returns 0 → **15.27M → ~37.7M**, into DLL Injection Detection (**41 GOOD / 5 BAD**) |
+| `NtReadVirtualMemory` (SSN 0x3F) → WOW64 (was **empty x86 branch**) | ReadProcessMemory-on-self was returning `WinUnimplemented` on x86, so al-khaser's DLL-Injection-Detection callback (which walks its own `InLoadOrderModuleList` via `ReadProcessMemory`) printed "Error reading entry" for every module and left its result vector empty → NULL-deref iterating the empty vector at `0x40E300`. Refactored the handler to a single bitness-agnostic body (`GetArg64` + `IsCurrentProcessPseudoHandle` + `GuestPointerSize`-sized `NumberOfBytesRead` write). Advances **~37.7M → ~232M**, past DLL Injection Detection into **Generic Sandbox/VM Detection** (**76 GOOD / 10 BAD**) |
+| `0xC0000005` (ACCESS_VIOLATION) in Generic Sandbox/VM Detection: combase.dll NULL-`this` in `CoInitializeSecurity` internal helper | combase RVA `0xBFBBF` __thiscall wrote to `[edi+0xC]` with `edi=NULL`; caller at RVA `0xC030D` (`mov ecx, [0x102420D8]; call 0xBFBBD`) loaded ECX from a lazy-initialised singleton that stayed NULL because sub_10B0C8C9's sub_B (`RegOpenKeyExW(HKCU\Software\Classes\Local Settings)`) returned NAME_NOT_FOUND → sub_10B119C0 short-circuited past the interlocked-init at sub_10AA0528. Seeded the missing HKCU key in `InitializeSyntheticRegistryDefaults` (matches real Win10 — the key exists on every install). Advances **~232M → ??**, past combase into **all 11 remaining anti-VM/anti-sandbox sections** (Hyper-V / KVM / Parallels / QEMU / Virtual PC / VirtualBox / VMWare / Wine / Xen / Timing-attacks) → **237 GOOD / 18 BAD** |
+| *(open)* Message-pump spin in a late section: `NtUserGetMessage` (0x1006) / `NtUserSetTimer` (0x1018) still gated to x64 | new terminus is a `GetMessage`/`SetTimer`-based timing probe; on x86 both return `WinUnimplemented`, al-khaser's message pump spins until MaxSteps. Adding just `NtUserGetMessage` isn't enough because `NtUserSetTimer` never fires the timer the pump waits on — need both plus the timer→WM_TIMER message-queue wiring. |
+| `NtQueryVirtualMemory(MemoryMappedFilenameInformation)` → WOW64 (was gated to x64) | K32GetMappedFileName's x86 caller path (used by al-khaser's "hidden module" walk) got `STATUS_NOT_SUPPORTED` and fell through to a PEB-list fallback that's more prone to reporting loader-mapped system DLLs as injected libraries. Widens the WOW64 allow-list AND writes the correct `UNICODE_STRING` layout per bitness (8-byte header + Buffer4 on x86 vs 16-byte header + Buffer8 on x64) — the prior code always wrote the x64 shape, corrupting caller memory past the struct on x86. `RequiredLength` return-slot switched to `WritePointer` (ULONG_PTR = 4 bytes on x86). x64 byte-identical. |
+| `NtQuerySecurityAttributesToken` → WOW64 (was gated to x64) | Widens the gate; sizes `TOKEN_SECURITY_ATTRIBUTES_INFORMATION` to `GuestPointerSize`-sized OUT Attribute pointer (12 bytes on x86, 16 on x64) and the input attributes list stride to `GuestPointerSize` (was hardcoded 8). Combase's token-attribute probe now gets the honest empty answer on WOW64 instead of `NOT_SUPPORTED`. |
+| **Sweep: 43 trivially-bitness-agnostic x64 gates dropped + 3 bitness bug-fixes** (Win32k GDI/window/message, Process suspend/resume/APC/debug, Misc time/instruction-cache/LUID, NtSystemDebugControl) | Each of these handlers reads args via `GetArg64` (already bitness-agnostic) and delegates to helpers that write pointer-sized OUT slots correctly OR to shared C#-state that has no guest-layout concern; the `if (Architecture != x64) return WinUnimplemented` gate was a leftover blocking WOW64 for no reason. Bitness bug-fixes in the same sweep: **`NtUserEndPaint`** now reads PAINTSTRUCT.hdc via `ReadPointer` (was `ReadMemoryULong` — 8 bytes even on x86, yielding a garbage HDC that `ReleaseDeviceContext` would decline to release); **`NtOpenThread`** now reads `CLIENT_ID.UniqueThread` at `+GuestPointerSize` (was `+8` — reading past the struct into stack residue on x86, so every x86 `OpenThread` returned `STATUS_INVALID_CID`) and writes the OUT `PHANDLE` via `WritePointer` (was `WriteMemory(..., h, 8)` — clobbering 4 bytes past the caller's slot). Pseudo-handle recognition in the suspend/resume/APC family switched to `IsCurrentThreadPseudoHandle` (which recognises both the x86 `0xFFFFFFFE` and x64 `0xFFFFFFFFFFFFFFFE` forms) instead of the hardcoded x64 constant. `NtSystemDebugControl` now returns `STATUS_DEBUGGER_INACTIVE` on WOW64 (the class docstring explicitly flags `NOT_SUPPORTED` here as an al-khaser detection tell). None of these moves the x86 verdict on their own — the message-pump-spin frontier is upstream of most of them — but each closes a real WOW64 fidelity gap that would have surfaced once the pump frontier lands. Does not move x64 (byte-identical). |
+
+#### Resolved this pass (each fix is a generic WOW64 fidelity correction)
+
+1. **WOW64INFO structure + `TEB.TlsSlots[WOW64_TLS_WOW64INFO]` (offset 0xE38).**
+   The earlier `mov eax, [eax]` fault at guest `0x4B32A880` (`eax == 0`) was
+   ntdll's CPU-feature/page-size init dereferencing `TlsSlots[10]`. On a real
+   WOW64 process `wow64.dll` allocates a process-wide `WOW64INFO` block and stores
+   its pointer in that slot (in *both* the 32- and 64-bit TEBs) *before* the 32-bit
+   ntdll runs; the pure-32-bit model has no `wow64.dll`, so the slot was NULL. Fixed
+   in `WindowsGuest.SetupWow64Info` (one block per process) + a per-TEB write in
+   `AllocateAndInitializeTEB`. Layout confirmed by disassembling `SysWOW64\ntdll`
+   (three read sites at RVA 0xAA872 / 0x9E5B4 / 0x5BE6E, cross-checked against the
+   x64 sibling at RVA 0xC5792 which NULL-guards the same slot): `NativeSystemPageSize`
+   @0x00 (0x1000 → ntdll bit-scans it to page-shift 12), `CpuFlags` @0x04 (bit 0x2
+   set → ntdll routes `RtlQueryPerformanceCounter` through the syscall transition
+   instead of the unimplemented `int 0x81` fast path), `NativeMachine`=0x8664 @0x20,
+   `EmulatedMachine`=0x014C @0x22.
+
+2. **`SystemEmulationBasicInformation` (`NtQuerySystemInformation` class 0x3E)
+   `MaximumUserModeAddress`.** ntdll's CFG-bitmap reservation reads this value back,
+   does `MaximumUserModeAddress + 1`, and derives the bitmap span from it. The WOW64
+   branch was returning `(uint)Instance.MaxAddress` = `0xFFFFFFFF` (the emulator's
+   *internal* 34-bit allocation ceiling truncated to 32 bits), whose `+1` overflows
+   to 0 → a 0-byte `NtAllocateVirtualMemoryEx` → `STATUS_INVALID_PARAMETER` →
+   `STATUS_APP_INIT_FAILURE`. Now reports the real Win32 process bounds: floor
+   `0x00010000` (64 KB), ceiling `0x7FFEFFFF` (2 GB − 64 KB), or `0xFFFEFFFF`
+   (4 GB − 64 KB) when the image is `IMAGE_FILE_LARGE_ADDRESS_AWARE`. Root-caused by
+   walking the CFG-bitmap call chain in ntdll (RVA 0xF2593 → 0xFE480 bitmap-size
+   math → 0xF5F86 span → 0xF09DD `NtQuerySystemInformation(0x3E)`).
+
+3. **`NtOpenPartition` (SSN 0x126).** ntdll's segment-heap init opens the process's
+   memory partition during startup. Unimplemented, it returned `STATUS_NOT_SUPPORTED`;
+   although the ntdll caller (RVA 0xB2FD2) tolerates the failure by branching around
+   the partition-setup path, the process is then left with no partition and heap init
+   aborts with `STATUS_NO_MEMORY` → `STATUS_APP_INIT_FAILURE`. Every process really
+   does belong to a partition (the system partition is the implicit default), so the
+   faithful behaviour is a valid handle. Added a `WinPartition` handle object
+   (`HandleType.PartitionHandle`) + `CreatePartitionHandle` + the `NtOpenPartition`
+   handler (bitness-agnostic via `GetArg64`/`WritePointer`).
+
+**Segment-heap fast-fail — RESOLVED.** The earlier terminus (a `__fastfail`,
+`FAST_FAIL_INVALID_BALANCED_TREE`, in the segment heap's `RtlpHpVs*` free-chunk
+tree) was a *downstream symptom*: ntdll had wrongly selected the **segment heap**
+for a classic 32-bit process (which uses the **NT heap**). The root cause was traced
+through `RtlCreateHeap` → `RtlpHpHeapFeatures` → `RtlpHpShouldEnableSegmentHeap`,
+which for a non-packaged process reads `RTL_USER_PROCESS_PARAMETERS + 0x2B0`
+(`HeapPartitionName.Buffer`) and enables the segment heap when it is non-NULL.
+`BuildProcessEnvironment32` had sized the fixed header at only 0x2A0 and started the
+inline string buffers there, so the CurrentDirectory path string bled into
+`HeapPartitionName.Buffer`. Sizing the header to 0x300 leaves that field NULL → NT
+heap → no VS tree → the fast-fail is gone. (See "Resolved this pass" table row.)
+
+#### Current frontier (F5-next)
+
+With the NT heap, the KnownDlls object-manager chain, case-correct SysWOW64
+resolution, the CSR base-server connect (SSN 0x1D7) **and the CSR read-only
+shared-section wiring** all landed, the loader now maps the real 32-bit `kernel32`
+/ `kernelbase` / CRT, runs their DllMains to completion, and drives on into process
+init — reaching **~6.31M instructions**, up from ~1.34M. DLL initialisation now
+**succeeds** (`STATUS_DLL_INIT_FAILED` is gone); the run terminates further along at
+`APP_INIT_FAILURE` with `Parameter0=0xC0000004` (`STATUS_INFO_LENGTH_MISMATCH`).
+
+**Resolved this pass — CSR read-only shared section / `BASE_STATIC_SERVER_DATA`.**
+The `DLL_INIT_FAILED` was root-caused by disassembling kernelbase's `BaseDllInitialize`
+from live guest memory: right after `NtWow64CsrClientConnectToServer` returns, the
+inner init reads `PEB->ReadOnlyStaticServerData` (32-bit PEB **+0x54**) and derefs
+`[array+8]` to reach the BASESRV static-server-data pointer, then remaps it with
+`edi = ReadOnlyStaticServerData[1] - ServerBase(PEB+0x248) + ReadOnlySharedMemoryBase(PEB+0x4C)`.
+All three PEB fields were NULL, so the deref faulted (`Invalid memory read … 0x8 …`),
+`BaseDllInitialize` returned FALSE, and the loader rolled the process back. The remap
+reads `[BSSD+0x9E8]` — the exact self-pointer the x64 `InitializeWindowsSharedSection`
+already writes — confirming **WOW64 shares the native 64-bit BSSD layout** (16-byte
+UNICODE_STRINGs, 8-byte pointers). Fix (`WindowsGuest.SetupCsrReadOnlySharedSection32`):
+eagerly create the read-only shared section at PEB-build time via the reused
+`NtMapViewOfSection.InitializeWindowsSharedSection`, then wire `PEB+0x4C` = section
+base, `PEB+0x54` = the section's `Base+0x10` server-data descriptor (whose `+0x8`
+already points at BSSD), and `PEB+0x248` = section base. Server view == client view
+(Brovan has no separate csrss address space), so the remap is the identity and the
+descriptor's absolute BSSD pointer resolves to itself. x64 guests reach BSSD through
+the CSR port connect reply instead, so this is WOW64-only and leaves x64 untouched.
+
+**Resolved next — `NtSetInformationProcess(ProcessTlsInformation)` WOW64 sizing.**
+The `0xC0000004` terminus was ntdll's `LdrpQueueDeferredTlsData` calling
+`NtSetInformationProcess(ProcessTlsInformation, len=0x1C)` and the handler rejecting
+it: the handler hardcoded the x64 `THREAD_TLS_INFORMATION` element size (0x18) so
+`0x1C < 0x10 + 0x18` gave `INFO_LENGTH_MISMATCH`. Disassembling the ntdll caller
+(`imul eax, count, 0xC; add eax, 0x10; push eax`) confirmed the WOW64 element is
+`Flags(4)+NewTlsData(4)+ThreadId(4) = 0xC`, and the TEB TLS-vector slots are 4-byte.
+Fix: the handler now derives every width from `GuestPointerSize` — element size
+`0xC`/`0x18`, field offsets, `TEB.ThreadLocalStoragePointer` at `0x2C`/`0x58`, and
+pointer-sized vector reads/writes (`ReadPointer`/`WritePointer`). x64 is byte-identical
+(Ptr=8 reproduces the former 0x18/0x58/8 constants). al-khaser advances **6.31M →
+~9.93M** instructions.
+
+**Resolved next — WOW64 `NtSetInformationVirtualMemory` + `NtQueryInformationProcess(ProcessMitigationPolicy)`.**
+Both were x86-gated to `NOT_SUPPORTED`. `NtSetInformationVirtualMemory` (SSN 0x19E,
+CFG call-target registration + working-set hints) is now bitness-aware — the
+`MEMORY_RANGE_ENTRY` stride is `2*GuestPointerSize` (8 on x86) and the pseudo-handle
+check uses `IsCurrentProcessPseudoHandle` — returning the same advisory success the
+x64 path does. `NtQueryInformationProcess`'s x86 branch gained the
+`ProcessMitigationPolicy` (class 52) case: the WOW64 caller passes an 8-byte
+`PROCESS_MITIGATION_POLICY_INFORMATION` with the policy id in the first DWORD; the
+handler echoes it and reports the sandbox's realistic state (DEP on, other
+mitigations default), mirroring the x64 class-52 handler. Both now return SUCCESS in
+the trace; the CFG-registration burst is advisory (its result is ignored — the
+instruction count was byte-identical with it as `NOT_SUPPORTED` vs SUCCESS).
+
+**Resolved — user32's win32k client-connect (syscall `0x2000`).** The `0x2000`
+terminus was traced (via the caller return address) to **`user32.dll`'s `DllMain`**
+(`_UserClientDllInitialize`): a CFG-protected win32k client-connect, stub `mov eax,
+0x2000; call <thunk>; ret 0x10` (4 args), whose sign-checked result aborts `DllMain`
+on failure. It is `NtUserProcessConnect` in spirit but uses user32's **internal** stub
+(SSN `0x2000`), distinct from win32u's exported `NtUserProcessConnect` (SSN `0x10e9`,
+2-arg) — the win32u export scan therefore never registered it. Landed: a
+`Win32k/NtUserProcessConnect` handler bound to SSN `0x2000` in the x86 path. The out
+buffer is a `USERCONNECT` (8-byte version header, then `SHAREDINFO` at `+0x08` —
+confirmed empirically: writing a value there is what user32 reads back as `psi`); the
+handler fills `psi` / `aheList` / `HeEntrySize` / `pDispInfo` from the emulator's
+existing `EnsureUserSharedInfo` + `EnsureUserDesktopInfo` (the same win32k
+SERVERINFO/handle-table the x64 CSR `HandleUserSrvConnect` builds) and returns
+`STATUS_SUCCESS`. user32 now passes the connect + the `test byte [psi],4` deref,
+advancing **~9.94M → ~9.98M** instructions.
+
+**Resolved — gdi32full's GDI shared-handle-table access (`TEB+0x60` → `PEB+0xF8`).**
+The fault was in **`gdi32full.dll`** (RVA `0x5DF07`, guest IP `0x1044AF1C`). Its GDI
+init reads `mov eax, fs:[18h]` (32-bit TEB `0x10016000`) → `mov ecx, [TEB+0xFDC]`
+(== 0) → `mov eax, [TEB+0x60]` → `mov eax, [eax+0xF8]` (**faulted**) →
+`cmp [eax+0x180094], 0; je`. Disassembling the function showed the `je`-taken path is
+the fresh-process path (no stale GDI handle to clean up), so it only needs the chain
+to resolve to a mapped, zeroed region. The chain is the **shared x64 source**: on x64
+`TEB+0x60` is `TEB.ProcessEnvironmentBlock` and `[PEB+0xF8]` is `GdiSharedHandleTable`
+— the 32-bit gdi32full uses those same offsets and reaches the PEB via the
+`[TEB+0xFDC]` 32→64-bit-TEB delta (0 in Brovan's single-TEB model). Fix, WOW64-only:
+`AllocateAndInitializeTEB` now publishes `TEB+0x60 = PEB` (mirroring the x64 TEB), and
+`SetupGdiSharedHandleTable32` allocates a 0x200000 zeroed GDI shared handle table and
+writes its base to `PEB+0xF8` (the offset `EnsureGdiHandleTable` already reads) — sized
+past gdi32full's `0x180094` client read. gdi32full's per-thread GDI init now completes;
+al-khaser advances **~9.98M → ~11.15M** instructions. x64 is untouched (its `TEB+0x60`
+was already the PEB; `PEB+0xF8` stays as it was).
+
+**Resolved — the CS `DebugInfo==0` fault was an IO_STATUS_BLOCK WOW64 overrun.** The
+GDI-cleared run reached a terminus at ntdll RVA `0x5F583` (`inc dword [eax+0x14]`) inside
+`RtlEnterCriticalSection`: `eax = CS->DebugInfo` and the code increments
+`DebugInfo->ContentionCount` (`+0x14`). The faulting CS (heap-resident `0x105DAA40`) was
+**active** — `LockCount = -6`, `LockSemaphore = -1`, `SpinCount = 0xFA0` — yet its
+`DebugInfo` was **0**. Disassembling the init path proved ntdll never *writes* 0
+(`RtlInitializeCriticalSectionEx` sets `DebugInfo = -1` up front and the alloc-failure arm
+`RtlpAllocateDebugInfo`@`0x5FE00` *leaves it at -1*), so the 0 was **post-init corruption
+of a live CS**. A write-watchpoint on the word caught **only** the `-1` init store and no
+later guest write — but Unicorn's memory hooks fire only for *guest CPU* writes, not for
+host-side `WriteMemory` from a syscall handler (`uc_mem_write` bypasses hooks). Adding a
+host-write probe at the `WriteMemory` chokepoint pinned the culprit in one shot:
+`NtNotifyChangeKey → WriteIoStatusBlock` wrote a **16-byte x64 IO_STATUS_BLOCK** at
+`0x105DAA38` for a **32-bit** guest, whose IO_STATUS_BLOCK is only **8 bytes** — the extra
+8 bytes ran into `[0x105DAA40 .. 0x105DAA48)` = the adjacent CS's `DebugInfo`+`LockCount`,
+zeroing `DebugInfo`. **Fix:** `WriteIoStatusBlock` is now bitness-aware (16 bytes on x64,
+8 on x86, dispatched by `GuestPointerSize`); every one of its ~130 callers is correct on
+both bitnesses with no call-site branching. This is the same struct-size class as the
+Wow64 registry / OBJECT_ATTRIBUTES fixes — a host writer using the x64 layout for an x86
+guest. (Also fixed en route: `PEB.NumberOfProcessors` (x86 PEB `+0x64`) was 0, now 8.)
+
+With the corruption gone, DLL init runs to completion but the loader then found a genuine
+`DLL_INIT_FAILED` from a DllMain whose init sequence hit x64-gated file syscalls returning
+`NOT_SUPPORTED`: **`NtOpenFile`**, **`NtDeviceIoControlFile`**, and (once `main()` was
+reached to print results) **`NtWriteFile`**, plus **`NtTerminateProcess`** for the clean
+CRT exit. All four are now WOW64-aware (`NtOpenFile` gained a `Handle32` mirroring
+`NtCreateFile.Handle32`; the other three were already bitness-agnostic bodies behind an
+x64 gate + an `0x10`-sized `IsRegionMapped` check, now `GuestPointerSize*2`;
+`NtTerminateProcess` also needed the `IsCurrentProcessPseudoHandle` form since the x86
+`NtCurrentProcess` is `0xFFFFFFFF`, not `ulong.MaxValue`). al-khaser_x86 now reaches
+**`main()`** and prints its verdicts: **~14.27M** instructions, the **Initialisation /
+TLS-Callbacks / Debugger-Detection** sections, **14 GOOD** / 4 BAD, then a clean
+`NtTerminateProcess`. x64 is untouched (still the full 15-section suite, 244 GOOD).
+
+**Resolved — `NtQueryInformationProcess(ProcessDebugObjectHandle/ProcessDebugFlags)` on
+x86.** al-khaser's `0xC000008E` "exception" is not a real FPU fault — disassembly of the
+call site (`push 0xc000008e; call [SetUnhandledExceptionFilter-then-RaiseException]`) shows
+it is the `UnhandledExcepFilterTest` anti-debug probe: it registers a top-level filter with
+`SetUnhandledExceptionFilter(0x40ee00)`, then `RaiseException(STATUS_FLOAT_DIVIDE_BY_ZERO)`,
+expecting the filter to run (no debugger) and resume. The x86
+`NtQueryInformationProcess` switch was missing `ProcessDebugObjectHandle (0x1E)` and
+`ProcessDebugFlags (0x1F)` (they hit the "not implemented" default), so the debug-object
+probe read as "debugger present" — one BAD, and a value `kernel32!UnhandledExceptionFilter`
+also consults. Both classes are now implemented on x86 mirroring the x64 branch
+(`ProcessDebugObjectHandle` → NULL handle + `STATUS_PORT_NOT_SET`; `ProcessDebugFlags` →
+`1` = no-debug). That flips the direct probe BAD→GOOD (**15 GOOD / 3 BAD**).
+
+**Resolved — the `UnhandledExcepFilterTest` filter never ran because
+`NtQueryVirtualMemory(MemoryRegionInformation)` was unimplemented on x86.** Even with the
+debug-object probe fixed, `RaiseException(0xC000008E)` still terminated the process.
+Instrumenting the dispatch confirmed the 32-bit `FS:[0]` SEH chain is intact (innermost
+`handler=0x415D68`, the CRT `_except_handler4`), and that `UnhandledExceptionFilter` runs but
+never calls the registered filter `0x40ee00`. Disassembling the **SysWOW64 kernelbase**
+`SetUnhandledExceptionFilter` (RVA `0x126210`) revealed its hardened filter validator
+(`0x10126311`): it `VirtualQuery`s the filter's page and — on the caching path — issues a
+**second** `NtQueryVirtualMemory` with **class 3 (`MemoryRegionInformation`)**, failing the
+whole validation (`js` on the returned `NTSTATUS`) if that errors. Brovan returned
+`STATUS_NOT_SUPPORTED` for `MemoryRegionInformation` on x86 (the "class MemoryRegionInformation
+not implemented" trace line), so the validator returned 0 → `SetUnhandledExceptionFilter`
+**silently dropped the filter** (`neg;sbb;and esi,eax` zeroes it) → `UnhandledExceptionFilter`
+found no filter → WER / `EXECUTE_HANDLER` → `_exit(0xC000008E)`. `MemoryRegionInformation` is
+now implemented on x86 (the handler existed but was x64-gated and serialized the 0x30-byte
+x64 struct; it is now in the WOW64-allowed set and writes the **0x1C-byte** x86 layout — the
+validator passes a 0x1C buffer, so a 0x30 requirement wrongly tripped `INFO_LENGTH_MISMATCH`).
+The filter `0x40ee00` now executes (its `ret 4` at `0x40EE0D` returns into
+`UnhandledExceptionFilter`) and al-khaser runs past the probe. x64 untouched (its
+`MemoryRegionInformation` path is unchanged).
+
+**Resolved — the `0xC0000409` was a WOW64 exception-resume EIP off-by-+2.** With the filter
+running, `UnhandledExcepFilterTest`'s `EXCEPTION_CONTINUE_EXECUTION` resume fail-fasted with
+`0xC0000409` — an explicit `NtTerminateProcess(NtCurrentProcess, 0xC0000409)` from kernelbase's
+`__report_gsfailure`/`RtlFailFast` (canary on the stack). A control-flow trace armed on the
+`0xC000008E` raise pinned it precisely: `NtContinue` resumed at **`0x1052B5B4`**, which — with
+the correct kernelbase base `0x10400000` (from the filter-return `0x105BEB32` = UEF RVA
+`0x1BEB32`) — is **2 bytes into** `kernelbase!RaiseException`'s `mov ecx,[esp+0x54]` at
+`0x1052B5B2` (the return address of its `call RtlRaiseException`). Resuming mid-instruction
+skips the GS-cookie reload into ECX, so the immediately-following `xor ecx,esp; call
+__security_check_cookie` fails and fail-fasts (the terminate caller `0x105304F6` = RVA
+`0x1304F6` sits inside `__report_gsfailure`). Instrumenting `NtRaiseException` showed the CONTEXT
+`RtlRaiseException` passed had the **correct** `Eip=0x1052B5B2`; the `+2` was Brovan's — this
+handler runs inside the sysenter INSN hook, and Unicorn advances EIP by the 2-byte syscall
+instruction after the hook returns, so the exception dispatcher read the post-advance EIP as the
+resume target. `NtContinue` counteracts the same `+2` via `LoadContext`'s `-2` on
+`SwitchingContext`, but the raise path reads the CPU EIP directly, so `FinishRaise` now
+pre-subtracts the syscall length on the MODE_32 path (x64's direct-syscall path was already
+correct and is untouched). This unblocked **8 exception-based Debugger-Detection probes at once
+(15 → 23 GOOD)** and advanced the run to ~15.27M instructions.
+
+**Resolved (partial) — the `0xC0000005` was `user32!GetShellWindow` reading a NULL
+`pDeskInfo`; the CLIENTINFO base was wrong for the loaded WOW64 user32 build.** The faulting
+module is `USER32.dll` (base `0x69E00000`); the fault (`Invalid memory read at 0x18`) is inside
+`GetShellWindow` (RVA `0x42BB0`), which does `mov ecx,[TEB+0x820]` (pDeskInfo) then
+`mov esi,[ecx+0x18]` — with pDeskInfo NULL it derefs `0x18`. Brovan wrote the Win32ClientInfo
+slots at base `0x6CC` (an earlier-build offset), but this user32 reads pDeskInfo at `TEB+0x820`
+and the paired field at `TEB+0x828`, which pins the base to **`0x818`** (slot 2 → `0x820`,
+slot 4 → `0x828`). Fixed: `Win32ClientInfoX86Base` → `0x818`, and `NtUserProcessConnect` now
+calls `EnsureUserClientThreadInfo` so the main thread's pDeskInfo is populated during USER32's
+client-connect (it was previously only set on window creation). `GetShellWindow` no longer
+NULL-derefs (nothing in the emulator reads this base — it exists only for guest user32).
+
+**Landed — `NtUserProcessConnect` publishes the 64-bit SHAREDINFO layout (WOW64).**
+`user32!GetWindowThreadProcessId(NULL, …)` was faulting at RVA `0x3CF25`
+(`cmp byte [ecx+edx+0x18],1`): `edx` is user32's cached `aheList` global (`[0x69EA8A00]`) and it
+held **`0x20`** — exactly the `HeEntrySize` value Brovan wrote — because `NtUserProcessConnect`
+published the *classic 32-bit-packed* SHAREDINFO (psi@+0x00 / aheList@+0x04 / HeEntrySize@+0x08),
+but this WOW64 build carries the **64-bit** SHAREDINFO in the shared section (win32k.sys is 64-bit
+and maps the same section into the 32-bit view, so every field is pointer-sized). Root-caused by
+disassembling user32's client-connect `rep movsd` (copies `siClient` from the USERCONNECT into the
+globals at dest base `0x…A89F8`) and cross-checking a raw byte-scan of `.text` for references to
+each derived global: `aheList` sits at `siClient+0x08` (35 refs at `0x…A8A00`), `HeEntrySize` at
+`siClient+0x10` (37 refs at `0x…A8A08`), `pDispInfo` at `siClient+0x18` (20 refs at `0x…A8A10`),
+`ulSharedDelta` at `siClient+0x20`; the `+0x0C` / `+0x14` "packing" slots have **0** refs (padding).
+Fix (`NtUserProcessConnect`): `SharedInfoAheListOffset = base+0x08`, `HeEntrySizeOffset = base+0x10`,
+`DispInfoOffset = base+0x18` (low 32 bits hold the < 4 GB guest pointer, high dword stays 0 from the
+zero-fill; `ulSharedDelta` left 0 — Brovan stores user-mode pointers directly, so user32's
+`userPtr = storedPtr - ulSharedDelta` fix-up must be identity). With a valid `aheList`, entry-0's
+zeroed `bType != TYPE_WINDOW` fails the type check → `GetWindowThreadProcessId(NULL)` returns 0
+(correct). The offsets are the *native* x64 SHAREDINFO layout too, so the handler is now correct on
+both bitnesses (x64 stays 244 GOOD). al-khaser advances **15.27M → ~37.7M** instructions, clearing
+the Parent-Process (explorer.exe) and the rest of Debugger-Detection into **DLL Injection Detection**
+(**23 GOOD / 3 BAD → 41 GOOD / 5 BAD**).
+
+**Landed — `NtReadVirtualMemory` on WOW64 (was an empty x86 branch).** The DLL Injection
+Detection terminus was traced by disassembling al-khaser: its enumeration callback (called for every
+`LDR_DATA_TABLE_ENTRY` by `LdrEnumerateLoadedModules`) uses `ReadProcessMemory(GetCurrentProcess(),
+entry-8, buf, 0x48, ...)` to copy the loader entry, checks the return, and prints
+`[!] Error reading entry.` on failure. The x86 branch of `NtReadVirtualMemory` was `{ }` (empty)
+and returned `WinUnimplemented`, so **every** RPM-on-self returned FALSE, al-khaser's result vector
+stayed empty, and the code path that decrements `vec.end` unconditionally NULL-derefed at RVA
+`0xE300`. Rewrote the handler as a single bitness-agnostic body (`GetArg64` +
+`IsCurrentProcessPseudoHandle` + `WritePointer`/`GuestPointerSize`-sized `NumberOfBytesRead` write),
+so x86 shares the same self-read / cross-process-random-data logic as x64. Advances al-khaser
+**~37.7M → ~232M** instructions, past DLL Injection Detection into **Generic Sandbox/VM Detection**
+(**41 GOOD / 5 BAD → 76 GOOD / 10 BAD**). The section actually surfaces `[!] Injected library:
+C:\Windows\System32\...` for every real system DLL loaded by the loader (kernel32 / user32 / ole32 /
+shell32 / shlwapi / powrprof / …) — that is faithful behaviour: al-khaser flags any DLL not on its
+minimal-launch whitelist as "injected", and Brovan legitimately loads the full transitive import
+closure at startup.
+
+**Landed alongside — five WOW64 gap-fills exposed while root-causing the combase frontier.**
+`NtOpenEvent` (SSN `0x40`) was unimplemented — mirrors `NtOpenMutant` / `NtOpenSemaphore` now,
+bitness-agnostic, returns `STATUS_OBJECT_NAME_NOT_FOUND` for unregistered names. `NtOpenThreadToken`
+(SSN `0x24`) had a blanket x86 gate to `WinUnimplemented` — refactored to a single bitness-agnostic
+body so combase's `CoInitializeSecurity` sub-A path (which gates on `LastError == ERROR_NO_TOKEN`)
+takes its success branch instead of erroring on `ERROR_NOT_SUPPORTED`. `NtQueryInformationThread`'s
+blanket WOW64 gate rejected every class except `ThreadBasicInformation` — narrowed to only the
+three genuinely-bitness-sensitive classes (`ThreadQuerySetWin32StartAddress` / `ThreadAffinityMask` /
+`ThreadUmsInformation`) so `ThreadDynamicCodePolicyInfo` / `ThreadHideFromDebugger` / friends can
+run on x86. `NtQueryInformationProcess(ProcessEnclaveInformation)` returns `STATUS_NOT_FOUND` with a
+zero-filled 0x28-byte struct (the honest "not in an enclave" answer) so combase's VBS-security probe
+takes its non-enclave path. `NtQueryInformationProcess(ProcessImageFileName, 0x1B)` on x86 emits
+`UNICODE_STRING32` + string bytes into the flat caller buffer via `DosPathToNtDevicePath`. Three
+previously-unhandled WOW64 syscalls landed too: `NtWow64CsrGetProcessId` (0x1DF; returns a synthetic
+CSRSS-like PID = 500, **distinct** from the caller — an earlier draft that returned the caller's PID
+flipped the Parent-Process probe BAD), `NtWow64GetCurrentProcessorNumberEx` (0x1E2; single-group /
+single-core PROCESSOR_NUMBER), `NtWow64IsProcessorFeaturePresent` (0x1E9; mirrors the KUSER_SHARED_DATA
+ProcessorFeatures bits). None of these move the combase terminus (see below) but each closes a real
+WOW64 gap that will surface on other samples.
+
+**Next frontier — Generic Sandbox/VM Detection: `combase.dll` NULL-`this` fault in an internal
+COM helper.** After the DLL Injection Detection section prints its verdicts, al-khaser calls
+`CoInitializeEx` (combase export at RVA `0xA7F20`) and then `CoInitializeSecurity` (RVA `0xA727D0`).
+Deep inside the second call the process faults with `Invalid memory write related to the address
+0xC at 0x10A9FBD4`. Pinned by scanning back for the `MZ` header (base **`0x109E0000`**, matches
+combase from the export-name scan) and reading the export directory name: the module is **combase.dll**,
+fault RVA **`0xBFBD4`** inside an internal `__thiscall` helper at RVA `0xBFBBF`. Traced the caller
+chain: `sub_10B119C0` calls `sub_10B0C8C9` which is a 3-step init (sub_A: `OpenThreadToken` +
+`SetThreadToken` impersonation prep — now succeeds after the `NtOpenThreadToken` fix landed above;
+sub_B: `RegOpenCurrentUser` + `RegOpenKeyExW(HKCU\Software\Classes\Local Settings)` — returns
+`NAME_NOT_FOUND` because that key doesn't exist in Brovan's virtual HKCU; sub_C: `SetThreadToken`
+restore + `CloseHandle`). Sub_10B119C0 tolerates the `NAME_NOT_FOUND` (no error propagation) but
+then `cmp [ebp-4], 0; je skip_init` — the OUT `PHKEY` never got populated because sub_B failed —
+so the interlocked-init at `sub_10AA0528` that would have written to the singleton at combase
+runtime `0x10C020D8` (pref-based `0x102420D8`, RVA `0x2420D8`) is SKIPPED. The later caller at
+combase RVA `0xC030D` (`mov ecx, [0x102420D8]; call 0xBFBBD`) reads NULL and NULL-derefs. The helper's
+prologue is `push ebp / mov ebp,esp / and esp,~7 / sub esp,0x14 / push ebx,esi,edi / mov edi,ecx /
+mov eax,0xFFFF / xor ebx,ebx / mov [edi+0xC],ax` — it dereferences `this` without any NULL check.
+Register dump at fault: `ECX=0 EDX=0 EDI=0 EBX=0`. Immediate caller lives at combase RVA `0xC030D`:
+`mov ecx, [0x102420D8] ; push ebx ; call 0xBFBBD` — `ecx` is loaded from a lazy-initialised singleton
+global (combase runtime address `0x10C020D8` = combase-preferred RVA `0x2420D8`). The global is
+normally populated during `CoInitializeSecurity`'s RPCSS-handshake / class-registration path,
+which Brovan doesn't model (headless sandbox, no `RPCSS` / no local ALPC port). Two credible next
+steps: (1) trace which specific write inside `CoInitializeSecurity` publishes the singleton and, if
+its dependency is a small NT call we already understand, implement it faithfully; (2) intercept
+`CoInitializeSecurity` at the export boundary and return `S_OK` without invoking combase's own
+implementation — pragmatic but a real deviation from "run the real DLL". Option (1) is the codebase
+convention; option (2) is a fallback if (1) blooms. The current terminus is a genuine unmet-dependency
+boundary (COM/RPC subsystem), not a Brovan bug in the fault path itself.
+The two credible next steps in priority order:
+1. **Add the specific HKCU key** (`HKCU\Software\Classes\Local Settings`) to the virtual registry
+   so sub_B populates the OUT `PHKEY` → sub_10B119C0's `cmp [ebp-4], 0; je` doesn't short-circuit
+   → `sub_10AA0528` runs and writes the singleton. Requires either extending the hive bootstrap
+   or synthesising the key at first-open time; still may need `sub_10AA0528` to actually complete
+   (it takes multiple args and probably has its own dependencies).
+2. **Intercept `CoInitializeSecurity` at the export boundary** and return `S_OK` with a
+   pre-populated singleton (either a valid COM class-factory-table stub or a NULL sentinel that
+   the fault site can then NULL-check post-intercept). Requires new export-hook infrastructure
+   (combase is not a Brovan-registered `WinModule`, so its runtime base has to be discovered via
+   the `LoadWinLibrary` path).
+
+**Landed — option (1) above: seeded `HKCU\Software\Classes\Local Settings`.** Added a single line
+to `InitializeSyntheticRegistryDefaults` (alongside the existing `\Volatile Environment`,
+ProfileList, Shell Folders, etc synthetic seeds) that creates the key using the shared
+`AddSyntheticRegistryKeyTrusted` helper — walks the path and creates each intermediate key
+(Software, Software\Classes) as empty. Matches real Win10 (the key exists on every install), not a
+per-sample workaround. combase's `sub_B` now returns `SUCCESS` with a valid HKEY, sub_10B119C0
+passes its `[ebp-4] != 0` gate, `sub_10AA0528` runs and writes the singleton, the later fault site
+reads a valid `this` and stores succeed. al-khaser_x86 advances from ~232M / **76 GOOD / 10 BAD** to
+a much later terminus in the message-pump loop, with **237 GOOD / 18 BAD** — the whole Generic
+Sandbox / VM detection suite runs end-to-end (Debugger, DLL Injection, Generic Sandbox/VM, Hyper-V,
+KVM, Parallels, QEMU, Timing-attacks, Virtual PC, VirtualBox, VMWare, Wine, Xen — every 15-section
+banner is now printed).
+
+**Message-pump spin — FIXED (`NtUserGetMessage` now bitness-agnostic); residual is a shared
+scheduler-park.** After printing all 237 results al-khaser enters a final `GetMessage` pump
+(`SetTimer` + `while (GetMessage(&msg, NULL, 0, 0) > 0)`). `NtUserGetMessage` (0x1006) was gated
+to x64, so on WOW64 the 32-bit `user32!GetMessageW` wrapper got `STATUS_NOT_SUPPORTED` and spun
+its retry loop **~10.7 million** times before the wall-clock budget. Fixed by removing the gate:
+the handler already reads args via `GetArg64`, and `Win32kHelper.WriteMessage` / `TryReadMessage`
+are now bitness-aware (28-byte MSG on x86 vs 48 on x64 — a 64-bit MSG written into a 32-bit
+caller's buffer scrambles `wParam`/`lParam`/`pt`). WOW64 now gets the **exact x64 terminus**:
+`NtUserGetMessage` returns `STATUS_PENDING` **once**, the thread parks (spin count 10.7M → 1),
+verdict stays **237 GOOD / 18 BAD**.
+
+**`NtUserSetTimer` (0x1018) is intentionally left unimplemented on BOTH bitnesses** — the pump
+parks the same way with or without it, and implementing it on x86 only would diverge from the
+x64 baseline. There is no evidence the timer is needed: every al-khaser result is captured before
+the pump.
+
+**Idle-pump clean termination — DONE (scheduler frontier F2, shared x64+x86).** Once the last
+runnable thread parked in a `GetMessage` wait with no message source, `RunMlfqScheduler`'s
+`HasActiveGetMessageWait()` poll branch (`BinaryEmulator.cs` ~L2681) polled forever
+(`Thread.Sleep(10ms)` + advance virtual time), bounded only by the scan's wall-clock cancellation —
+so the interactive harness hung to the timeout (both binaries `exit=124`) and a production scan
+would report `Timeout` for a sample that actually finished. That branch is reached only when
+**nothing is runnable AND no thread has a timed wakeup** (`TryGetNextWaitSleepMs` already returned
+false just above) AND a `GetMessage` wait is active — so the wait can *never* be satisfied (no timer
+will fire — `SetTimer` is unimplemented on both bitnesses; no runnable thread can `PostMessage`; a
+thread with a timed wakeup takes the earlier sleep-advance branch, not this one). Added a bounded
+idle-pump watchdog (sibling to the `LivelockEscapeSlices` spin watchdog): count consecutive futile
+park-polls, **reset to 0 the instant any thread actually runs**, and after 256 terminate the
+scheduler cleanly. A real pump fed by a periodically-runnable worker never accumulates (that worker
+is dequeued and run, resetting the counter), so only a genuinely deadlocked idle pump bails. Result:
+
+| | before | after |
+|---|---|---|
+| `al-khaser_x86` | `exit=124` @420s (hang) | **`exit=0` @116s, 237 GOOD / 18 BAD** |
+| `al-khaser_x64` | `exit=124` @300s+ (hang) | **`exit=0` @45s, 244 GOOD / 11 BAD** |
+
+Both now run all 15 sections and reach a **clean terminus with the full result set** instead of
+hanging; GOOD/BAD counts unchanged. **al-khaser x86/WOW64 now emulates end-to-end and exits
+cleanly, at parity with x64.**
+
+**BAD-probe parity — closing the x86↔x64 delta.** With the run clean end-to-end, the residual
+false positives are now: **x64 = 11 BAD, x86 = 16 BAD** (down from 18 — `FindWindowEx` and
+`NtYieldExecution` fixed across the last two passes). The 11 shared BADs are the "honest reports"
+both bitnesses give — the module-enumeration walks (`GetModuleInformation`, hidden-modules,
+`LdrEnumerateLoadedModules`, `EnumProcessModulesEx [ALL]/[64-bit]`) that faithfully report the
+loader-mapped system DLLs, plus `VM Driver Services`, `lack of user input`, `CPU fan via WMI`, and
+the two `ACPI table` probes. The **5 x86-only BADs** are WOW64 gaps:
+
+- **`FindWindow("VBoxTrayToolWndClass")` — FIXED** (`NtUserFindWindowEx` was x64-gated; the 32-bit
+  wrapper mis-read `NOT_SUPPORTED` as a found HWND → phantom VBox window). Now bitness-aware
+  (`UNICODE_STRING` 8-byte on x86 / 16 on x64) → the probe returns NULL → **GOOD**. Result:
+  **x86 237 → 238 GOOD / 18 → 17 BAD**, x64 unchanged at 244.
+- **`Checking NtYieldExecution` (1 BAD) — FIXED.** `NtYieldExecution` (0x10046) was x64-gated →
+  `NOT_SUPPORTED` on WOW64, which the scheduler-manipulation probe read as a tell. The earlier
+  naive-gate-removal crash (`0xC0000005` in Debugger Detection) is now root-caused to the
+  **WOW64 syscall-return-EIP model** (see the dedicated section below): the handler's unconditional
+  `WriteRegister(IPRegister, SyscallRip + 2)` double-stepped on WOW64. Fix scopes the manual `+2` to
+  x64 (byte-for-byte preserved) and lets the WOW64 `sysenter` auto-advance carry the return; the
+  reschedule path writes `SyscallRip` so the post-return auto-advance lands at `+2`. Result:
+  **x86 238 → 239 GOOD / 17 → 16 BAD**, x64 unchanged at 244.
+- **`Checking mouse movement` (1 BAD) — GetCursorPos ungated, but the probe stays BAD (Sleep
+  dependency).** `NtUserCallTwoParam` (the GetCursorPos multiplexer, code 0x7F) was x64-gated → the
+  cursor POINT stayed (0,0) on WOW64. Ungated (the body is already bitness-agnostic — POINT is 8
+  bytes on both), so GetCursorPos now returns the real jittered position: a genuine WOW64 correctness
+  fix on a path al-khaser exercises, and zero-regression. But the probe **still reports BAD** because
+  al-khaser `Sleep`s once between its two cursor reads and the cursor's position is a function of the
+  virtual clock — with `NtDelayExecution` gated the clock barely advances, so the two reads coincide.
+  Making the probe flip requires a working WOW64 `Sleep`, which is **not tractable without regression**
+  (see the NtDelayExecution finding below).
+- **`Check if time has been accelerated` / `lack of user input` — same NtDelayExecution root, same
+  block.** Both depend on virtual time advancing during `Sleep`.
+- **TLS process/thread attach callback (2 BADs) — FAITHFUL WOW64 divergence, not a bug to fix.**
+  The guest 32-bit `OutputDebugStringW`/`A` raises `DBG_PRINTEXCEPTION_WIDE_C` (0x4001000A) → falls
+  back to `DBG_PRINTEXCEPTION_C` (0x40010006) via `NtRaiseException`, each raised then `NtContinue`'d
+  (verified in the trace: the WIDE→ANSI fallback + clean continue is exactly the documented Win10
+  OutputDebugString sequence when no debugger consumes the WIDE record). **This is what real WOW64
+  Windows does** — so Brovan's x86 is the *faithful* side. x64 reports GOOD only because Brovan's x64
+  path intercepts OutputDebugString and raises **neither** exception — the *less*-faithful side. The
+  handling is correct (raise → NtContinue → execution continues into Debugger Detection with no
+  crash); the BAD is al-khaser's probe reacting to genuine WOW64 exception behaviour. Making x86 GOOD
+  would mean suppressing a faithful exception to chase a green verdict — a rule #7 / #14 masking
+  violation. Left as an honest report. (The consistent-and-faithful alternative would be to make x64
+  *also* raise, but that risks flipping the currently-GOOD x64 probe to BAD — a regression on the
+  passing side — for no fidelity gain that any sample has demanded.)
+- **`Checking for API hooks outside module bounds` (x86 7 vs x64 6, 1 extra) — likely faithful,
+  not masked.** al-khaser's prologue-scan hook check is FP-prone by design (it flags any API whose
+  first instruction jumps outside the module — which legitimately-forwarded / hot-patch-thunked
+  exports do on a clean system, hence 6 flagged even on x64). The 1-count x86 delta is most plausibly
+  a real SysWOW64-vs-System32 forwarded-export difference (which a real WOW64 box would show too),
+  not an emulation artifact. Per "metrics are signals, not proof" it is not treated as a bug absent
+  evidence that a specific API's Brovan-side prologue is wrong.
+- **`EnumProcessModulesEx [32-bit]` (1 BAD)** — the x86-only module-enumeration variant, same
+  "honest report" class as the shared enumeration BADs.
+
+**Frontier status (this pass).** al-khaser_x86 is at a genuine plateau: **239 GOOD / 16 BAD**, clean
+end-to-end. Every residual BAD is now classified as one of — (a) **Sleep-blocked** (`mouse
+movement`, time-accelerated: fixable only by a working WOW64 `Sleep`, which regresses ~50 checks —
+see the NtDelayExecution finding above), (b) **honest report** shared with x64 (ACPI × 2, CPU-fan
+WMI, module-enumeration walks, `EnumProcessModulesEx [32-bit]`), or (c) **faithful WOW64 divergence**
+(TLS OutputDebugString exceptions; api-hook prologue scan). None is a clean, non-masking win, so the
+x86 verdict is not expected to move further without either a scheduler redesign for `Sleep` or new
+sample evidence that a specific "faithful/honest" call is actually wrong.
+
+Nearby gaps still `NOT_SUPPORTED` on x86:
+`NtQueryInformationThread` (ThreadHideFromDebugger / ThreadDynamicCodePolicyInfo),
+`NtQuerySystemInformation` class `0x73`. (`NtQueryVirtualMemory`
+MemoryMappedFilenameInformation, `NtQueryInformationFile`, and syscall `0x1E9`
+`NtWow64IsProcessorFeaturePresent` are now closed — see below.)
+
+The **x86 registry** sibling gap is now closed (see below).
+
+#### The WOW64 syscall-return-EIP model (definitive)
+
+Every earlier "naive gate removal crashes" note traces to one asymmetry, now pinned by an A/B test
+(`NtYieldExecution` ungated with the x64 path held byte-for-byte identical, WOW64 the only variable
+— it flipped GOOD with **no** x64 change and no crash, and every other known-good handler fits the
+same rule):
+
+- **x64 `syscall` INSN hook** — if the handler *writes* the IP register, that value is used verbatim
+  (no auto-advance); if it does *not*, Unicorn auto-advances RIP past the 2-byte `syscall`.
+- **WOW64 `sysenter` INSN hook** — Unicorn auto-advances EIP by 2 after the handler returns
+  **unconditionally**, whether or not the handler wrote EIP (the same quirk `NtRaiseException`
+  compensates for with its `EIP - 2` pre-subtraction).
+
+Consequences for handler authors:
+- A plain return-value handler (writes RAX/EAX via `SetRawSyscallReturn`, never touches IP) is
+  correct on **both** — both hooks auto-advance. This is why the trivially-bitness-agnostic sweep
+  worked: those handlers never write IP.
+- A handler that manually advances (`WriteRegister(IP, SyscallRip + 2)`) is correct on x64 (its write
+  suppresses the auto-advance) but **double-steps on WOW64** (write + unconditional +2 → `SyscallRip
+  + 4`, past the WOW64 `push edx ; ret` trampoline → `0xC0000005`). This was the exact
+  NtYieldExecution / NtDelayExecution crash.
+- To make the guest **resume at `Target`** from a handler that writes IP: write `Wow64 ? Target - 2 :
+  Target`. To make it **re-execute the syscall** (a park): write `Wow64 ? SyscallRip - 2 :
+  SyscallRip`. The scheduler's `CompleteWait` wake path is separate (it sets `Context.RIP =
+  WaitReturnRIP` directly and re-enters via `Emulate`, bypassing the hook), so park **wake** is
+  already bitness-agnostic — only the park-*time* handler write needs the rule.
+
+#### "Should we just remove all the `WinUnimplemented` x64 gates?" — no, and here is the evidence
+
+64 handlers still carry an `if (Architecture != x64) return WinUnimplemented` gate. A blanket sweep
+is the wrong shape of change: a gate is only safe to drop when the handler body is already
+bitness-agnostic. Two outcomes from this pass make the point concretely:
+
+- **Safe (dropped):** `NtYieldExecution`, `NtUserCallTwoParam` (GetCursorPos), and the earlier
+  `NtUserFindWindowEx` / `NtUserGetMessage` — bodies already read args via `GetArg64` and write
+  pointer-/POINT-sized OUT slots correctly. Each verified individually against **both** al-khaser
+  binaries.
+- **Unsafe (kept gated):** **`NtDelayExecution`.** Ungating it — via *either* the deadline park
+  *or* an inline "advance the virtual clock and return" model — makes `Sleep` actually consume
+  virtual time, and that **regresses al-khaser_x86 from 239 to ~182 GOOD**: advancing the clock during
+  `Sleep` perturbs al-khaser's control flow and it skips ~50 process-enumeration / WMI checks (the run
+  diverges mid-anti-VM section, e.g. at `Checking NTEventLog from WMI`). The park variant and the
+  inline-advance variant both regress, and both diverge at a *different* check each run — i.e. the
+  perturbation is timing-sensitive, not a fixable off-by-one. A single verdict flip (`mouse movement`)
+  at the cost of ~50 checks is a net loss, so the gate stays until the interaction between
+  virtual-time advancement and al-khaser's late-section scheduling is understood. This is exactly the
+  "make all samples green" anti-pattern the rules warn against — the gate encodes real "not safely
+  ungatable yet" knowledge, not laziness.
+
+#### Parent-process `std::filesystem::equivalent` regression → root-caused (this pass)
+
+A container rebuild surfaced a regression: al-khaser_x86 was terminating at
+**~24 GOOD** with a combase-region CRT `__fastfail` (`int 29h`, code 7) at the
+*end* of Debugger Detection, instead of the expected 237. Root cause was **not**
+host-dependent (the host reproduces 237 fine) — it was introduced by the prior
+session's last commit (`6fe5024`, which implemented `ProcessImageFileNameWin32`
+on x86) interacting with two latent x86 gaps:
+
+1. **`ProcessImageFileNameWin32` wrote a 16-byte `UNICODE_STRING64` on x86.**
+   `StructSerializer.GetStructSize<UNICODE_STRING64>` is *not* pointer-aware for
+   a plain `ulong Buffer` (it returns 16 on both bitnesses), so the WOW64 caller
+   (`kernelbase!QueryFullProcessImageNameW`) read `Buffer` at +4 (the x64 pad
+   word) as NULL and `memcpy`'d the parent image name from NULL → `0xC0000005`.
+   Fixed to size the header + OUT Buffer pointer to the guest (8-byte header /
+   Buffer @ +4 on x86; 16 / Buffer @ +8 on x64).
+2. With the parent image path now correctly resolved (`C:\Windows\explorer.exe`),
+   al-khaser calls `std::filesystem::equivalent(parentPath, expectedExplorerPath)`
+   (`MSVCP140!_Equivalent`, IAT `0x17218`). `_Equivalent` opens **both** files
+   and issues **`NtQueryInformationFile`** to read the file id and compare
+   identity. `NtQueryInformationFile` was **gated to x64** → `STATUS_NOT_SUPPORTED`
+   on WOW64 → `_Equivalent` returned an error → al-khaser's `if (equivalent(...))`
+   threw an **uncaught `std::filesystem_error`** → CRT `__fastfail`. Fixed by
+   making `NtQueryInformationFile` bitness-agnostic (GetArg64 args,
+   `GuestPointerSize*2` IO_STATUS_BLOCK, fixed struct bodies are bitness-invariant)
+   and making `FILE_INTERNAL_INFORMATION`/`FILE_ID_INFORMATION` report a
+   **path-derived** file id (stable across handles) instead of the per-open handle
+   value — so the two opens of the same file compare equal.
+
+Net: back to **237 GOOD / 18 BAD**, now with a genuinely-working parent-process
+filesystem-equivalence check (open + stat + compare) rather than the emulator
+crashing. The `NOT_SUPPORTED`-era 237 dodged both bugs only because
+`QueryFullProcessImageNameW` failed early and al-khaser never reached
+`equivalent()`. x64 unaffected (244 GOOD; the file-info + UNICODE_STRING layouts
+are byte-identical on x64). Terminus is once again the message-pump spin.
+
+**Landed alongside — WOW64 registry syscalls.** The same DLL init was issuing a burst
+of `NtOpenKey` (SSN 0x12) returning `NOT_SUPPORTED` because the whole registry family
+was gated to x64. All 13 handlers are now bitness-agnostic: a new
+`TryResolveRegistryObjectPath` reads the correct `OBJECT_ATTRIBUTES` (4-byte fields +
+8-byte `UNICODE_STRING` on x86 / 8-byte fields + 16-byte on x64), a `TryReadUnicodeString`
+wrapper picks the value-name layout by bitness, and OUT `KeyHandle`s are written with
+`WritePointer`/`GuestPointerSize`. The flat `KEY_*_INFORMATION` output records are
+identical on both bitnesses, so the handle-returning handlers (`NtOpenKey`/`NtOpenKeyEx`/
+`NtCreateKey`) took the pointer treatment while the data handlers
+(`NtQueryValueKey`/`NtEnumerate{Key,ValueKey}`/`NtQueryKey`/…) just widened their gate.
+This does not move the terminus (the `CLIENTINFO` deref is still fatal) but is
+**essential** for the detection phase — al-khaser's anti-VM logic reads dozens of
+registry keys, so WOW64 registry is squarely on the critical path once GUI init clears.
+x64 registry behaviour is byte-identical (the old `…64` resolver now forwards to the
+shared one; the widened gates still enter on x64). Other still-unimplemented syscalls
+(`0x1E9` `NtWow64IsProcessorFeaturePresent`; `0x1CE`; `NtQuerySystemInformation` class
+0x73) are not (yet) on the fatal path.
+
+**Remaining WOW64 work (mechanical continuation):** the other x64-gated `Nt*`
+handlers still return unimplemented for x86 — each needs the same treatment (unify
+args via `GetArg64`, size OUT pointers/structs to the guest via `WritePointer` /
+the 32-bit OBJECT_ATTRIBUTES / UNICODE_STRING readers, fix `(HANDLE)-1` pseudo-handle
+comparisons). The pattern is well established now (five handlers landed this pass);
+extend it handler-by-handler as the DLL-init and detection phases exercise them.
+
+**Remaining WOW64 work (mechanical continuation):** the other ~70 `Nt*` handlers
+gated `if (Architecture == x64)` still return unimplemented for x86 — each needs
+the same treatment (unify args via `GetArg64`, size OUT pointers/structs to the
+guest, fix `(HANDLE)-1` pseudo-handle comparisons). The pattern is established;
+extend it handler-by-handler as al-khaser's detection suite exercises them.
+
+#### Reproduction (x86)
+
+```bash
+# Deps: WindowsLibs/ (+ SysWOW64/), WinReg/, apisetmap.bin next to Brovan.dll.
+# Unicorn 2.1.4 is fetched by the build (or stage libunicorn.so into .cache).
+# UC_IGNORE_REG_BREAK=1 silences MODE_32 register-deprecation warnings on stderr.
+UC_IGNORE_REG_BREAK=1 printf 'start\nexit\n' | dotnet Brovan.dll al-khaser_x86.exe
+```
 
 ## Investigation method (for the next pass)
 

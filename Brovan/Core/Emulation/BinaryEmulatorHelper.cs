@@ -1633,8 +1633,15 @@ namespace Brovan.Core.Emulation
             }
             else
             {
-                string NtdllPath = Path.Combine(GeneralHelper.WindowsLibsPath, "ntdll.dll");
-                string Win32uPath = Path.Combine(GeneralHelper.WindowsLibsPath, "win32u.dll");
+                // A 32-bit (WOW64) guest must source its system-call numbers from the 32-bit ntdll in the
+                // SysWOW64 view — its Nt* stubs carry the WOW64 SSNs (which happen to match the native x64
+                // numbers on current builds, but reading the correct image keeps this robust across builds
+                // and win32u, whose numbering can differ per bitness). x64 keeps the flat view.
+                string NtdllDir = BinaryArch == BinaryArchitecture.x86
+                    ? Path.Combine(GeneralHelper.WindowsLibsPath, "SysWOW64")
+                    : GeneralHelper.WindowsLibsPath;
+                string NtdllPath = Path.Combine(NtdllDir, "ntdll.dll");
+                string Win32uPath = Path.Combine(NtdllDir, "win32u.dll");
 
                 if (!File.Exists(NtdllPath))
                 {
@@ -1656,6 +1663,16 @@ namespace Brovan.Core.Emulation
 
                 if (Win32u != null)
                     AddSyscallsFromExports(Win32u.ExportFunctions, Win32uData, SupportedFunctionsWin32k, true);
+
+                // user32.dll's DllMain (_UserClientDllInitialize) issues the win32k client-connect through its
+                // OWN internal syscall stub, not win32u's exported NtUserProcessConnect (SSN 0x10e9) — the two
+                // are different entry points, and user32's early-init stub carries SSN 0x2000 on the 19041 WOW64
+                // build. The win32u export scan above therefore never binds 0x2000, so user32's connect returns
+                // STATUS_NOT_SUPPORTED and its DllMain fails with STATUS_DLL_INIT_FAILED. Bind that observed SSN
+                // to the same connect handler so user32 init completes. See Win32k/NtUserProcessConnect.
+                const uint User32ClientConnectSyscallX86 = 0x2000;
+                if (BinaryArch == BinaryArchitecture.x86 && !SyscallDictionary.ContainsKey(User32ClientConnectSyscallX86))
+                    RegisterSyscall(User32ClientConnectSyscallX86, "NtUserProcessConnect", true);
             }
 
             if (SyscallDictionary.Count > 0)

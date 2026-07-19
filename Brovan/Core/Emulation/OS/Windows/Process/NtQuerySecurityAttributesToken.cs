@@ -6,7 +6,7 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
+            if (Instance._binary.Architecture != BinaryArchitecture.x64 && Instance._binary.Architecture != BinaryArchitecture.x86)
                 return Instance.WinUnimplemented;
 
             ulong TokenHandle = Instance.WinHelper.GetArg64(0);
@@ -16,7 +16,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint BufferLength = (uint)Instance.WinHelper.GetArg64(4);
             ulong ReturnLengthPtr = Instance.WinHelper.GetArg64(5);
 
-            const uint RequiredSize = 0x10;
+            // TOKEN_SECURITY_ATTRIBUTES_INFORMATION = { USHORT Version; USHORT Reserved; ULONG AttributeCount;
+            // PTOKEN_SECURITY_ATTRIBUTE_V1 Attribute; }. Pointer size varies with bitness ⇒ 12 bytes on x86,
+            // 16 on x64. Real ntdll aligns AttributeCount and Attribute to their natural offsets, so the
+            // pointer sits at +0x8 on both.
+            uint RequiredSize = Instance.GuestPointerSize == 8 ? 0x10u : 0xCu;
 
             long SignedTokenHandle = unchecked((long)TokenHandle);
             if (SignedTokenHandle != -4 && SignedTokenHandle != -5 && SignedTokenHandle != -6 && !Instance.WinHelper.HandleManager.HandleExists(TokenHandle, HandleType.TokenHandle))
@@ -25,7 +29,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (NumberOfAttrs != 0 && AttributesPtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (AttributesPtr != 0 && NumberOfAttrs != 0 && !Instance.IsRegionMapped(AttributesPtr, NumberOfAttrs * 8UL))
+            if (AttributesPtr != 0 && NumberOfAttrs != 0 && !Instance.IsRegionMapped(AttributesPtr, NumberOfAttrs * (ulong)Instance.GuestPointerSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             if (ReturnLengthPtr != 0)
@@ -48,7 +52,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             Instance._emulator.WriteMemory(Buffer + 0x0, (ushort)0, 2); // Version
             Instance._emulator.WriteMemory(Buffer + 0x2, (ushort)0, 2); // Reserved
             Instance._emulator.WriteMemory(Buffer + 0x4, 0u, 4); // AttributeCount
-            Instance._emulator.WriteMemory(Buffer + 0x8, 0UL, 8); // Attribute pointer
+            if (!Instance.WritePointer(Buffer + 0x8, 0UL)) // Attribute pointer
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             return NTSTATUS.STATUS_SUCCESS;
         }

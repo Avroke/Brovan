@@ -381,7 +381,12 @@ namespace Brovan.Core.Emulation
         }
 
         private const int GprBatchCount = 18;
+        // 32-bit (MODE_32) GPR batch: the 8 GPRs + EIP + EFLAGS. Unicorn treats the 64-bit register IDs
+        // (RAX/RSP/RIP/…) as no-ops in MODE_32 — writing them silently does nothing and reading returns 0 —
+        // so a 32-bit thread context must be transferred through the 32-bit IDs (EAX/ESP/EIP/…) instead.
+        private const int GprBatchCount32 = 10;
         private int[] _gprBatchRegs;
+        private int[] _gprBatchRegs32;
         private ulong[] _gprBatchScratch;
         internal BinaryEmulatorSettings Settings;
         private InstructionHookCallback Syscall;
@@ -1897,6 +1902,29 @@ namespace Brovan.Core.Emulation
             return Regs;
         }
 
+        /// <summary>
+        /// 32-bit GPR batch register IDs (EAX..ESP + EIP + EFLAGS). Ordered to line up with the first eight
+        /// <see cref="CpuContext"/> slots (RAX..RSP) plus RIP/RFLAGS so the same context fields carry both
+        /// bitnesses; R8-R15 are absent in 32-bit mode and left untouched in the context.
+        /// </summary>
+        private int[] GetGprBatchRegs32()
+        {
+            int[] Regs = _gprBatchRegs32;
+            if (Regs == null)
+            {
+                Regs = new int[GprBatchCount32]
+                {
+                    (int)Registers.UC_X86_REG_EAX, (int)Registers.UC_X86_REG_EBX,
+                    (int)Registers.UC_X86_REG_ECX, (int)Registers.UC_X86_REG_EDX,
+                    (int)Registers.UC_X86_REG_ESI, (int)Registers.UC_X86_REG_EDI,
+                    (int)Registers.UC_X86_REG_EBP, (int)Registers.UC_X86_REG_ESP,
+                    (int)Registers.UC_X86_REG_EIP, (int)Registers.UC_X86_REG_EFLAGS
+                };
+                _gprBatchRegs32 = Regs;
+            }
+            return Regs;
+        }
+
         public void SaveContext(EmulatedThread t)
         {
             if (t == null || t.Context == null) return;
@@ -1906,6 +1934,19 @@ namespace Brovan.Core.Emulation
         public bool ReadGprBatch(CpuContext c)
         {
             if (c == null) return false;
+
+            if (BackendMode == Mode.MODE_32)
+            {
+                int[] Regs32 = GetGprBatchRegs32();
+                ulong[] Vals32 = _gprBatchScratch ??= new ulong[GprBatchCount];
+                if (!_emulator.ReadRegisterBatch(Regs32, Vals32, GprBatchCount32))
+                    return false;
+                c.RAX = Vals32[0]; c.RBX = Vals32[1]; c.RCX = Vals32[2]; c.RDX = Vals32[3];
+                c.RSI = Vals32[4]; c.RDI = Vals32[5]; c.RBP = Vals32[6]; c.RSP = Vals32[7];
+                c.RIP = Vals32[8]; c.RFLAGS = Vals32[9];
+                return true;
+            }
+
             int[] Regs = GetGprBatchRegs();
             ulong[] Vals = _gprBatchScratch ??= new ulong[GprBatchCount];
             if (!_emulator.ReadRegisterBatch(Regs, Vals, GprBatchCount))
@@ -1921,6 +1962,18 @@ namespace Brovan.Core.Emulation
         public void WriteGprBatch(CpuContext c)
         {
             if (c == null) return;
+
+            if (BackendMode == Mode.MODE_32)
+            {
+                int[] Regs32 = GetGprBatchRegs32();
+                ulong[] Vals32 = _gprBatchScratch ??= new ulong[GprBatchCount];
+                Vals32[0] = c.RAX; Vals32[1] = c.RBX; Vals32[2] = c.RCX; Vals32[3] = c.RDX;
+                Vals32[4] = c.RSI; Vals32[5] = c.RDI; Vals32[6] = c.RBP; Vals32[7] = c.RSP;
+                Vals32[8] = c.RIP; Vals32[9] = c.RFLAGS;
+                _emulator.WriteRegisterBatch(Regs32, Vals32, GprBatchCount32);
+                return;
+            }
+
             int[] Regs = GetGprBatchRegs();
             ulong[] Vals = _gprBatchScratch ??= new ulong[GprBatchCount];
             Vals[0]  = c.RAX;  Vals[1]  = c.RBX;  Vals[2]  = c.RCX;  Vals[3]  = c.RDX;
@@ -2551,6 +2604,15 @@ namespace Brovan.Core.Emulation
             long LivelockSpinSlices = 0;
             bool LivelockReported = false;
 
+            // Idle-GetMessage-pump watchdog (frontier F2). Counts consecutive scheduler iterations that
+            // fall into the GetMessage-park poll with NOTHING runnable and NO timed wakeup pending — i.e.
+            // an idle message pump whose wait cannot be satisfied (no timer will fire, no runnable thread
+            // can PostMessage). Reset to 0 the instant any thread actually runs, so a real pump fed by a
+            // periodically-runnable worker never accumulates. After the bound, terminate cleanly instead
+            // of polling to the wall-clock budget. Shared x64/x86 (both al-khaser binaries park here).
+            long GetMessageParkFutilePolls = 0;
+            const long GetMessageParkFutilePollLimit = 256;
+
             if (Debug)
                 if (Debug)
                     TriggerDebugMessage($"scheduler: start threads={ThreadOrder.Count} levels={Levels} baseQuantum={BaseQuantumInstructions} maxInstructions={MaxTotalInstructions} maxSlices={MaxSlices}");
@@ -2627,6 +2689,20 @@ namespace Brovan.Core.Emulation
 
                         if (HasActiveGetMessageWait())
                         {
+                            // No runnable thread + no timed wakeup (TryGetNextWaitSleepMs returned false
+                            // above) + an active GetMessage wait ⇒ nothing can ever queue a message or
+                            // fire a timer to wake it. Poll a bounded number of times (a productive pump
+                            // whose worker is runnable never reaches here — it would be dequeued and reset
+                            // the counter), then terminate cleanly as an idle-pump deadlock rather than
+                            // spinning to the wall-clock timeout.
+                            if (++GetMessageParkFutilePolls > GetMessageParkFutilePollLimit)
+                            {
+                                if (Debug)
+                                    if (Debug)
+                                        TriggerDebugMessage($"scheduler: idle GetMessage pump, no wakeup source — terminating cleanly total={Total} slices={Slices}");
+                                return true;
+                            }
+
                             const int MessagePumpPollMs = 10;
                             Thread.Sleep(MessagePumpPollMs);
                             AdvanceEmulatedTimeMilliseconds(MessagePumpPollMs, AdvanceTimestampCounter: true);
@@ -2650,6 +2726,9 @@ namespace Brovan.Core.Emulation
                         if (Debug)
                             TriggerDebugMessage($"scheduler: switch {CurrentThreadId} -> {ImmaBeEmulatedOOO.ThreadId} queue={SelectedLevel} state={ImmaBeEmulatedOOO.State} rip=0x{ImmaBeEmulatedOOO.Context?.RIP ?? 0:X}");
                 }
+
+                // A thread is about to run — real progress — so the idle-pump watchdog resets.
+                GetMessageParkFutilePolls = 0;
 
                 SwitchToThread((int)ImmaBeEmulatedOOO.ThreadId);
                 EmulatedThreadState StateBeforeSlice = ImmaBeEmulatedOOO.State;
@@ -2949,6 +3028,18 @@ namespace Brovan.Core.Emulation
                 if (_emulator.AddInstructionHook(BackendInstructionHook.Syscall, Syscall) == IntPtr.Zero)
                     Utils.LogError($"Couldn't add the syscall hook: {_emulator.GetLastError()}.");
 
+                // A 32-bit (WOW64) guest never executes the native `syscall` instruction: its ntdll routes
+                // syscalls through the WOW64 transition, which Brovan models with a `sysenter` trampoline
+                // (see WindowsGuest.SetupWow64SyscallTransition). Hook SYSENTER to the same dispatcher so the
+                // trampoline reaches TryHandleSyscall. `syscall` (0F 05) is invalid in 32-bit mode, so the
+                // native hook above is inert here; registering both is harmless and keeps a direct-syscall
+                // anti-emulation probe dispatched either way.
+                if (BackendMode == Mode.MODE_32)
+                {
+                    if (_emulator.AddInstructionHook(BackendInstructionHook.Sysenter, Syscall) == IntPtr.Zero)
+                        Utils.LogError($"Couldn't add the sysenter hook: {_emulator.GetLastError()}.");
+                }
+
                 CPUID = CPUID_Handler;
                 if (_emulator.AddInstructionBoolHook(BackendInstructionHook.CpuId, CPUID) == IntPtr.Zero)
                     Utils.LogError($"Couldn't add the CPUID hook: {_emulator.GetLastError()}.");
@@ -3180,6 +3271,22 @@ namespace Brovan.Core.Emulation
         /// <param name="Size">Number of bytes to read.</param>
         /// <returns>Byte array containing the read data.</returns>
         public uint ReadMemoryUInt(ulong Address) => _emulator.ReadMemoryUInt(Address);
+
+        /// <summary>Guest pointer width in bytes: 8 for x64, 4 for a 32-bit (WOW64) guest.</summary>
+        public int GuestPointerSize => BackendMode == Mode.MODE_32 ? 4 : 8;
+
+        /// <summary>
+        /// Reads a guest pointer-sized value (4 bytes on x86, 8 on x64), zero-extended to <see cref="ulong"/>.
+        /// Use for reading OUT/INOUT pointer arguments so a 32-bit guest is not mis-read as 64-bit.
+        /// </summary>
+        public ulong ReadPointer(ulong Address) => GuestPointerSize == 8 ? ReadMemoryULong(Address) : ReadMemoryUInt(Address);
+
+        /// <summary>
+        /// Writes a guest pointer-sized value (4 bytes on x86, 8 on x64) through an OUT pointer. A hardcoded
+        /// 8-byte write into a 32-bit caller's stack clobbers the adjacent slot (the class of bug documented in
+        /// the emulator's calling-convention notes), so pointer-typed outputs must size to the guest.
+        /// </summary>
+        public bool WritePointer(ulong Address, ulong Value) => _emulator.WriteMemory(Address, Value, (uint)GuestPointerSize);
 
         /// <summary>
         /// Start emulation.

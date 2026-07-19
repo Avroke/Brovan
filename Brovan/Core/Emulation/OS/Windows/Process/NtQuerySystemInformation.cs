@@ -9,7 +9,11 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
+            // Runs for both bitnesses. Arguments come through GetArg64 (bitness-aware) and the class handlers
+            // that emit pointer-sized fields branch on Architecture internally (SystemBasicInformation,
+            // SystemKernelDebugger, …). This unblocks the WOW64 loader, which queries SystemBasicInformation
+            // early; class-by-class 32-bit struct-size refinements are tracked separately.
+            if (Instance._binary.Architecture == BinaryArchitecture.x64 || Instance._binary.Architecture == BinaryArchitecture.x86)
             {
                 SYSTEM_INFORMATION_CLASS SystemInformationClass = (SYSTEM_INFORMATION_CLASS)Instance.WinHelper.GetArg64(0);
                 ulong SystemInformationPtr = Instance.WinHelper.GetArg64(1);
@@ -356,7 +360,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                             if (Processes == null)
                                 Processes = new List<WinProcess>();
 
-                            ulong EntrySize = 0x70;
+                            // SYSTEM_PROCESS_INFORMATION is bitness-dependent: the x64 header (ImageName
+                            // UNICODE_STRING @ 0x38 with an 8-byte Buffer, PID/PPID @ 0x50/0x58) is laid out
+                            // differently from the x86 header (8-byte UNICODE_STRING, PID/PPID @ 0x44/0x48). A
+                            // WOW64 process-enumeration walk fed the x64 layout gets a corrupt list. Emit the
+                            // layout that matches the guest.
+                            bool Wow64Proc = Instance._binary.Architecture != BinaryArchitecture.x64;
+                            ulong EntrySize = Wow64Proc ? 0xB8UL : 0x70UL;
                             ulong RequiredLength = (ulong)Processes.Count * EntrySize;
 
                             if (SystemInformationLength < RequiredLength)
@@ -382,24 +392,33 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                                 uint NextEntryOffset = (i == Processes.Count - 1) ? 0 : (uint)EntrySize;
 
-                                Instance._emulator.WriteMemory(Current + 0x00, NextEntryOffset);
-                                Instance._emulator.WriteMemory(Current + 0x04, 1u);
+                                Instance._emulator.WriteMemory(Current + 0x00, NextEntryOffset); // NextEntryOffset
+                                Instance._emulator.WriteMemory(Current + 0x04, 1u);              // NumberOfThreads
 
-                                ulong ImageNameField = Current + 0x38; // ImageName field which contains the process name.
+                                // ImageName lives at +0x38 on both bitnesses; the whole entry was zero-filled
+                                // above, so a process with no readable name is left as an empty UNICODE_STRING.
+                                bool HasName = !string.IsNullOrEmpty(P.Name) && P.Status != ProtectionStatus.Unaccessible;
 
-                                if (!string.IsNullOrEmpty(P.Name) && P.Status != ProtectionStatus.Unaccessible)
-                                    Instance.WinHelper.SetUnicodeString(ImageNameField, P.Name);
+                                if (Wow64Proc)
+                                {
+                                    // x86: ImageName is an 8-byte UNICODE_STRING (Buffer @ +4); BasePriority @
+                                    // 0x40, UniqueProcessId @ 0x44, InheritedFromUniqueProcessId @ 0x48 (4-byte).
+                                    if (HasName)
+                                        Instance.WinHelper.SetUnicodeString32((uint)(Current + 0x38), P.Name);
+                                    Instance._emulator.WriteMemory(Current + 0x40, 8u, 4);           // BasePriority
+                                    Instance._emulator.WriteMemory(Current + 0x44, (uint)P.PID, 4);  // UniqueProcessId
+                                    Instance._emulator.WriteMemory(Current + 0x48, (uint)P.PPID, 4); // InheritedFromUniqueProcessId
+                                }
                                 else
                                 {
-                                    Instance._emulator.WriteMemory(ImageNameField + 0x00, (ushort)0, 2);
-                                    Instance._emulator.WriteMemory(ImageNameField + 0x02, (ushort)0, 2);
-                                    Instance._emulator.WriteMemory(ImageNameField + 0x08, 0UL);
+                                    // x64: ImageName is a 16-byte UNICODE_STRING (Buffer @ +8); BasePriority @
+                                    // 0x48, UniqueProcessId @ 0x50, InheritedFromUniqueProcessId @ 0x58 (8-byte).
+                                    if (HasName)
+                                        Instance.WinHelper.SetUnicodeString(Current + 0x38, P.Name);
+                                    Instance._emulator.WriteMemory(Current + 0x48, 8);
+                                    Instance._emulator.WriteMemory(Current + 0x50, (ulong)P.PID);
+                                    Instance._emulator.WriteMemory(Current + 0x58, (ulong)P.PPID);
                                 }
-
-                                Instance._emulator.WriteMemory(Current + 0x48, 8);
-
-                                Instance._emulator.WriteMemory(Current + 0x50, (ulong)P.PID); // UniqueProcessId
-                                Instance._emulator.WriteMemory(Current + 0x58, (ulong)P.PPID); // InheritedFromUniqueProcessId
 
                                 Current += EntrySize;
                             }
@@ -466,7 +485,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                     case SYSTEM_INFORMATION_CLASS.SystemEmulationBasicInformation:
                     case SYSTEM_INFORMATION_CLASS.SystemBasicInformation:
                         {
-                            uint RequiredLength = 0x40;
+                            // SYSTEM_BASIC_INFORMATION has three ULONG_PTR/KAFFINITY tail fields
+                            // (MinimumUserModeAddress, MaximumUserModeAddress, ActiveProcessorsAffinityMask)
+                            // that are 8 bytes on x64 / 4 bytes on x86 — so the struct is 0x40 vs 0x2C and the
+                            // WOW64 loader passes a 44-byte buffer. Size the tail to the guest.
+                            bool Wow64 = Instance._binary.Architecture != BinaryArchitecture.x64;
+                            uint RequiredLength = Wow64 ? 0x2Cu : 0x40u;
                             if (SystemInformationLength < RequiredLength)
                             {
                                 if (ReturnLengthPtr != 0)
@@ -494,10 +518,35 @@ namespace Brovan.Core.Emulation.OS.Windows
                             Instance._emulator.WriteMemory(SystemInformationPtr + 0x14, HighestPhysicalPageNumber);
                             Instance._emulator.WriteMemory(SystemInformationPtr + 0x18, AllocationGranularity);
 
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x20, Instance.BaseAddress);
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x28, Instance.MaxAddress);
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x30, 0x1);
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x38, (byte)Environment.ProcessorCount);
+                            if (Wow64)
+                            {
+                                // The two user-address bounds must describe the 32-bit *process* address space,
+                                // NOT the emulator's internal allocation window (Instance.BaseAddress/MaxAddress).
+                                // MaximumUserModeAddress in particular is load-bearing: ntdll's CFG-bitmap
+                                // reservation (LdrpProtectMrdata → RtlpAllocateVirtualMemoryEx) reads it back via
+                                // SystemEmulationBasicInformation, does `MaximumUserModeAddress + 1`, then derives
+                                // the bitmap size from that span. (uint)Instance.MaxAddress was 0xFFFFFFFF, whose
+                                // +1 overflows to 0 → a 0-byte bitmap reservation → NtAllocateVirtualMemoryEx
+                                // returns STATUS_INVALID_PARAMETER → ntdll fails process init with
+                                // STATUS_APP_INIT_FAILURE. Report the real Win32 bounds instead: floor 0x10000
+                                // (64 KB), ceiling 0x7FFEFFFF (2 GB − 64 KB), or 0xFFFEFFFF (4 GB − 64 KB) when
+                                // the image is large-address-aware — the extra 2 GB a WOW64 LAA process gets.
+                                bool LargeAddressAware = Instance._binary.PE != null &&
+                                    (Instance._binary.PE.Characteristics & System.Reflection.PortableExecutable.Characteristics.LargeAddressAware) != 0;
+                                uint MinimumUserModeAddress = 0x00010000;
+                                uint MaximumUserModeAddress = LargeAddressAware ? 0xFFFEFFFFu : 0x7FFEFFFFu;
+                                Instance._emulator.WriteMemory(SystemInformationPtr + 0x1C, MinimumUserModeAddress);      // MinimumUserModeAddress
+                                Instance._emulator.WriteMemory(SystemInformationPtr + 0x20, MaximumUserModeAddress);      // MaximumUserModeAddress
+                                Instance._emulator.WriteMemory(SystemInformationPtr + 0x24, 0x1u);                        // ActiveProcessorsAffinityMask
+                                Instance._emulator.WriteMemory(SystemInformationPtr + 0x28, (byte)Environment.ProcessorCount);
+                            }
+                            else
+                            {
+                                Instance._emulator.WriteMemory(SystemInformationPtr + 0x20, Instance.BaseAddress);
+                                Instance._emulator.WriteMemory(SystemInformationPtr + 0x28, Instance.MaxAddress);
+                                Instance._emulator.WriteMemory(SystemInformationPtr + 0x30, 0x1);
+                                Instance._emulator.WriteMemory(SystemInformationPtr + 0x38, (byte)Environment.ProcessorCount);
+                            }
 
                             if (ReturnLengthPtr != 0)
                             {
@@ -624,10 +673,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                             Instance.TriggerEventMessage($"[!] Unsupported NtQuerySystemInformation class: 0x{SystemInformationClass:X}", LogFlags.Issues);
                         break;
                 }
-            }
-            else if (Instance._binary.Architecture == BinaryArchitecture.x86)
-            {
-
             }
             return Instance.WinUnimplemented;
         }

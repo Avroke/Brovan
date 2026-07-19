@@ -158,6 +158,16 @@ namespace Brovan
         public static bool IsLinux = RuntimeInformation.IsOSPlatform(OSPlatform.Linux);
         public static string WindowsLibsPath = Path.Combine(AppContext.BaseDirectory, "WindowsLibs");
 
+        /// <summary>
+        /// When true, the currently emulated Windows guest is a 32-bit (WOW64) process, so the shipped
+        /// SysWOW64 view of the system DLLs must be served for any System32/leaf resolution — this is the
+        /// emulator-side WOW64 file-system redirector (a WOW64 process sees <c>C:\Windows\System32</c> but
+        /// the loader/filesystem transparently maps it to the 32-bit <c>SysWOW64</c> images).
+        /// Ambient (single Windows guest at a time), mirroring <see cref="WindowsLibsPath"/>; set once at
+        /// guest bring-up in <see cref="Core.Emulation.Guests.WindowsGuest"/> from the binary architecture.
+        /// </summary>
+        public static bool Wow64GuestView = false;
+
         public static string System32
         {
             get
@@ -225,8 +235,16 @@ namespace Brovan
             }
             else
             {
-                // Linux / non-Windows: use shipped Windows DLLs
-                BasePath = WindowsLibsPath;
+                // Linux / non-Windows: use shipped Windows DLLs. A 32-bit (WOW64) guest — either the
+                // caller asked for it explicitly, or the ambient WOW64 view is active — reads the 32-bit
+                // images from the SysWOW64 sub-view; everything else reads the flat (x64) WindowsLibs.
+                bool WantWow64 = IsWow64 || Arch == BinaryArchitecture.x86 || Wow64GuestView;
+                BasePath = WantWow64 ? Path.Combine(WindowsLibsPath, "SysWOW64") : WindowsLibsPath;
+
+                // Defensive fall-back: if the 32-bit view does not ship this particular file, use the flat
+                // view so a missing SysWOW64 leaf never hard-fails a resolution that the x64 view can satisfy.
+                if (WantWow64 && !File.Exists(Path.Combine(BasePath, Library)))
+                    BasePath = WindowsLibsPath;
             }
 
             string Result = Path.Combine(BasePath, Library);
@@ -913,6 +931,11 @@ namespace Brovan
         {
             private static readonly object WindowsLibsIndexLock = new();
             private static Dictionary<string, string> WindowsLibsFileIndex;
+            // Case-insensitive leaf index restricted to the SysWOW64 sub-view. The flat index above walks the
+            // whole tree "first hit wins", so a leaf that ships in both views (kernel32.dll / ntdll.dll / …)
+            // resolves to whichever the enumeration hit first — usually the flat 64-bit copy. A WOW64 guest that
+            // resolves such a leaf must get the 32-bit SysWOW64 image; this index is consulted first for that.
+            private static Dictionary<string, string> WindowsLibsSysWow64FileIndex;
 
             private static readonly object DriveMapLock = new();
             private static readonly Dictionary<char, string> DriveMappings = new();
@@ -2939,6 +2962,16 @@ namespace Brovan
                 if (Normalized.StartsWith(System32Prefix, StringComparison.OrdinalIgnoreCase))
                 {
                     string Rel = Normalized.Substring(System32Prefix.Length);
+                    // WOW64 file-system redirection: a 32-bit guest that opens C:\Windows\System32\<dll>
+                    // must transparently receive the 32-bit SysWOW64 image (that is what the real WOW64
+                    // redirector does). Only redirect module images, and fall back to the flat view when
+                    // SysWOW64 does not ship the file (non-redirected subdirs like \drivers, NLS data, etc.).
+                    if (Wow64GuestView)
+                    {
+                        string Wow64Rel = TryResolveFromWindowsLibsRelative(Path.Combine(WindowsLibsPath, "SysWOW64"), Rel);
+                        if (!string.IsNullOrEmpty(Wow64Rel))
+                            return Wow64Rel;
+                    }
                     return TryResolveFromWindowsLibsRelative(WindowsLibsPath, Rel);
                 }
 
@@ -3012,7 +3045,24 @@ namespace Brovan
                 if (string.IsNullOrWhiteSpace(Leaf))
                     return null;
 
+                // WOW64 view: prefer the 32-bit SysWOW64 image over the flat (x64) one when both ship the
+                // same leaf (ntdll.dll / kernel32.dll / … exist in both views). The flat leaf index is
+                // "first hit wins" over a recursive walk, so without this probe a 32-bit guest could bind
+                // the wrong bitness depending on enumeration order.
                 EnsureWindowsLibsIndex();
+
+                // WOW64 view: bind the 32-bit SysWOW64 image for any leaf that ships there, case-insensitively
+                // (the guest sends e.g. KERNEL32.DLL while the shipped file is kernel32.dll — a plain
+                // File.Exists on the case-preserving name misses on a case-sensitive host and would fall through
+                // to the flat 64-bit copy, which then loads as STATUS_INVALID_IMAGE_FORMAT into a 32-bit process).
+                if (Wow64GuestView)
+                {
+                    lock (WindowsLibsIndexLock)
+                    {
+                        if (WindowsLibsSysWow64FileIndex != null && WindowsLibsSysWow64FileIndex.TryGetValue(Leaf, out string Wow64Found))
+                            return Wow64Found;
+                    }
+                }
 
                 lock (WindowsLibsIndexLock)
                 {
@@ -3034,11 +3084,15 @@ namespace Brovan
                         return;
 
                     WindowsLibsFileIndex = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    WindowsLibsSysWow64FileIndex = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
                     try
                     {
                         if (!Directory.Exists(WindowsLibsPath))
                             return;
+
+                        string SysWow64Dir = Path.Combine(WindowsLibsPath, "SysWOW64");
+                        bool HasSysWow64 = Directory.Exists(SysWow64Dir);
 
                         foreach (string FilePath in Directory.EnumerateFiles(WindowsLibsPath, "*", SearchOption.AllDirectories))
                         {
@@ -3052,6 +3106,17 @@ namespace Brovan
                                 string Full = GetSandboxedFullPath(FilePath, CreateDirectories: false);
                                 if (!string.IsNullOrEmpty(Full))
                                     WindowsLibsFileIndex[Leaf] = Full;
+                            }
+
+                            // Separately index the SysWOW64 sub-view so a WOW64 leaf resolves to the 32-bit image
+                            // regardless of case (the guest sends KERNEL32.DLL; the shipped file is kernel32.dll).
+                            if (HasSysWow64 &&
+                                FilePath.StartsWith(SysWow64Dir + Path.DirectorySeparatorChar, StringComparison.Ordinal) &&
+                                !WindowsLibsSysWow64FileIndex.ContainsKey(Leaf))
+                            {
+                                string Full = GetSandboxedFullPath(FilePath, CreateDirectories: false);
+                                if (!string.IsNullOrEmpty(Full))
+                                    WindowsLibsSysWow64FileIndex[Leaf] = Full;
                             }
                         }
                     }

@@ -7,9 +7,8 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
-
+            // Bitness-agnostic: args via GetArg64 (delegates to GetArg32 in WOW64); the OUT link HANDLE is
+            // pointer-sized; OBJECT_ATTRIBUTES has 4-byte fields on x86 / 8-byte on x64, so the name read branches.
             ulong LinkHandlePtr = Instance.WinHelper.GetArg64(0);
             AccessMask DesiredAccess = (AccessMask)Instance.WinHelper.GetArg64(1);
             ulong ObjectAttributesPtr = Instance.WinHelper.GetArg64(2);
@@ -17,16 +16,30 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (LinkHandlePtr == 0 || ObjectAttributesPtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (!Instance.IsRegionMapped(LinkHandlePtr, 8))
+            if (!Instance.IsRegionMapped(LinkHandlePtr, (ulong)Instance.GuestPointerSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (!Instance.WinHelper.TryReadObjectAttributesName64(ObjectAttributesPtr, out OBJECT_ATTRIBUTES64 Attributes, out string Name, out string FullName, out NTSTATUS ObjectNameStatus))
-                return ObjectNameStatus;
+            ulong RootDirectory;
+            string Name;
+            string FullName;
+            NTSTATUS ObjectNameStatus;
+            if (Instance._binary.Architecture == BinaryArchitecture.x64)
+            {
+                if (!Instance.WinHelper.TryReadObjectAttributesName64(ObjectAttributesPtr, out OBJECT_ATTRIBUTES64 Attributes, out Name, out FullName, out ObjectNameStatus))
+                    return ObjectNameStatus;
+                RootDirectory = Attributes.RootDirectory;
+            }
+            else
+            {
+                if (!Instance.WinHelper.TryReadObjectAttributesName32((uint)ObjectAttributesPtr, out uint RootDirectory32, out _, out Name, out FullName, out ObjectNameStatus))
+                    return ObjectNameStatus;
+                RootDirectory = RootDirectory32;
+            }
 
             if (string.IsNullOrEmpty(Name))
                 return NTSTATUS.STATUS_OBJECT_NAME_INVALID;
 
-            string Target = ResolveSymbolicLinkTarget(Instance, Attributes.RootDirectory, Name, FullName);
+            string Target = ResolveSymbolicLinkTarget(Instance, RootDirectory, Name, FullName);
             if (Target == null)
                 return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
 
@@ -39,7 +52,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(LinkObj, DesiredAccess);
             Instance.WinHelper.AddWinHandle(Handle);
 
-            if (!Instance._emulator.WriteMemory(LinkHandlePtr, Handle.Handle))
+            if (!Instance.WritePointer(LinkHandlePtr, Handle.Handle))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)

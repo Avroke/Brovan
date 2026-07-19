@@ -37,7 +37,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static bool IsCurrentProcess(BinaryEmulator Instance, ulong ProcessHandle)
         {
-            if (ProcessHandle == ulong.MaxValue)
+            if (Instance.WinHelper.IsCurrentProcessPseudoHandle(ProcessHandle))
                 return true;
 
             WinProcess Proc = Instance.WinHelper.HandleManager.GetObjectByHandle<WinProcess>(ProcessHandle);
@@ -49,8 +49,26 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
+            // MemoryBasicInformation is serialized bitness-aware below; the other, less common classes still
+            // emit x64 layouts, so they are gated to x64 for now (an x86 query of them returns unimplemented
+            // rather than corrupting the caller's buffer).
+            if (Instance._binary.Architecture == BinaryArchitecture.x64 || Instance._binary.Architecture == BinaryArchitecture.x86)
             {
+                bool Wow64 = Instance._binary.Architecture != BinaryArchitecture.x64;
+
+                // User-mode address ceiling is bitness-dependent. The x64 value (MmHighestUserAddress) never
+                // gates a 32-bit address and would size a WOW64 free region as ~127 TB (truncated to a garbage
+                // 32-bit RegionSize). Use the real x86 ceiling — 0x7FFEFFFF, or 0xFFFEFFFF for a large-address-
+                // aware image (the extra 2 GB a WOW64 LAA process gets) — matching NtQuerySystemInformation's
+                // SystemBasicInformation bounds so the two syscalls stay mutually consistent.
+                ulong UserCeiling = MmHighestUserAddress;
+                if (Wow64)
+                {
+                    bool LargeAddressAware = Instance._binary.PE != null &&
+                        (Instance._binary.PE.Characteristics & System.Reflection.PortableExecutable.Characteristics.LargeAddressAware) != 0;
+                    UserCeiling = LargeAddressAware ? 0xFFFEFFFFUL : 0x7FFEFFFFUL;
+                }
+
                 ulong ProcessHandle = Instance.WinHelper.GetArg64(0);
                 ulong Address = Instance.WinHelper.GetArg64(1);
                 MEMORY_INFORMATION_CLASS MemoryInformationClass = (MEMORY_INFORMATION_CLASS)Instance.WinHelper.GetArg64(2);
@@ -64,8 +82,20 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (MemoryInformation == 0)
                     return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-                if (ReturnLength != 0 && !Instance.IsRegionMapped(ReturnLength, 8))
+                if (ReturnLength != 0 && !Instance.IsRegionMapped(ReturnLength, (ulong)Instance.GuestPointerSize))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                if (Wow64 &&
+                    MemoryInformationClass != MEMORY_INFORMATION_CLASS.MemoryBasicInformation &&
+                    MemoryInformationClass != MEMORY_INFORMATION_CLASS.MemoryPrivilegedBasicInformation &&
+                    MemoryInformationClass != MEMORY_INFORMATION_CLASS.MemoryImageInformation &&
+                    MemoryInformationClass != MEMORY_INFORMATION_CLASS.MemoryRegionInformation &&
+                    MemoryInformationClass != MEMORY_INFORMATION_CLASS.MemoryWorkingSetExInformation &&
+                    MemoryInformationClass != MEMORY_INFORMATION_CLASS.MemoryMappedFilenameInformation)
+                {
+                    Instance.TriggerEventMessage($"[!] NtQueryVirtualMemory (x86): class {MemoryInformationClass} not implemented", LogFlags.Issues);
+                    return Instance.WinUnimplemented;
+                }
 
                 if (MemoryInformationClass == MEMORY_INFORMATION_CLASS.MemoryBasicInformation || MemoryInformationClass == MEMORY_INFORMATION_CLASS.MemoryPrivilegedBasicInformation)
                 {
@@ -74,14 +104,17 @@ namespace Brovan.Core.Emulation.OS.Windows
                     // get an endless run of 0x1000-byte MEM_FREE regions (see the free-region branch
                     // below) and never terminate. Kernel addresses stay on the normal path so driver
                     // queries are unaffected.
-                    if (Address > MmHighestUserAddress && Address < KernelCanonicalBase)
+                    if (Address > UserCeiling && Address < KernelCanonicalBase)
                         return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-                    ulong RequiredLength = (ulong)StructSerializer.GetStructSize<MEMORY_BASIC_INFORMATION>(Instance);
+                    // MEMORY_BASIC_INFORMATION size is bitness-dependent (three pointer-sized fields): 0x1C on
+                    // x86, 0x30 on x64. The struct is declared with fixed ulong fields so GetStructSize always
+                    // reports 0x30 — hardcode the guest size so a 32-bit caller's 0x1C buffer isn't rejected.
+                    ulong RequiredLength = Wow64 ? 0x1CUL : 0x30UL;
 
                     if (ReturnLength != 0)
                     {
-                        if (!Instance._emulator.WriteMemory(ReturnLength, RequiredLength))
+                        if (!Instance.WritePointer(ReturnLength, RequiredLength))
                             return NTSTATUS.STATUS_ACCESS_VIOLATION;
                     }
 
@@ -187,8 +220,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                             // single-page fallback so its size can't underflow.
                             if (Next != ulong.MaxValue)
                                 FreeSize = Next - FreeBase;
-                            else if (FreeBase <= MmHighestUserAddress)
-                                FreeSize = MmHighestUserAddress - FreeBase + 1;
+                            else if (FreeBase <= UserCeiling)
+                                FreeSize = UserCeiling - FreeBase + 1;
                             else
                                 FreeSize = 0x1000UL;
 
@@ -207,16 +240,30 @@ namespace Brovan.Core.Emulation.OS.Windows
                     }
 
                     Span<byte> Data = Instance.WinHelper.Shared.GetSpan(RequiredLength);
-                    BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x00, 8), Info.BaseAddress);
-                    BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x08, 8), Info.AllocationBase);
-                    BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x10, 4), Info.AllocationProtect);
-                    BinaryPrimitives.WriteUInt16LittleEndian(Data.Slice(0x14, 2), Info.PartitionId);
-                    BinaryPrimitives.WriteUInt16LittleEndian(Data.Slice(0x16, 2), Info.Reserved);
-                    BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x18, 8), Info.RegionSize);
-                    BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x20, 4), Info.State);
-                    BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x24, 4), Info.Protect);
-                    BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x28, 4), Info.Type);
-                    BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x2C, 4), Info.Reserved2);
+                    if (Instance._binary.Architecture != BinaryArchitecture.x64)
+                    {
+                        // x86 MEMORY_BASIC_INFORMATION — 28 bytes, all pointer fields 4-wide.
+                        BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x00, 4), (uint)Info.BaseAddress);
+                        BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x04, 4), (uint)Info.AllocationBase);
+                        BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x08, 4), Info.AllocationProtect);
+                        BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x0C, 4), (uint)Info.RegionSize);
+                        BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x10, 4), Info.State);
+                        BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x14, 4), Info.Protect);
+                        BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x18, 4), Info.Type);
+                    }
+                    else
+                    {
+                        BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x00, 8), Info.BaseAddress);
+                        BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x08, 8), Info.AllocationBase);
+                        BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x10, 4), Info.AllocationProtect);
+                        BinaryPrimitives.WriteUInt16LittleEndian(Data.Slice(0x14, 2), Info.PartitionId);
+                        BinaryPrimitives.WriteUInt16LittleEndian(Data.Slice(0x16, 2), Info.Reserved);
+                        BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x18, 8), Info.RegionSize);
+                        BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x20, 4), Info.State);
+                        BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x24, 4), Info.Protect);
+                        BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x28, 4), Info.Type);
+                        BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x2C, 4), Info.Reserved2);
+                    }
 
                     if (!Instance.WriteMemory(MemoryInformation, Data.Slice(0, (int)RequiredLength)))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -253,18 +300,22 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Encoding.Unicode.GetBytes(Path.AsSpan(), StringData);
                     StringData[StringByteCount - 2] = 0;
                     StringData[StringByteCount - 1] = 0;
-                    ulong RequiredLength = 0x10UL + (ulong)StringByteCount;
+
+                    // UNICODE_STRING layout — 8 bytes on x86 (Length/MaxLen/Buffer4), 16 on x64
+                    // (Length/MaxLen/pad4/Buffer8). The string body follows immediately after the header.
+                    ulong HeaderSize = Wow64 ? 8UL : 0x10UL;
+                    ulong RequiredLength = HeaderSize + (ulong)StringByteCount;
 
                     if (ReturnLength != 0)
                     {
-                        if (!Instance._emulator.WriteMemory(ReturnLength, RequiredLength))
+                        if (!Instance.WritePointer(ReturnLength, RequiredLength))
                             return NTSTATUS.STATUS_ACCESS_VIOLATION;
                     }
 
                     if (MemoryInformationLength < RequiredLength)
                         return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
-                    ulong Buffer = MemoryInformation + 0x10;
+                    ulong Buffer = MemoryInformation + HeaderSize;
                     ushort Length = (ushort)(StringByteCount - 2);
                     ushort MaximumLength = (ushort)StringByteCount;
 
@@ -274,11 +325,19 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (!Instance._emulator.WriteMemory(MemoryInformation + 0x2, MaximumLength, 2))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                    if (!Instance._emulator.WriteMemory(MemoryInformation + 0x4, 0u, 4))
-                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                    if (Wow64)
+                    {
+                        if (!Instance._emulator.WriteMemory(MemoryInformation + 0x4, (uint)Buffer, 4))
+                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                    }
+                    else
+                    {
+                        if (!Instance._emulator.WriteMemory(MemoryInformation + 0x4, 0u, 4))
+                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                    if (!Instance._emulator.WriteMemory(MemoryInformation + 0x8, Buffer, 8))
-                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                        if (!Instance._emulator.WriteMemory(MemoryInformation + 0x8, Buffer, 8))
+                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                    }
 
                     if (!Instance.WriteMemory(Buffer, StringData.Slice(0, StringByteCount)))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -288,11 +347,13 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (MemoryInformationClass == MEMORY_INFORMATION_CLASS.MemoryWorkingSetExInformation)
                 {
-                    ulong ElementSize = (ulong)StructSerializer.GetStructSize<MEMORY_WORKING_SET_EX_INFORMATION>(Instance);
+                    // MEMORY_WORKING_SET_EX_INFORMATION = { PVOID VirtualAddress; ULONG_PTR Flags; } — 8 bytes
+                    // on x86, 16 on x64.
+                    ulong ElementSize = Wow64 ? 8UL : 16UL;
 
                     if (ReturnLength != 0)
                     {
-                        if (!Instance._emulator.WriteMemory(ReturnLength, MemoryInformationLength))
+                        if (!Instance.WritePointer(ReturnLength, MemoryInformationLength))
                             return NTSTATUS.STATUS_ACCESS_VIOLATION;
                     }
 
@@ -332,7 +393,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     for (ulong i = 0; i < Count; i++)
                     {
                         ulong Entry = MemoryInformation + (i * ElementSize);
-                        ulong Va = Instance._emulator.ReadMemoryULong(Entry + 0x0);
+                        ulong Va = Instance.ReadPointer(Entry + 0x0);
 
                         ulong PageVa = AlignDownPage(Va);
 
@@ -356,7 +417,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                         ulong Flags = BuildFlags(IsCommitted, Protect, IsImage);
 
-                        if (!Instance._emulator.WriteMemory(Entry + 0x8, Flags))
+                        if (!Instance.WritePointer(Entry + (ulong)Instance.GuestPointerSize, Flags))
                             return NTSTATUS.STATUS_ACCESS_VIOLATION;
                     }
 
@@ -410,7 +471,12 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (MemoryInformationClass == MEMORY_INFORMATION_CLASS.MemoryRegionInformation)
                 {
-                    ulong RequiredLength = (ulong)StructSerializer.GetStructSize<MEMORY_REGION_INFORMATION>(Instance);
+                    // MEMORY_REGION_INFORMATION: three pointer-sized fields (AllocationBase / RegionSize /
+                    // CommitSize / PartitionId / NodePreference) ⇒ 0x1C on x86, 0x30 on x64. GetStructSize
+                    // always reports the x64 size, so size to the guest bitness explicitly — a 32-bit caller
+                    // passes a 0x1C buffer (kernelbase!SetUnhandledExceptionFilter's filter validator does
+                    // exactly this), and a 0x30 requirement would wrongly reject it with INFO_LENGTH_MISMATCH.
+                    ulong RequiredLength = Wow64 ? 0x1CUL : 0x30UL;
 
                     if (ReturnLength != 0)
                     {
@@ -487,13 +553,27 @@ namespace Brovan.Core.Emulation.OS.Windows
                     };
 
                     Span<byte> Data = Instance.WinHelper.Shared.GetSpan(RequiredLength);
-                    BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x00, 8), Info.AllocationBase);
-                    BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x08, 4), Info.AllocationProtect);
-                    BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x0C, 4), Info.RegionType);
-                    BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x10, 8), Info.RegionSize);
-                    BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x18, 8), Info.CommitSize);
-                    BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x20, 8), Info.PartitionId);
-                    BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x28, 8), Info.NodePreference);
+                    if (Wow64)
+                    {
+                        // x86 MEMORY_REGION_INFORMATION — 0x1C bytes, pointer fields 4-wide.
+                        BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x00, 4), (uint)Info.AllocationBase);
+                        BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x04, 4), Info.AllocationProtect);
+                        BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x08, 4), Info.RegionType);
+                        BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x0C, 4), (uint)Info.RegionSize);
+                        BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x10, 4), (uint)Info.CommitSize);
+                        BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x14, 4), (uint)Info.PartitionId);
+                        BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x18, 4), (uint)Info.NodePreference);
+                    }
+                    else
+                    {
+                        BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x00, 8), Info.AllocationBase);
+                        BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x08, 4), Info.AllocationProtect);
+                        BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x0C, 4), Info.RegionType);
+                        BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x10, 8), Info.RegionSize);
+                        BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x18, 8), Info.CommitSize);
+                        BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x20, 8), Info.PartitionId);
+                        BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x28, 8), Info.NodePreference);
+                    }
 
                     if (!Instance.WriteMemory(MemoryInformation, Data.Slice(0, (int)RequiredLength)))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -503,11 +583,13 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (MemoryInformationClass == MEMORY_INFORMATION_CLASS.MemoryImageInformation)
                 {
-                    ulong RequiredLength = (ulong)StructSerializer.GetStructSize<MEMORY_IMAGE_INFORMATION>(Instance);
+                    // MEMORY_IMAGE_INFORMATION: 0x0C on x86, 0x18 on x64 (fixed ulong fields ⇒ GetStructSize
+                    // always reports 0x18, so size to the guest explicitly).
+                    ulong RequiredLength = Wow64 ? 0x0CUL : 0x18UL;
 
                     if (ReturnLength != 0)
                     {
-                        if (!Instance._emulator.WriteMemory(ReturnLength, RequiredLength))
+                        if (!Instance.WritePointer(ReturnLength, RequiredLength))
                             return NTSTATUS.STATUS_ACCESS_VIOLATION;
                     }
 
@@ -529,10 +611,21 @@ namespace Brovan.Core.Emulation.OS.Windows
                         Flags = 0
                     };
 
+                    // MEMORY_IMAGE_INFORMATION: ImageBase (PVOID) + SizeOfImage (SIZE_T) are pointer-sized;
+                    // Flags is a ULONG bitfield union. x86 = 0x0C, x64 = 0x18.
                     Span<byte> Data = Instance.WinHelper.Shared.GetSpan(RequiredLength);
-                    BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x00, 8), Info.ImageBase);
-                    BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x08, 8), Info.SizeOfImage);
-                    BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x10, 8), Info.Flags);
+                    if (Wow64)
+                    {
+                        BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x00, 4), (uint)Info.ImageBase);
+                        BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x04, 4), (uint)Info.SizeOfImage);
+                        BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x08, 4), (uint)Info.Flags);
+                    }
+                    else
+                    {
+                        BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x00, 8), Info.ImageBase);
+                        BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x08, 8), Info.SizeOfImage);
+                        BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x10, 8), Info.Flags);
+                    }
 
                     if (!Instance.WriteMemory(MemoryInformation, Data.Slice(0, (int)RequiredLength)))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -542,10 +635,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if ((Instance.Settings.Flags & LogFlags.Important) != 0)
                     Instance.TriggerEventMessage($"[-] NtQueryVirtualMemory was called with an unsupported class: 0x{MemoryInformationClass:X} ({MemoryInformationClass}).", LogFlags.Important);
-            }
-            else if (Instance._binary.Architecture == BinaryArchitecture.x86)
-            {
-
             }
             return Instance.WinUnimplemented;
         }

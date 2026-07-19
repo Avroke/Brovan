@@ -116,6 +116,18 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// <param name="ProcessHandle">The process handle or current-process pseudo handle.</param>
         /// <param name="RequiredAccess">The access mask required for the operation.</param>
         /// <returns>True if the handle references the current process and has the requested access.</returns>
+        /// <summary>
+        /// True if the handle is the NtCurrentProcess pseudo-handle. On x86 the (HANDLE)-1 pseudo-handle
+        /// arrives as 0xFFFFFFFF (zero-extended from the 32-bit stack), on x64 as 0xFFFFFFFFFFFFFFFF, so a bare
+        /// <c>== ulong.MaxValue</c> comparison misses the WOW64 case — check every form.
+        /// </summary>
+        public bool IsCurrentProcessPseudoHandle(ulong ProcessHandle)
+            => ProcessHandle == HandleManager.CurrentProcess || ProcessHandle == uint.MaxValue || ProcessHandle == ulong.MaxValue;
+
+        /// <summary>True if the handle is the NtCurrentThread pseudo-handle ((HANDLE)-2), on either bitness.</summary>
+        public bool IsCurrentThreadPseudoHandle(ulong ThreadHandle)
+            => ThreadHandle == HandleManager.CurrentThread || ThreadHandle == 0xFFFFFFFEUL || ThreadHandle == 0xFFFFFFFFFFFFFFFEUL;
+
         public bool IsCurrentProcessHandle(ulong ProcessHandle, AccessMask RequiredAccess)
         {
             if (ProcessHandle == HandleManager.CurrentProcess || ProcessHandle == uint.MaxValue)
@@ -246,41 +258,40 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         /// <summary>
-        /// Writes a 64-bit IO_STATUS_BLOCK to emulated memory.
+        /// Writes an IO_STATUS_BLOCK sized for the guest bitness: 16 bytes on x64
+        /// ({ union { NTSTATUS Status; PVOID Pointer; }; ULONG_PTR Information; }) and 8 bytes on x86 /
+        /// WOW64 ({ NTSTATUS Status; ULONG Information; }). Writing the 16-byte form for a 32-bit guest
+        /// overruns the 8-byte guest structure and corrupts whatever follows it in memory — e.g. an
+        /// adjacent heap-resident RTL_CRITICAL_SECTION, whose zeroed DebugInfo then faults on the next
+        /// RtlEnterCriticalSection — so the written size MUST track GuestPointerSize.
         /// </summary>
+        /// <param name="Instance">The emulator instance (source of guest bitness + memory).</param>
         /// <param name="IoStatusBlockPtr">Address of the IO_STATUS_BLOCK.</param>
         /// <param name="Status">The operation status.</param>
         /// <param name="Information">The operation information value.</param>
-        public void WriteIoStatusBlock64(ulong IoStatusBlockPtr, NTSTATUS Status, ulong Information)
+        public void WriteIoStatusBlock(BinaryEmulator Instance, ulong IoStatusBlockPtr, NTSTATUS Status, ulong Information)
         {
-            Span<byte> Buffer = stackalloc byte[0x10];
-            BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x00, 8), (uint)Status);
-            BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x08, 8), Information);
-            Emulator._emulator.WriteMemory(IoStatusBlockPtr, Buffer);
+            if (Instance.GuestPointerSize == 8)
+            {
+                Span<byte> Buffer = stackalloc byte[0x10];
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x00, 8), (uint)Status);
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x08, 8), Information);
+                Instance._emulator.WriteMemory(IoStatusBlockPtr, Buffer);
+            }
+            else
+            {
+                Span<byte> Buffer = stackalloc byte[0x08];
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x00, 4), (uint)Status);
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x04, 4), (uint)Information);
+                Instance._emulator.WriteMemory(IoStatusBlockPtr, Buffer);
+            }
         }
 
         /// <summary>
-        /// Writes a 32-bit IO_STATUS_BLOCK to emulated memory.
+        /// Writes an explicit 32-bit IO_STATUS_BLOCK (8 bytes). Retained for the handlers that already
+        /// branch on bitness and select the writer themselves; new code should prefer the bitness-aware
+        /// <see cref="WriteIoStatusBlock"/>.
         /// </summary>
-        /// <param name="IoStatusBlockPtr">Address of the IO_STATUS_BLOCK.</param>
-        /// <param name="Status">The operation status.</param>
-        /// <param name="Information">The operation information value.</param>
-        public void WriteIoStatusBlock32(uint IoStatusBlockPtr, NTSTATUS Status, uint Information)
-        {
-            Span<byte> Buffer = stackalloc byte[0x08];
-            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x00, 4), (uint)Status);
-            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x04, 4), Information);
-            Emulator._emulator.WriteMemory(IoStatusBlockPtr, Buffer);
-        }
-
-        public void WriteIoStatusBlock64(BinaryEmulator Instance, ulong IoStatusBlockPtr, NTSTATUS Status, ulong Information)
-        {
-            Span<byte> Buffer = stackalloc byte[0x10];
-            BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x00, 8), (uint)Status);
-            BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x08, 8), Information);
-            Instance._emulator.WriteMemory(IoStatusBlockPtr, Buffer);
-        }
-
         public void WriteIoStatusBlock32(BinaryEmulator Instance, uint IoStatusBlockPtr, NTSTATUS Status, uint Information)
         {
             Span<byte> Buffer = stackalloc byte[0x08];
@@ -452,6 +463,15 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// <summary>
         /// Reads a 64-bit UNICODE_STRING from guest memory and returns the status the caller should propagate on failure.
         /// </summary>
+        /// <summary>
+        /// Reads a <c>UNICODE_STRING</c> at <paramref name="UnicodeStringPtr"/> using the guest's native layout:
+        /// 8 bytes (Buffer@0x04) on x86/WOW64, 16 bytes (Buffer@0x08) on x64.
+        /// </summary>
+        public bool TryReadUnicodeString(ulong UnicodeStringPtr, out string Value, out NTSTATUS Status)
+            => Emulator._binary.Architecture == BinaryArchitecture.x64
+                ? TryReadUnicodeString64(UnicodeStringPtr, out Value, out Status)
+                : TryReadUnicodeString32((uint)UnicodeStringPtr, out Value, out Status);
+
         public bool TryReadUnicodeString64(ulong UnicodeStringPtr, out string Value, out NTSTATUS Status)
         {
             Value = string.Empty;
@@ -747,7 +767,17 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// <summary>
         /// Resolves a 64-bit registry OBJECT_ATTRIBUTES value to a full NT registry path.
         /// </summary>
+        // Back-compat forwarder for the original x64-only name.
         public bool TryResolveRegistryObjectPath64(ulong ObjectAttributesPtr, NTSTATUS MemoryFailureStatus, NTSTATUS EmptyPathStatus, NTSTATUS InvalidRootStatus, out string KeyPath, out NTSTATUS Status)
+            => TryResolveRegistryObjectPath(ObjectAttributesPtr, MemoryFailureStatus, EmptyPathStatus, InvalidRootStatus, out KeyPath, out Status);
+
+        /// <summary>
+        /// Resolves the registry key path from an <c>OBJECT_ATTRIBUTES</c>, bitness-aware: the struct has 8-byte
+        /// fields (RootDirectory@0x08, ObjectName@0x10) and a 16-byte UNICODE_STRING on x64, and 4-byte fields
+        /// (RootDirectory@0x04, ObjectName@0x08) with an 8-byte UNICODE_STRING on x86/WOW64. A non-zero
+        /// RootDirectory is an open key handle the path is relative to (same for both bitnesses).
+        /// </summary>
+        public bool TryResolveRegistryObjectPath(ulong ObjectAttributesPtr, NTSTATUS MemoryFailureStatus, NTSTATUS EmptyPathStatus, NTSTATUS InvalidRootStatus, out string KeyPath, out NTSTATUS Status)
         {
             KeyPath = string.Empty;
             Status = NTSTATUS.STATUS_SUCCESS;
@@ -758,35 +788,61 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
             }
 
-            uint ObjectAttributesSize = (uint)Unsafe.SizeOf<OBJECT_ATTRIBUTES64>();
-            if (!Emulator.IsRegionMapped(ObjectAttributesPtr, ObjectAttributesSize))
+            ulong RootDirectory;
+            ulong ObjectNamePtr;
+            bool Is64 = Emulator._binary.Architecture == BinaryArchitecture.x64;
+
+            if (Is64)
             {
-                Status = MemoryFailureStatus;
-                return false;
+                uint ObjectAttributesSize = (uint)Unsafe.SizeOf<OBJECT_ATTRIBUTES64>();
+                if (!Emulator.IsRegionMapped(ObjectAttributesPtr, ObjectAttributesSize))
+                {
+                    Status = MemoryFailureStatus;
+                    return false;
+                }
+
+                if (!StructSerializer.ParseStruct(Emulator, ObjectAttributesPtr, out OBJECT_ATTRIBUTES64 Attributes))
+                {
+                    Status = MemoryFailureStatus;
+                    return false;
+                }
+
+                RootDirectory = Attributes.RootDirectory;
+                ObjectNamePtr = Attributes.ObjectName;
+            }
+            else
+            {
+                // x86 OBJECT_ATTRIBUTES is 0x18 bytes: Length@0, RootDirectory@0x04, ObjectName@0x08, ...
+                const uint ObjectAttributes32Size = 0x18;
+                if (!Emulator.IsRegionMapped(ObjectAttributesPtr, ObjectAttributes32Size))
+                {
+                    Status = MemoryFailureStatus;
+                    return false;
+                }
+
+                RootDirectory = Emulator.ReadMemoryUInt(ObjectAttributesPtr + 0x04);
+                ObjectNamePtr = Emulator.ReadMemoryUInt(ObjectAttributesPtr + 0x08);
             }
 
-            if (!StructSerializer.ParseStruct(Emulator, ObjectAttributesPtr, out OBJECT_ATTRIBUTES64 Attributes))
-            {
-                Status = MemoryFailureStatus;
-                return false;
-            }
-
-            if (Attributes.ObjectName == 0)
+            if (ObjectNamePtr == 0)
             {
                 Status = NTSTATUS.STATUS_INVALID_PARAMETER;
                 return false;
             }
 
-            if (!TryReadUnicodeString64(Attributes.ObjectName, out KeyPath, out Status))
+            bool NameRead = Is64
+                ? TryReadUnicodeString64(ObjectNamePtr, out KeyPath, out Status)
+                : TryReadUnicodeString32((uint)ObjectNamePtr, out KeyPath, out Status);
+            if (!NameRead)
             {
                 if (Status == NTSTATUS.STATUS_ACCESS_VIOLATION)
                     Status = MemoryFailureStatus;
                 return false;
             }
 
-            if (Attributes.RootDirectory != 0)
+            if (RootDirectory != 0)
             {
-                WinRegKey ParentKey = HandleManager.GetObjectByHandle<WinRegKey>(Attributes.RootDirectory);
+                WinRegKey ParentKey = HandleManager.GetObjectByHandle<WinRegKey>(RootDirectory);
                 if (ParentKey == null || string.IsNullOrEmpty(ParentKey.FullPath))
                 {
                     Status = InvalidRootStatus;
@@ -894,6 +950,13 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// <returns></returns>
         public ulong GetArg64(int Index, bool UInt = false)
         {
+            // 32-bit (WOW64) guest: every syscall argument is a 32-bit value on the stack (there is no
+            // register fast-path). Delegating here means the ~130 handlers that read args through GetArg64
+            // without an explicit x86 branch get correct 32-bit arguments for free. Handlers still owe the
+            // caller bitness-correct OUT-pointer WRITES (4 bytes on x86) — that is a per-handler concern.
+            if (Emulator._binary.Architecture != BinaryArchitecture.x64)
+                return GetArg32(Index);
+
             if (_argCacheValid)
             {
                 switch (Index)
@@ -1130,7 +1193,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const ulong UserDesktopInfoSize = 0x48;
         private const ulong UserPrimaryMonitorSize = 0x1000;
         private const ulong Win32ClientInfoX64Base = 0x800;
-        private const ulong Win32ClientInfoX86Base = 0x6CC;
+        // The 32-bit (WOW64) TEB's Win32ClientInfo base for the loaded SysWOW64 user32 build: user32's
+        // client-side stubs read pDeskInfo at TEB+0x820 and the paired field at TEB+0x828 (confirmed by
+        // disassembling GetShellWindow, RVA 0x42BB0: `mov ecx,[eax+0x820]; mov eax,[eax+0x828]`). With the
+        // slot model (pDeskInfo = slot 2, Desktop = slot 4, 4-byte slots) that pins the base to 0x818
+        // (0x818 + 2*4 = 0x820, 0x818 + 4*4 = 0x828). The old 0x6CC was an earlier-build offset that no
+        // loaded user32 export actually reads, so writes there were inert and GetShellWindow NULL-derefed
+        // pDeskInfo. Nothing in the emulator reads this base — it exists only for the guest user32 to read.
+        private const ulong Win32ClientInfoX86Base = 0x818;
         private const int Win32ClientInfoPDeskInfoSlot = 2;
         private const int Win32ClientInfoDesktopSlot = 4;
         private const int Win32ClientInfoActiveWindowSlot = 8;
@@ -1425,11 +1495,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Emulator == null)
                 return;
 
-            if (Emulator._binary == null || Emulator._binary.Architecture != BinaryArchitecture.x64)
-            {
-                Emulator.TriggerEventMessage("[-] InvokeException is only implemented for x64 right now.", LogFlags.Issues);
+            if (Emulator._binary == null)
                 return;
-            }
 
             if (ExceptionInformation == null)
                 ExceptionInformation = new ExceptionInformation { Status = Exception };
@@ -1461,7 +1528,126 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return;
             }
 
-            DispatchExceptionX64(dispatcher, Exception, ExceptionInformation);
+            if (Emulator._binary.Architecture == BinaryArchitecture.x64)
+                DispatchExceptionX64(dispatcher, Exception, ExceptionInformation);
+            else
+                DispatchExceptionX86(dispatcher, Exception, ExceptionInformation);
+        }
+
+        /// <summary>
+        /// x86 (WOW64 / native-32) exception dispatch. Builds a 32-bit EXCEPTION_RECORD (0x50) and CONTEXT
+        /// (0x2CC) on the thread stack and enters KiUserExceptionDispatcher exactly as the kernel does: the
+        /// dispatcher reads <c>[esp]=PEXCEPTION_RECORD</c> and <c>[esp+4]=PCONTEXT</c> (confirmed from the
+        /// stub prologue <c>mov ecx,[esp+4]; mov ebx,[esp]</c>). Mirrors <see cref="DispatchExceptionX64"/>.
+        /// </summary>
+        private void DispatchExceptionX86(ulong DispatcherAddress, NTSTATUS Exception, ExceptionInformation ExceptionInformation)
+        {
+            const uint ExceptionRecordSize = 0x50;      // x86 EXCEPTION_RECORD
+            const uint ContextSize = 0x2CC;             // x86 CONTEXT
+            const uint PointersSize = 0x8;              // [PEXCEPTION_RECORD][PCONTEXT]
+
+            const uint CONTEXT_i386 = 0x00010000;
+            const uint CONTEXT_CONTROL = 0x00000001;
+            const uint CONTEXT_INTEGER = 0x00000002;
+            const uint CONTEXT_SEGMENTS = 0x00000004;
+            const uint CONTEXT_DEBUG_REGISTERS = 0x00000010;
+
+            uint InitialEsp = Emulator.ReadRegister32(Registers.UC_X86_REG_ESP);
+            uint InitialEip = Emulator.ReadRegister32(Registers.UC_X86_REG_EIP);
+            uint InitialEFlags = Emulator.ReadRegister32(Registers.UC_X86_REG_EFLAGS);
+
+            ulong AllocationSize = BinaryEmulator.AlignUp(PointersSize + ExceptionRecordSize + ContextSize, 0x10);
+            uint NewEsp = (uint)AlignDown(InitialEsp - AllocationSize, 0x10);
+
+            EmulatedThread Thread = Emulator.CurrentThread;
+            if (Thread != null)
+            {
+                ulong StackLow = Thread.StackAddress;
+                ulong StackHigh = Thread.StackAddress + Thread.StackSize;
+                if (NewEsp < StackLow || (NewEsp + AllocationSize) > StackHigh)
+                {
+                    if ((Emulator.Settings.Flags & LogFlags.Issues) != 0)
+                        Emulator.TriggerEventMessage($"[-] InvokeException (x86) failed: insufficient stack (ESP=0x{InitialEsp:X}, NewESP=0x{NewEsp:X}).", LogFlags.Issues);
+                    return;
+                }
+            }
+
+            if (!Emulator.IsRegionMapped(NewEsp, AllocationSize))
+            {
+                ulong PageStart = NewEsp & ~0xFFFUL;
+                ulong PageEnd = BinaryEmulator.AlignUp(NewEsp + AllocationSize, 0x1000);
+                for (ulong Page = PageStart; Page < PageEnd; Page += 0x1000)
+                {
+                    if (!Emulator.IsRegionMapped(Page, 1))
+                        Emulator._emulator.MapMemory(Page, 0x1000, MemoryProtection.ReadWrite);
+                }
+                if (!Emulator.IsRegionMapped(NewEsp, AllocationSize))
+                    return;
+            }
+
+            WriteZeroMemory(NewEsp, (uint)AllocationSize);
+
+            ulong ExceptionRecordAddress = NewEsp + PointersSize;
+            ulong ContextAddress = ExceptionRecordAddress + ExceptionRecordSize;
+
+            // Stack pointers the dispatcher reads.
+            Emulator._emulator.WriteMemory(NewEsp + 0, (uint)ExceptionRecordAddress, 4);
+            Emulator._emulator.WriteMemory(NewEsp + 4, (uint)ContextAddress, 4);
+
+            // EXCEPTION_RECORD (x86).
+            Span<byte> Record = Shared.GetSpan(ExceptionRecordSize);
+            Record.Clear();
+            WriteUInt32(Record, 0x00, (uint)Exception);      // ExceptionCode
+            WriteUInt32(Record, 0x04, 0u);                   // ExceptionFlags
+            WriteUInt32(Record, 0x08, 0u);                   // ExceptionRecord (chained)
+            WriteUInt32(Record, 0x0C, InitialEip);           // ExceptionAddress
+            ulong[] Parameters = ExceptionInformation?.Parameters ?? Array.Empty<ulong>();
+            int Count = Math.Min(Parameters.Length, 15);
+            WriteUInt32(Record, 0x10, (uint)Count);          // NumberParameters
+            for (int i = 0; i < Count; i++)
+                WriteUInt32(Record, 0x14 + (i * 4), (uint)Parameters[i]);
+            Emulator.WriteMemory(ExceptionRecordAddress, Record);
+
+            // CONTEXT (x86).
+            Span<byte> Context = Shared.GetSpan(ContextSize);
+            Context.Clear();
+            WriteUInt32(Context, 0x00, CONTEXT_i386 | CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_SEGMENTS | CONTEXT_DEBUG_REGISTERS);
+            WriteUInt32(Context, 0x04, Emulator.ReadRegister32(Registers.UC_X86_REG_DR0));
+            WriteUInt32(Context, 0x08, Emulator.ReadRegister32(Registers.UC_X86_REG_DR1));
+            WriteUInt32(Context, 0x0C, Emulator.ReadRegister32(Registers.UC_X86_REG_DR2));
+            WriteUInt32(Context, 0x10, Emulator.ReadRegister32(Registers.UC_X86_REG_DR3));
+            WriteUInt32(Context, 0x14, Emulator.ReadRegister32(Registers.UC_X86_REG_DR6));
+            WriteUInt32(Context, 0x18, Emulator.ReadRegister32(Registers.UC_X86_REG_DR7));
+            WriteUInt32(Context, 0x8C, Emulator.ReadRegister32(Registers.UC_X86_REG_GS));
+            WriteUInt32(Context, 0x90, Emulator.ReadRegister32(Registers.UC_X86_REG_FS));
+            WriteUInt32(Context, 0x94, Emulator.ReadRegister32(Registers.UC_X86_REG_ES));
+            WriteUInt32(Context, 0x98, Emulator.ReadRegister32(Registers.UC_X86_REG_DS));
+            WriteUInt32(Context, 0x9C, Emulator.ReadRegister32(Registers.UC_X86_REG_EDI));
+            WriteUInt32(Context, 0xA0, Emulator.ReadRegister32(Registers.UC_X86_REG_ESI));
+            WriteUInt32(Context, 0xA4, Emulator.ReadRegister32(Registers.UC_X86_REG_EBX));
+            WriteUInt32(Context, 0xA8, Emulator.ReadRegister32(Registers.UC_X86_REG_EDX));
+            WriteUInt32(Context, 0xAC, Emulator.ReadRegister32(Registers.UC_X86_REG_ECX));
+            WriteUInt32(Context, 0xB0, Emulator.ReadRegister32(Registers.UC_X86_REG_EAX));
+            WriteUInt32(Context, 0xB4, Emulator.ReadRegister32(Registers.UC_X86_REG_EBP));
+            WriteUInt32(Context, 0xB8, InitialEip);
+            WriteUInt32(Context, 0xBC, Emulator.ReadRegister32(Registers.UC_X86_REG_CS));
+            WriteUInt32(Context, 0xC0, InitialEFlags);
+            WriteUInt32(Context, 0xC4, InitialEsp);
+            WriteUInt32(Context, 0xC8, Emulator.ReadRegister32(Registers.UC_X86_REG_SS));
+            Emulator.WriteMemory(ContextAddress, Context);
+
+            Emulator.WriteRegister32(Registers.UC_X86_REG_ESP, NewEsp);
+            Emulator.WriteRegister32(Registers.UC_X86_REG_EIP, (uint)DispatcherAddress);
+
+            EmulatedThread EmuThread = Emulator.CurrentThread;
+            WindowsThreadState St = WinEmulatedThread.GetState(EmuThread);
+            St.DispatchException = true;
+            St.IsHandlingException = true;
+            if (St.ExceptionNesting <= 0)
+                St.ExceptionNesting = 1;
+            St.ExceptionInformation = ExceptionInformation;
+            EmuThread.ExitCode = (int)Exception;
+            Emulator.Threads[(uint)Emulator.CurrentThreadId] = EmuThread;
         }
 
         private static ulong AlignDown(ulong Value, ulong Align)
@@ -4251,6 +4437,16 @@ namespace Brovan.Core.Emulation.OS.Windows
             AddSyntheticRegistryKeyTrusted("\\Registry\\User\\.DEFAULT", KeyCache, DefaultHive);
             AddSyntheticRegistryKeyTrusted(UserRoot + "\\" + CurrentUserSid, KeyCache, DefaultHive);
             AddSyntheticRegistryKeyTrusted(ExplorerRoot + "\\SessionInfo\\0", KeyCache, DefaultHive);
+            // HKCU\Software\Classes\Local Settings — exists on every fresh Windows install; combase's
+            // CoInitializeSecurity singleton-init helper (sub_10B0C8C9 -> sub_B) opens this key via
+            // RegOpenCurrentUser + RegOpenKeyExW and stores the returned HKEY in its class-factory-table
+            // singleton (combase RVA 0x2420D8). Without this key the RegOpenKeyExW call returns
+            // NAME_NOT_FOUND, the OUT PHKEY stays NULL, sub_10B119C0 short-circuits past the interlocked-
+            // init at sub_10AA0528, and a later __thiscall through the still-NULL singleton NULL-derefs
+            // during CoInitializeSecurity — al-khaser_x86's Generic-Sandbox/VM-Detection frontier before
+            // this fix. Adding the key is a real realism improvement (matches every real Win10 system),
+            // not a per-sample workaround.
+            AddSyntheticRegistryKeyTrusted(UserRoot + "\\Software\\Classes\\Local Settings", KeyCache, DefaultHive);
             SetSyntheticRegistryStringTrusted(UserRoot + "\\Volatile Environment", "USERPROFILE", 2, UserProfile, KeyCache, DefaultHive);
             SetSyntheticRegistryStringTrusted(UserRoot + "\\Volatile Environment", "HOMEDRIVE", 1, "C:", KeyCache, DefaultHive);
             SetSyntheticRegistryStringTrusted(UserRoot + "\\Volatile Environment", "HOMEPATH", 1, "\\Users\\User", KeyCache, DefaultHive);
@@ -5058,8 +5254,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             foreach (WinRegistryNotification Notification in Completed)
             {
-                if (Notification.IoStatusBlock != 0 && Emulator.IsRegionMapped(Notification.IoStatusBlock, 0x10))
-                    WriteIoStatusBlock64(Emulator, Notification.IoStatusBlock, NTSTATUS.STATUS_SUCCESS, 0);
+                // IO_STATUS_BLOCK is guest-bitness-sized (8 bytes on x86 / 16 on x64). Requiring the x64 size
+                // would skip an otherwise-valid 8-byte IOSB that sits within 8 bytes of a page end on WOW64,
+                // leaving the guest's NtNotifyChangeKey wait forever incomplete.
+                if (Notification.IoStatusBlock != 0 && Emulator.IsRegionMapped(Notification.IoStatusBlock, (ulong)(Emulator.GuestPointerSize * 2)))
+                    WriteIoStatusBlock(Emulator, Notification.IoStatusBlock, NTSTATUS.STATUS_SUCCESS, 0);
 
                 if (Notification.EventHandle != 0)
                 {
@@ -5273,6 +5472,17 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return null;
 
             return HandleManager.GetObjectByHandle<WinSemaphore>(Handle);
+        }
+
+        public WinHandle CreatePartitionHandle(string Name, AccessMask Permissions)
+        {
+            if (string.IsNullOrEmpty(Name))
+                Name = "SystemPartition";
+
+            WinPartition Partition = new WinPartition { Name = Name };
+            WinHandle Handle = HandleManager.AddHandle(Partition, Permissions);
+            AddWinHandle(Handle);
+            return Handle;
         }
 
         public WinHandle CreateSectionHandle(string Name, ulong Size, uint Protection, uint Attributes, string Path, ulong BackingAddress, AccessMask Permissions)

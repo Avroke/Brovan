@@ -90,6 +90,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private const ulong FirstDeviceContextHandle = 0x770001;
         private const uint PM_REMOVE = 0x0001;
         private const int MSG64_SIZE = 48;
+        private const int MSG32_SIZE = 28;
         private const int PAINTSTRUCT64_SIZE = 72;
         private const int MaxWindowTextBytes = 0x1000;
 
@@ -315,6 +316,26 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         internal static bool WriteMessage(BinaryEmulator Instance, ulong Address, Win32kMessage Message)
         {
+            // MSG is bitness-dependent: 28 bytes on x86 (all fields 4-wide) vs 48 on x64 (HWND/WPARAM/LPARAM
+            // pointer-sized + alignment). Writing the x64 layout into a 32-bit caller's MSG overruns it and
+            // scrambles wParam/lParam/pt, so size it to the guest.
+            if (Instance.GuestPointerSize == 4)
+            {
+                if (Address == 0 || !Instance.IsRegionMapped(Address, MSG32_SIZE))
+                    return false;
+
+                Span<byte> Buffer32 = Instance.WinHelper.Shared.GetSpan(MSG32_SIZE);
+                Buffer32.Clear();
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer32.Slice(0x00, 4), (uint)Message.Hwnd);
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer32.Slice(0x04, 4), Message.Message);
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer32.Slice(0x08, 4), (uint)Message.WParam);
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer32.Slice(0x0C, 4), (uint)Message.LParam);
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer32.Slice(0x10, 4), Message.Time);
+                BinaryPrimitives.WriteInt32LittleEndian(Buffer32.Slice(0x14, 4), Message.X);
+                BinaryPrimitives.WriteInt32LittleEndian(Buffer32.Slice(0x18, 4), Message.Y);
+                return Instance.WriteMemory(Address, Buffer32.Slice(0, MSG32_SIZE));
+            }
+
             if (Address == 0 || !Instance.IsRegionMapped(Address, MSG64_SIZE))
                 return false;
 
@@ -333,6 +354,28 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal static bool TryReadMessage(BinaryEmulator Instance, ulong Address, out Win32kMessage Message)
         {
             Message = default;
+
+            // Bitness-dependent MSG layout — 28 bytes on x86 (all fields 4-wide), 48 on x64.
+            if (Instance.GuestPointerSize == 4)
+            {
+                if (Address == 0 || !Instance.IsRegionMapped(Address, MSG32_SIZE))
+                    return false;
+
+                Span<byte> Buffer32 = Instance.WinHelper.Shared.GetSpan(MSG32_SIZE);
+                if (!Instance.ReadMemory(Address, Buffer32.Slice(0, MSG32_SIZE), MSG32_SIZE))
+                    return false;
+
+                Message = new Win32kMessage(
+                    BinaryPrimitives.ReadUInt32LittleEndian(Buffer32.Slice(0x00, 4)),
+                    BinaryPrimitives.ReadUInt32LittleEndian(Buffer32.Slice(0x04, 4)),
+                    BinaryPrimitives.ReadUInt32LittleEndian(Buffer32.Slice(0x08, 4)),
+                    BinaryPrimitives.ReadUInt32LittleEndian(Buffer32.Slice(0x0C, 4)),
+                    BinaryPrimitives.ReadUInt32LittleEndian(Buffer32.Slice(0x10, 4)),
+                    BinaryPrimitives.ReadInt32LittleEndian(Buffer32.Slice(0x14, 4)),
+                    BinaryPrimitives.ReadInt32LittleEndian(Buffer32.Slice(0x18, 4)));
+                return true;
+            }
+
             if (Address == 0 || !Instance.IsRegionMapped(Address, MSG64_SIZE))
                 return false;
 

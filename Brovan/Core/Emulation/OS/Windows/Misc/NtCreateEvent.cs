@@ -6,7 +6,8 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
+            // Bitness-agnostic: args via GetArg64 (bitness-aware); the OUT event HANDLE is pointer-sized.
+            if (Instance._binary.Architecture == BinaryArchitecture.x64 || Instance._binary.Architecture == BinaryArchitecture.x86)
             {
                 ulong EventHandlePtr = Instance.WinHelper.GetArg64(0);
                 ulong DesiredAccess = (uint)Instance.WinHelper.GetArg64(1);
@@ -17,7 +18,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (EventHandlePtr == 0)
                     return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-                if (!Instance.IsRegionMapped(EventHandlePtr, 8))
+                if (!Instance.IsRegionMapped(EventHandlePtr, (ulong)Instance.GuestPointerSize))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                 if (EventType > 1)
@@ -25,7 +26,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 AccessMask Permissions = (AccessMask)(uint)DesiredAccess;
                 WinHandle Handle = Instance.WinHelper.CreateEventHandle(null, EventType, InitialState, Permissions);
-                if (!Instance._emulator.WriteMemory(EventHandlePtr, (ulong)Handle.Handle))
+                if (!Instance.WritePointer(EventHandlePtr, (ulong)Handle.Handle))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                 return NTSTATUS.STATUS_SUCCESS;
