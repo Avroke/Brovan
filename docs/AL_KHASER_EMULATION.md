@@ -1930,6 +1930,36 @@ is dequeued and run, resetting the counter), so only a genuinely deadlocked idle
 Both now run all 15 sections and reach a **clean terminus with the full result set** instead of
 hanging; GOOD/BAD counts unchanged. **al-khaser x86/WOW64 now emulates end-to-end and exits
 cleanly, at parity with x64.**
+
+**BAD-probe parity — closing the x86↔x64 delta.** With the run clean end-to-end, the residual
+false positives are: **x64 = 11 BAD, x86 = 18 BAD**. The 11 shared BADs are the "honest reports"
+both bitnesses give — the module-enumeration walks (`GetModuleInformation`, hidden-modules,
+`LdrEnumerateLoadedModules`, `EnumProcessModulesEx [ALL]/[64-bit]`) that faithfully report the
+loader-mapped system DLLs, plus `VM Driver Services`, `lack of user input`, `CPU fan via WMI`, and
+the two `ACPI table` probes. The **7 x86-only BADs** are WOW64 gaps:
+
+- **`FindWindow("VBoxTrayToolWndClass")` — FIXED** (`NtUserFindWindowEx` was x64-gated; the 32-bit
+  wrapper mis-read `NOT_SUPPORTED` as a found HWND → phantom VBox window). Now bitness-aware
+  (`UNICODE_STRING` 8-byte on x86 / 16 on x64) → the probe returns NULL → **GOOD**. Result:
+  **x86 237 → 238 GOOD / 18 → 17 BAD**, x64 unchanged at 244.
+- **`Checking mouse movement` / `Check if time has been accelerated` / `Checking NtYieldExecution`
+  (3 BADs, timing) — blocked on a WOW64 syscall-return-EIP frontier.** These all fail because
+  `NtDelayExecution` (0x60034) and `NtYieldExecution` (0x10046) are x64-gated → `NOT_SUPPORTED` on
+  WOW64, so Sleep doesn't advance virtual time (elapsed ≈ 0 → "time accelerated") and the yield
+  probe counts every call as manipulated. **Naive gate removal crashes** Debugger Detection at
+  `0xC0000005` (~15.75M): both handlers manually advance EIP via `WriteRegister(IPRegister,
+  GetSyscallRip(...) + 2)`, which is correct for the 2-byte x64 `syscall` but mis-lands on the
+  WOW64 stub (the working `NtUserGetMessage` never hits this because its PENDING park sets
+  `IP = SyscallRip` to *re-run*, not advance). Correct fix needs the WOW64 syscall-return EIP
+  semantics (likely: let the dispatcher advance on WOW64 instead of the handler) — a deliberate,
+  separately-validated change, reverted for now to hold the 238-GOOD line.
+- **TLS process/thread attach callback (2 BADs)** — the guest 32-bit `OutputDebugString` raises
+  `DBG_PRINTEXCEPTION_C` (0x40010006) / `DBG_PRINTEXCEPTION_WIDE_C` (0x4001000A) via
+  `NtRaiseException`; x64 intercepts OutputDebugString and raises neither. The TLS check then
+  diverges (x64 GOOD / x86 BAD). Known-hard OutputDebugString-exception item.
+- **`EnumProcessModulesEx [32-bit]` (1 BAD)** — the x86-only module-enumeration variant, same
+  "honest report" class as the shared enumeration BADs.
+
 Nearby gaps still `NOT_SUPPORTED` on x86:
 `NtQueryInformationThread` (ThreadHideFromDebugger / ThreadDynamicCodePolicyInfo),
 `NtQuerySystemInformation` class `0x73`. (`NtQueryVirtualMemory`
