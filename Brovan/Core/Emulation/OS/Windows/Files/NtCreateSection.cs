@@ -9,7 +9,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
+            // Bitness-agnostic: args via GetArg64; the OUT section HANDLE is pointer-sized; MaximumSize is a
+            // LARGE_INTEGER (8 bytes on both). Needed for the WOW64 loader to map the SysWOW64 DLL images.
+            if (Instance._binary.Architecture != BinaryArchitecture.x64 && Instance._binary.Architecture != BinaryArchitecture.x86)
                 return Instance.WinUnimplemented;
 
             ulong SectionHandlePtr = Instance.WinHelper.GetArg64(0);
@@ -23,7 +25,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (SectionHandlePtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (!Instance.IsRegionMapped(SectionHandlePtr, 8))
+            if (!Instance.IsRegionMapped(SectionHandlePtr, (ulong)Instance.GuestPointerSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             bool IsImage = (AllocationAttributes & SEC_IMAGE) != 0;
@@ -105,7 +107,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             WinHandle Handle = Instance.WinHelper.CreateSectionHandle(null, Size, SectionPageProtection, AllocationAttributes, Path, BackingAddress, (AccessMask)(uint)DesiredAccess);
 
-            if (!Instance._emulator.WriteMemory(SectionHandlePtr, (ulong)Handle.Handle))
+            if (!Instance.WritePointer(SectionHandlePtr, (ulong)Handle.Handle))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)

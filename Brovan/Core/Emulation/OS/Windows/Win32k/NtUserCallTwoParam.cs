@@ -25,9 +25,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
-
+            // Bitness-agnostic: args via GetArg64 (x86 stack / x64 regs), the POINT write is two explicit
+            // 4-byte fields (LONG x; LONG y — 8 bytes on both bitnesses), and the return goes through
+            // SetRawSyscallReturn. No EIP/stack manipulation, so this is safe on WOW64 exactly like the
+            // read-only query syscalls. Was gated to x64 only, so on WOW64 GetCursorPos got
+            // STATUS_NOT_SUPPORTED, the caller's POINT stayed (0,0), and al-khaser's "mouse movement"
+            // human-presence probe saw an unmoving cursor and deduced a sandbox (BAD).
             ulong Param1 = Instance.WinHelper.GetArg64(0);
             ulong Code = Instance.WinHelper.GetArg64(2);
 

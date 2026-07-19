@@ -685,6 +685,50 @@ namespace Brovan.Core.Emulation.OS.Windows
                         {
                             return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
                         }
+                    case PROCESSINFOCLASS.ProcessDebugObjectHandle:
+                        // WOW64: the debug-object HANDLE is pointer-sized (4 bytes on x86). A process that is
+                        // not being debugged has no debug object, so ntdll writes a NULL handle and returns
+                        // STATUS_PORT_NOT_SET (mirrors the x64 branch above). al-khaser's ProcessDebugObjectHandle
+                        // probe reads (SUCCESS && handle!=0) as "debugger present"; more importantly
+                        // kernel32!UnhandledExceptionFilter queries this class to decide whether a debugger is
+                        // attached — leaving it unimplemented made UEF believe a debugger was present, skip the
+                        // SetUnhandledExceptionFilter-registered filter, and let the UnhandledExcepFilterTest
+                        // exception go unhandled → process terminated with STATUS_FLOAT_DIVIDE_BY_ZERO.
+                        if (OutBufferLength < 4)
+                        {
+                            SetReturnLength(4);
+                            return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                        }
+                        if (OutBufferPtr == 0 || !Instance.IsRegionMapped(OutBufferPtr, 4))
+                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                        if (!CurrentProcess)
+                        {
+                            if (!Instance.WinHelper.ValidProcessHandle(ProcessHandle))
+                                return NTSTATUS.STATUS_INVALID_HANDLE;
+                            if (Instance.WinHelper.GetProcessByHandle(ProcessHandle, AccessMask.ProcessQueryLimitedInformation | AccessMask.ProcessQueryInformation) == null)
+                                return NTSTATUS.STATUS_ACCESS_DENIED;
+                        }
+                        if (!Instance.WinHelper.WriteZeroMemory(OutBufferPtr, 4))
+                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                        SetReturnLength(4);
+                        if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                            Instance.TriggerEventMessage($"[!] NtQueryInformationProcess (x86): Queried debug object handle.", LogFlags.Syscall);
+                        return NTSTATUS.STATUS_PORT_NOT_SET;
+                    case PROCESSINFOCLASS.ProcessDebugFlags:
+                        // NoDebugInherit flag (DWORD): 1 = normal (no debugger), 0 = debugger with inherit set.
+                        // al-khaser treats (SUCCESS && value==0) as detected, so SUCCESS+1 is the honest answer
+                        // and matches the x64 branch.
+                        if (OutBufferLength < 4)
+                        {
+                            SetReturnLength(4);
+                            return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                        }
+                        if (OutBufferPtr == 0 || !Instance.IsRegionMapped(OutBufferPtr, 4))
+                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                        if (!Instance._emulator.WriteMemory(OutBufferPtr, 1u, 4))
+                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                        SetReturnLength(4);
+                        return NTSTATUS.STATUS_SUCCESS;
                     case PROCESSINFOCLASS.ProcessWow64Information:
                         if (OutBufferLength < 4)
                         {
@@ -726,7 +770,240 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 }
                             }
                         }
+                    case PROCESSINFOCLASS.ProcessCookie:
+                        {
+                            // 4-byte DWORD on both bitnesses. The loader queries it early to seed
+                            // RtlEncodePointer; without it LdrpInitialize fails and raises a hard error.
+                            if (OutBufferLength < 4)
+                                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                            if (!Instance.IsRegionMapped(OutBufferPtr, 4))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                            if (Instance.ProcessCookie == 0)
+                                Instance.ProcessCookie = (uint)Instance.SeededRandom.Next(1, int.MaxValue);
+                            if (!Instance._emulator.WriteMemory(OutBufferPtr, Instance.ProcessCookie, 4))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                            SetReturnLength(4);
+                            return NTSTATUS.STATUS_SUCCESS;
+                        }
+                    case PROCESSINFOCLASS.ProcessDefaultHardErrorMode:
+                        {
+                            // ULONG on both bitnesses. Default hard-error mode = 1 (SEM enabled).
+                            if (OutBufferLength < 4)
+                                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                            if (!Instance.IsRegionMapped(OutBufferPtr, 4))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                            if (!Instance._emulator.WriteMemory(OutBufferPtr, 1u, 4))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                            SetReturnLength(4);
+                            return NTSTATUS.STATUS_SUCCESS;
+                        }
+                    case PROCESSINFOCLASS.ProcessExecuteFlags:
+                        {
+                            // ULONG MEM_EXECUTE_OPTION flags. The loader (LdrpInitializeExecutionOptions)
+                            // queries this to decide NX policy. 0 = no special flags (DEP default), which keeps
+                            // the loader on its normal path.
+                            if (OutBufferLength < 4)
+                                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                            if (!Instance.IsRegionMapped(OutBufferPtr, 4))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                            if (!Instance._emulator.WriteMemory(OutBufferPtr, 0u, 4))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                            SetReturnLength(4);
+                            return NTSTATUS.STATUS_SUCCESS;
+                        }
+                    case PROCESSINFOCLASS.ProcessImageInformation:
+                        {
+                            // x86 SECTION_IMAGE_INFORMATION — 0x30 bytes (the three pointer fields
+                            // TransferAddress / MaximumStackSize / CommittedStackSize are 4 wide). The loader
+                            // queries it to validate the main image; a failure here NULL-derefs LdrpInitialize.
+                            const uint StructSize = 0x30;
+                            if (OutBufferLength < StructSize)
+                                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                            if (!Instance.IsRegionMapped(OutBufferPtr, StructSize))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                            var Pe = Instance._binary.PE;
+                            uint TransferAddress = (uint)(Instance.WinHelper.WinModules[0].MappedBase + Instance._binary.EntryPoint);
+                            uint SubSystemVersion = ((uint)Pe.OptionalHeader32.MinorSubsystemVersion << 16) | (uint)Pe.OptionalHeader32.MajorSubsystemVersion;
+
+                            Span<byte> Buffer = GetSharedWriteBuffer(Instance, StructSize);
+                            WriteUInt32(Buffer, 0x00, TransferAddress);                 // TransferAddress
+                            WriteUInt32(Buffer, 0x04, 0u);                              // ZeroBits
+                            WriteUInt32(Buffer, 0x08, (uint)Instance.StackSize);        // MaximumStackSize
+                            WriteUInt32(Buffer, 0x0C, (uint)Instance.StackSize);        // CommittedStackSize
+                            WriteUInt32(Buffer, 0x10, (uint)Pe.OptionalHeader32.Subsystem); // SubSystemType
+                            WriteUInt32(Buffer, 0x14, SubSystemVersion);                // SubSystemVersion
+                            WriteUInt32(Buffer, 0x18, 0u);                              // GpValue
+                            WriteUInt16(Buffer, 0x1C, (ushort)Pe.FileHeader.Characteristics);        // ImageCharacteristics
+                            WriteUInt16(Buffer, 0x1E, (ushort)Pe.OptionalHeader32.DllCharacteristics); // DllCharacteristics
+                            WriteUInt16(Buffer, 0x20, (ushort)Pe.FileHeader.Machine);   // Machine
+                            Buffer[0x22] = 1;                                           // ImageContainsCode
+                            Buffer[0x23] = 0;                                           // ImageFlags
+                            WriteUInt32(Buffer, 0x24, 0u);                              // LoaderFlags
+                            WriteUInt32(Buffer, 0x28, 0u);                              // ImageFileSize
+                            WriteUInt32(Buffer, 0x2C, 0u);                              // CheckSum
+
+                            if (!Instance.WriteMemory(OutBufferPtr, Buffer))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                            SetReturnLength(StructSize);
+                            return NTSTATUS.STATUS_SUCCESS;
+                        }
+                    case (PROCESSINFOCLASS)52:
+                        {
+                            // ProcessMitigationPolicy — PROCESS_MITIGATION_POLICY_INFORMATION is
+                            // { PROCESS_MITIGATION_POLICY Policy; <policy union> }, 8 bytes on x86 (the WOW64
+                            // loader / GetProcessMitigationPolicy pass len=0x8 with the policy id in the first
+                            // DWORD). The kernel fills the union with the process's current policy word. Report
+                            // the sandbox's realistic state: DEP permanently enabled (policy 0), every other
+                            // mitigation at its default (0) — mirrors the x64 class-52 handler above.
+                            const uint StructSize = 8;
+                            if (OutBufferLength < StructSize)
+                            {
+                                SetReturnLength(StructSize);
+                                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                            }
+
+                            if (!Instance.IsRegionMapped(OutBufferPtr, StructSize))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                            uint Policy = Instance.ReadMemoryUInt(OutBufferPtr);
+                            uint PolicyFlags = Policy == 0 ? 1u : 0u; // ProcessDEPPolicy: DEP permanently on; others default/off.
+
+                            Span<byte> Buffer = GetSharedWriteBuffer(Instance, StructSize);
+                            WriteUInt32(Buffer, 0, Policy);
+                            WriteUInt32(Buffer, 4, PolicyFlags);
+
+                            if (!Instance.WriteMemory(OutBufferPtr, Buffer))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                            SetReturnLength(StructSize);
+                            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                                Instance.TriggerEventMessage($"[+] NtQueryInformationProcess (x86): ProcessMitigationPolicy ({Policy})", LogFlags.Syscall);
+                            return NTSTATUS.STATUS_SUCCESS;
+                        }
+
+                    case PROCESSINFOCLASS.ProcessImageFileNameWin32:
+                        // Bitness-aware helper: writes an 8-byte UNICODE_STRING (Buffer @ +4) on x86 and a
+                        // 16-byte one (Buffer @ +8) on x64. Same output shape and semantics as the x64 branch.
+                        return QueryProcessImageFileNameWin32(Instance, ProcessHandle, OutBufferPtr, OutBufferLength, SetReturnLength);
+
+                    case PROCESSINFOCLASS.ProcessQuotaLimits:
+                        {
+                            // QUOTA_LIMITS on x86: 5 * SIZE_T (4) + LARGE_INTEGER (8) = 28 bytes (0x1C).
+                            // Fields: PagedPoolLimit / NonPagedPoolLimit / MinimumWorkingSetSize /
+                            // MaximumWorkingSetSize / PagefileLimit / TimeLimit. A real Win10 desktop
+                            // process reports "unlimited" pool/pagefile limits (SIZE_T max value),
+                            // 200-page min working set, ~1345-page max, TimeLimit=0. al-khaser's
+                            // Generic-Sandbox/VM check looks for anomalies — returning honest
+                            // "unlimited/default" values keeps it on the not-detected path.
+                            const uint StructSize = 0x1C;
+                            if (OutBufferLength < StructSize)
+                            {
+                                SetReturnLength(StructSize);
+                                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                            }
+                            if (OutBufferPtr == 0 || !Instance.IsRegionMapped(OutBufferPtr, StructSize))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                            Span<byte> Buffer = GetSharedWriteBuffer(Instance, StructSize);
+                            Buffer.Slice(0, (int)StructSize).Clear();
+                            const uint SizeMax = 0xFFFFFFFFu;   // "unlimited" on 32-bit
+                            const uint MinWs   = 200 * 4096;    // 200 pages
+                            const uint MaxWs   = 1345 * 4096;   // 1345 pages (standard Win10 default)
+                            WriteUInt32(Buffer, 0x00, SizeMax); // PagedPoolLimit
+                            WriteUInt32(Buffer, 0x04, SizeMax); // NonPagedPoolLimit
+                            WriteUInt32(Buffer, 0x08, MinWs);   // MinimumWorkingSetSize
+                            WriteUInt32(Buffer, 0x0C, MaxWs);   // MaximumWorkingSetSize
+                            WriteUInt32(Buffer, 0x10, SizeMax); // PagefileLimit
+                            // TimeLimit (LARGE_INTEGER at +0x14): left zero — "no CPU time limit".
+                            if (!Instance.WriteMemory(OutBufferPtr, Buffer))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                            SetReturnLength(StructSize);
+                            return NTSTATUS.STATUS_SUCCESS;
+                        }
+
+                    case PROCESSINFOCLASS.ProcessImageFileName:
+                        {
+                            // 32-bit UNICODE_STRING is 8 bytes (Length 2, Max 2, Buffer 4). Callers query with
+                            // OutBufferPtr=NULL first to get the required length, so a null buffer + non-zero
+                            // length is legitimate. Mirrors the x64 branch above but uses UNICODE_STRING32 and
+                            // a pointer-sized Buffer.
+                            const uint HeaderSize = 8;
+                            if (OutBufferLength < HeaderSize)
+                            {
+                                SetReturnLength(HeaderSize);
+                                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                            }
+
+                            string GuestDos;
+                            if (CurrentProcess)
+                            {
+                                GuestDos = Instance.WinHelper.WinModules.Count > 0 && !string.IsNullOrEmpty(Instance.WinHelper.WinModules[0].Path)
+                                    ? Instance.WinHelper.WinModules[0].Path
+                                    : Instance._binary.Location;
+                            }
+                            else
+                            {
+                                if (!Instance.WinHelper.ValidProcessHandle(ProcessHandle))
+                                    return NTSTATUS.STATUS_INVALID_HANDLE;
+                                WinProcess Process = Instance.WinHelper.GetProcessByHandle(ProcessHandle, AccessMask.ProcessQueryLimitedInformation | AccessMask.ProcessQueryInformation);
+                                if (Process == null)
+                                    return NTSTATUS.STATUS_ACCESS_DENIED;
+                                GuestDos = Process.Path;
+                            }
+
+                            string Path = Instance.WinHelper.DosPathToNtDevicePath(GuestDos ?? string.Empty);
+                            int PathByteCount = Encoding.Unicode.GetByteCount(Path);
+                            uint TotalSize = HeaderSize + (uint)PathByteCount;
+                            SetReturnLength(TotalSize);
+
+                            if (OutBufferLength < TotalSize)
+                                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                            if (OutBufferPtr == 0 || !Instance.IsRegionMapped(OutBufferPtr, TotalSize))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                            // Convention on WOW64: the caller passes a single flat buffer; the kernel puts the
+                            // UNICODE_STRING at buffer[0..8) with Buffer pointing at buffer+8 where the string
+                            // bytes live. Mirrors what NtQueryInformationProcess/ProcessImageFileNameWin32 does
+                            // for a query-into-user-buffer.
+                            ulong StringBufferAddr = OutBufferPtr + HeaderSize;
+                            Instance._emulator.WriteMemory(OutBufferPtr + 0, (ushort)PathByteCount, 2);
+                            Instance._emulator.WriteMemory(OutBufferPtr + 2, (ushort)PathByteCount, 2);
+                            Instance._emulator.WriteMemory(OutBufferPtr + 4, (uint)StringBufferAddr, 4);
+
+                            Span<byte> PathBytes = Instance.WinHelper.Shared.GetSpan((uint)PathByteCount);
+                            Encoding.Unicode.GetBytes(Path.AsSpan(), PathBytes);
+                            if (!Instance.WriteMemory(StringBufferAddr, PathBytes.Slice(0, PathByteCount)))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                            return NTSTATUS.STATUS_SUCCESS;
+                        }
+
+                    case PROCESSINFOCLASS.ProcessEnclaveInformation:
+                        {
+                            // A PROCESS_ENCLAVE_INFORMATION struct is 0x28 bytes on x86 and describes the
+                            // enclave a process runs in (SGX / VBS). A non-enclave process — Brovan's default —
+                            // returns STATUS_NOT_FOUND with the caller's buffer left zero-initialised. combase's
+                            // CoInitializeSecurity probes this class during its VBS-security path and treats
+                            // STATUS_NOT_SUPPORTED as "kernel too old, bail" (leaves an internal singleton NULL
+                            // and later NULL-derefs); STATUS_NOT_FOUND is "kernel understood the query, the
+                            // process just isn't in an enclave" and takes the normal (non-enclave) path.
+                            const uint StructSize = 0x28;
+                            if (OutBufferLength < StructSize)
+                            {
+                                SetReturnLength(StructSize);
+                                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                            }
+                            if (OutBufferPtr == 0 || !Instance.IsRegionMapped(OutBufferPtr, StructSize))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                            if (!Instance.WinHelper.WriteZeroMemory(OutBufferPtr, StructSize))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                            SetReturnLength(StructSize);
+                            return NTSTATUS.STATUS_NOT_FOUND;
+                        }
+
                     default:
+                        Instance.TriggerEventMessage($"[!] NtQueryInformationProcess (x86): InfoClass {InfoClass} (0x{(int)InfoClass:X}) not implemented", LogFlags.Issues);
                         return Instance.WinUnimplemented;
                 }
             }
@@ -744,7 +1021,19 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(FullPath))
                 FullPath = Process.Path ?? string.Empty;
 
-            uint StructSize = StructSerializer.GetStructSize<UNICODE_STRING64>(Instance);
+            // UNICODE_STRING header size is pointer-width-dependent: 8 bytes on x86
+            // (Length 2 / MaxLength 2 / Buffer 4 @ +4) vs 16 on x64 (Length 2 / MaxLength 2 /
+            // pad 4 / Buffer 8 @ +8). `UNICODE_STRING64` is a fixed 16-byte blittable struct
+            // (its `ulong Buffer` is 8 bytes on BOTH bitnesses — StructSerializer.GetStructSize
+            // is NOT pointer-aware for a plain `ulong`), so writing it to a WOW64 caller put the
+            // Buffer pointer at +8, which the 32-bit caller reads at +4 (the pad word) as NULL —
+            // then kernelbase!QueryFullProcessImageNameW memcpy's the name from NULL and faults
+            // (the al-khaser parent-process "is explorer.exe" check). Size the header + the OUT
+            // Buffer pointer to the guest bitness.
+            bool Is64 = Instance._binary.Architecture == BinaryArchitecture.x64;
+            uint StructSize = Is64 ? 16u : 8u;
+            ulong BufferFieldOffset = Is64 ? 8ul : 4ul;
+
             int PathByteCount = Encoding.Unicode.GetByteCount(FullPath) + 2;
             Span<byte> PathBytes = Instance.WinHelper.Shared.GetSpan((uint)PathByteCount);
             Encoding.Unicode.GetBytes(FullPath.AsSpan(), PathBytes);
@@ -769,14 +1058,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance._emulator.WriteMemory(BufferPtr, PathBytes.Slice(0, PathByteCount)))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            UNICODE_STRING64 Unicode = new UNICODE_STRING64()
-            {
-                Length = Length,
-                MaximumLength = MaximumLength,
-                Buffer = BufferPtr
-            };
-
-            if (!StructSerializer.WriteStruct(Instance, OutBufferPtr, Unicode).Success)
+            // Zero the whole header first so the x64 pad word (+4..+8, between MaxLength and the
+            // 8-byte Buffer) is clean; then lay down Length / MaxLength / the bitness-sized Buffer.
+            Instance.WinHelper.WriteZeroMemory(OutBufferPtr, StructSize);
+            Instance._emulator.WriteMemory(OutBufferPtr + 0, Length, 2);
+            Instance._emulator.WriteMemory(OutBufferPtr + 2, MaximumLength, 2);
+            if (!Instance.WritePointer(OutBufferPtr + BufferFieldOffset, BufferPtr))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             return NTSTATUS.STATUS_SUCCESS;

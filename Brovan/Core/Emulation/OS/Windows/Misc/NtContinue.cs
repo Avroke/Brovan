@@ -20,11 +20,17 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.IsRegionMapped(ContextPtr, 0x200))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
+            const uint CONTEXT_CONTROL = 0x00000001;
+            const uint CONTEXT_INTEGER = 0x00000002;
+
+            // 32-bit guest: the CONTEXT is the x86 layout (ContextFlags at +0x00, GPRs at +0x9C..+0xC8) and the
+            // register writes must target the 32-bit register IDs — writing the 64-bit IDs is a no-op in MODE_32.
+            if (Instance.BackendMode == Mode.MODE_32)
+                return ContinueX86(Instance, ContextPtr, TestAlert);
+
             uint Flags = (uint)Instance.ReadMemoryULong(ContextPtr + 0x30);
 
             const uint CONTEXT_AMD64 = 0x00100000;
-            const uint CONTEXT_CONTROL = 0x00000001;
-            const uint CONTEXT_INTEGER = 0x00000002;
 
             if ((Flags & CONTEXT_AMD64) == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
@@ -60,6 +66,49 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance.WriteRegister(Registers.UC_X86_REG_EFLAGS, EFlags);
             }
 
+            return FinishContinue(Instance, TestAlert);
+        }
+
+        /// <summary>
+        /// x86 (WOW64 / native-32) variant: reads the 32-bit CONTEXT layout and writes the 32-bit register IDs.
+        /// The 64-bit register writes used by the x64 path are silent no-ops in MODE_32, and the x86 CONTEXT
+        /// carries ContextFlags at +0x00 with the GPRs at +0x9C..+0xC8, so the two paths cannot share offsets.
+        /// </summary>
+        internal static NTSTATUS ContinueX86(BinaryEmulator Instance, ulong ContextPtr, bool TestAlert)
+        {
+            uint Flags = (uint)Instance.ReadMemoryUInt(ContextPtr + 0x00);
+
+            const uint CONTEXT_i386 = 0x00010000;
+            const uint CONTEXT_CONTROL = 0x00000001;
+            const uint CONTEXT_INTEGER = 0x00000002;
+
+            if ((Flags & CONTEXT_i386) == 0)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            if ((Flags & CONTEXT_INTEGER) != 0)
+            {
+                Instance.WriteRegister32(Registers.UC_X86_REG_EDI, Instance.ReadMemoryUInt(ContextPtr + 0x9C));
+                Instance.WriteRegister32(Registers.UC_X86_REG_ESI, Instance.ReadMemoryUInt(ContextPtr + 0xA0));
+                Instance.WriteRegister32(Registers.UC_X86_REG_EBX, Instance.ReadMemoryUInt(ContextPtr + 0xA4));
+                Instance.WriteRegister32(Registers.UC_X86_REG_EDX, Instance.ReadMemoryUInt(ContextPtr + 0xA8));
+                Instance.WriteRegister32(Registers.UC_X86_REG_ECX, Instance.ReadMemoryUInt(ContextPtr + 0xAC));
+                Instance.WriteRegister32(Registers.UC_X86_REG_EAX, Instance.ReadMemoryUInt(ContextPtr + 0xB0));
+            }
+
+            if ((Flags & CONTEXT_CONTROL) != 0)
+            {
+                Instance.WriteRegister32(Registers.UC_X86_REG_EBP, Instance.ReadMemoryUInt(ContextPtr + 0xB4));
+                Instance.WriteRegister32(Registers.UC_X86_REG_EIP, Instance.ReadMemoryUInt(ContextPtr + 0xB8));
+                Instance.WriteRegister32(Registers.UC_X86_REG_ESP, Instance.ReadMemoryUInt(ContextPtr + 0xC4));
+                Instance.WriteRegister32(Registers.UC_X86_REG_EFLAGS, Instance.ReadMemoryUInt(ContextPtr + 0xC0));
+            }
+
+            return FinishContinue(Instance, TestAlert);
+        }
+
+        /// <summary>Shared tail: clears exception state, switches into the restored context and stops the loop so it re-enters.</summary>
+        private static NTSTATUS FinishContinue(BinaryEmulator Instance, bool TestAlert)
+        {
             EmulatedThread CurrentThread = Instance.CurrentThread;
             if (CurrentThread == null)
                 return NTSTATUS.STATUS_UNSUCCESSFUL;

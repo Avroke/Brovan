@@ -11,9 +11,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
-
+            // Bitness-agnostic: args via GetArg64 (delegates to GetArg32 in WOW64); the OUT section HANDLE is
+            // pointer-sized; OBJECT_ATTRIBUTES has 4-byte fields on x86 / 8-byte on x64, so the name read branches.
             ulong SectionHandlePtr = Instance.WinHelper.GetArg64(0);
             AccessMask DesiredAccess = (AccessMask)Instance.WinHelper.GetArg64(1);
             ulong ObjectAttributesPtr = Instance.WinHelper.GetArg64(2);
@@ -21,11 +20,25 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (SectionHandlePtr == 0 || ObjectAttributesPtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (!Instance.IsRegionMapped(SectionHandlePtr, 8))
+            if (!Instance.IsRegionMapped(SectionHandlePtr, (ulong)Instance.GuestPointerSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (!Instance.WinHelper.TryReadObjectAttributesName64(ObjectAttributesPtr, out OBJECT_ATTRIBUTES64 Attributes, out string Name, out string FullName, out NTSTATUS ObjectNameStatus))
-                return ObjectNameStatus;
+            ulong RootDirectory;
+            string Name;
+            string FullName;
+            NTSTATUS ObjectNameStatus;
+            if (Instance._binary.Architecture == BinaryArchitecture.x64)
+            {
+                if (!Instance.WinHelper.TryReadObjectAttributesName64(ObjectAttributesPtr, out OBJECT_ATTRIBUTES64 Attributes, out Name, out FullName, out ObjectNameStatus))
+                    return ObjectNameStatus;
+                RootDirectory = Attributes.RootDirectory;
+            }
+            else
+            {
+                if (!Instance.WinHelper.TryReadObjectAttributesName32((uint)ObjectAttributesPtr, out uint RootDirectory32, out _, out Name, out FullName, out ObjectNameStatus))
+                    return ObjectNameStatus;
+                RootDirectory = RootDirectory32;
+            }
 
             if (string.IsNullOrEmpty(Name))
                 return NTSTATUS.STATUS_OBJECT_NAME_INVALID;
@@ -42,9 +55,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             string ResolvedKnownDllBackingPath = null;
 
-            if (IsKnownDllPath(Instance, Attributes.RootDirectory, FullName))
+            if (IsKnownDllPath(Instance, RootDirectory, FullName))
             {
-                ResolvedKnownDllBackingPath = ResolveKnownDllBackingPath(Instance, Attributes.RootDirectory, FullName, Name);
+                ResolvedKnownDllBackingPath = ResolveKnownDllBackingPath(Instance, RootDirectory, FullName, Name);
                 AllocationAttributes = SEC_IMAGE;
                 SectionPageProtection = PAGE_EXECUTE_READ;
             }
@@ -62,7 +75,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 WinHandle ExistingHandle = Instance.WinHelper.HandleManager.AddHandle(Existing, DesiredAccess);
                 Instance.WinHelper.AddWinHandle(ExistingHandle);
 
-                if (!Instance._emulator.WriteMemory(SectionHandlePtr, (ulong)ExistingHandle.Handle))
+                if (!Instance.WritePointer(SectionHandlePtr, (ulong)ExistingHandle.Handle))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                 if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
@@ -82,7 +95,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 WinHandle SharedSectionHandle = Instance.WinHelper.CreateSectionHandle(FullName, SharedSectionSize, (uint)Instance.WinHelper.ConvertInternalToWinProtect(MemoryProtection.ReadWrite), 0, null, SharedSectionAddress, DesiredAccess);
 
-                if (!Instance._emulator.WriteMemory(SectionHandlePtr, (ulong)SharedSectionHandle.Handle))
+                if (!Instance.WritePointer(SectionHandlePtr, (ulong)SharedSectionHandle.Handle))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                 if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
@@ -91,7 +104,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            string ResolvedBackingPath = ResolvedKnownDllBackingPath ?? ResolveKnownDllBackingPath(Instance, Attributes.RootDirectory, FullName, Name);
+            string ResolvedBackingPath = ResolvedKnownDllBackingPath ?? ResolveKnownDllBackingPath(Instance, RootDirectory, FullName, Name);
             if (ResolvedBackingPath == null)
                 return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
 
@@ -120,7 +133,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             WinHandle Handle = Instance.WinHelper.CreateSectionHandle(FullName, Size, SectionPageProtection, AllocationAttributes, ResolvedBackingPath, BackingAddress, DesiredAccess);
 
-            if (!Instance._emulator.WriteMemory(SectionHandlePtr, (ulong)Handle.Handle))
+            if (!Instance.WritePointer(SectionHandlePtr, (ulong)Handle.Handle))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)

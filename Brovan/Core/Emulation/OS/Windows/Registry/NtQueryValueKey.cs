@@ -28,9 +28,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
-
+            // Bitness-agnostic: the only bitness-sensitive input is the value-name UNICODE_STRING (read below via
+            // TryReadUnicodeString); the KEY_VALUE_INFORMATION output structures are flat offset/length records,
+            // identical on x86 and x64. al-khaser's VM-detection reads registry values, so this must work on x86.
             ulong KeyHandle = Instance.WinHelper.GetArg64(0);
             ulong ValueNamePtr = Instance.WinHelper.GetArg64(1);
             KEY_VALUE_INFORMATION_CLASS KeyValueInformationClass = (KEY_VALUE_INFORMATION_CLASS)(uint)Instance.WinHelper.GetArg64(2);
@@ -53,7 +53,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
             }
 
-            if (!Instance.WinHelper.TryReadUnicodeString64(ValueNamePtr, out string ValueName, out NTSTATUS Status))
+            if (!Instance.WinHelper.TryReadUnicodeString(ValueNamePtr, out string ValueName, out NTSTATUS Status))
                 return Status;
 
             WinRegKey RegKey = Instance.WinHelper.HandleManager.GetObjectByHandle<WinRegKey>(KeyHandle);

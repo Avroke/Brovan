@@ -22,26 +22,33 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
-
-            ulong FileHandle = Instance.ReadRegister(Registers.UC_X86_REG_R10);
-            ulong IoStatusBlock = Instance.ReadRegister(Registers.UC_X86_REG_RDX);
-            ulong FileInformation = Instance.ReadRegister(Registers.UC_X86_REG_R8);
-            uint Length = (uint)Instance.ReadRegister(Registers.UC_X86_REG_R9);
+            // Bitness-agnostic arg read: GetArg64 pulls syscall args from R10/RDX/R8/R9(+stack) on x64
+            // and from the x86 stack on WOW64. The FILE_*_INFORMATION output structs below are all fixed
+            // LARGE_INTEGER / ULONGLONG / ULONG fields — bitness-invariant — and IO_STATUS_BLOCK writes go
+            // through the bitness-aware WriteIoStatusBlock. Was gated to x64: std::filesystem::equivalent
+            // (MSVCP140!_Equivalent) opens both files then issues NtQueryInformationFile for the file id to
+            // compare identity; on WOW64 that got STATUS_NOT_SUPPORTED, so `equivalent()` returned an error
+            // and any caller doing `if (equivalent(a,b))` threw an uncaught std::filesystem_error and
+            // fast-failed (al-khaser's "is parent process explorer.exe" check).
+            ulong FileHandle = Instance.WinHelper.GetArg64(0);
+            ulong IoStatusBlock = Instance.WinHelper.GetArg64(1);
+            ulong FileInformation = Instance.WinHelper.GetArg64(2);
+            uint Length = (uint)Instance.WinHelper.GetArg64(3);
             uint FileInformationClass = (uint)Instance.WinHelper.GetArg64(4);
 
             if (IoStatusBlock == 0 || FileInformation == 0)
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (!Instance.IsRegionMapped(IoStatusBlock, 0x10) || !Instance.IsRegionMapped(FileInformation, Length))
+            // IO_STATUS_BLOCK is 8 bytes on x86 (Status 4 + Information 4), 16 on x64 (Pointer 8 + Information 8).
+            ulong IoStatusBlockSize = (ulong)(Instance.GuestPointerSize * 2);
+            if (!Instance.IsRegionMapped(IoStatusBlock, IoStatusBlockSize) || !Instance.IsRegionMapped(FileInformation, Length))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             FILE_INFORMATION_CLASS InfoClass = (FILE_INFORMATION_CLASS)FileInformationClass;
             WinFile File = Instance.WinHelper.GetFileByHandle(FileHandle, AccessMask.GiveTemp);
             if (File == null)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_HANDLE, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_HANDLE, 0);
                 return NTSTATUS.STATUS_INVALID_HANDLE;
             }
 
@@ -53,7 +60,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 case FILE_INFORMATION_CLASS.FileStandardInformation:
                     return HandleFileStandardInformation(Instance, File, IoStatusBlock, FileInformation, Length);
                 case FILE_INFORMATION_CLASS.FileInternalInformation:
-                    return HandleFileInternalInformation(Instance, FileHandle, IoStatusBlock, FileInformation, Length);
+                    return HandleFileInternalInformation(Instance, File, IoStatusBlock, FileInformation, Length);
                 case FILE_INFORMATION_CLASS.FileEaInformation:
                     return HandleFixedUlong(Instance, IoStatusBlock, FileInformation, Length, FileEaInformationSize, 0);
                 case FILE_INFORMATION_CLASS.FileAccessInformation:
@@ -80,7 +87,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 default:
                     if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                         Instance.TriggerEventMessage($"[!] NtQueryInformationFile: FileInformationClass {InfoClass} (0x{FileInformationClass:X}) not implemented.", LogFlags.Syscall);
-                    Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_INFO_CLASS, 0);
+                    Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_INFO_CLASS, 0);
                     return NTSTATUS.STATUS_INVALID_INFO_CLASS;
             }
         }
@@ -89,7 +96,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Length < FileBasicInformationSize)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
             }
 
@@ -107,7 +114,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Instance._emulator.WriteMemory(FileInformation + 0x20, (uint)Attributes, 4);
             Instance._emulator.WriteMemory(FileInformation + 0x24, 0u, 4);
 
-            Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FileBasicInformationSize);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FileBasicInformationSize);
             return NTSTATUS.STATUS_SUCCESS;
         }
 
@@ -115,7 +122,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Length < FileStandardInformationSize)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
             }
 
@@ -128,34 +135,55 @@ namespace Brovan.Core.Emulation.OS.Windows
             Instance.WinHelper.WriteByte(FileInformation + 0x15, IsDirectory ? (byte)0x01 : (byte)0x00);
             Instance._emulator.WriteMemory(FileInformation + 0x16, 0u, 2);
 
-            Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FileStandardInformationSize);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FileStandardInformationSize);
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private static NTSTATUS HandleFileInternalInformation(BinaryEmulator Instance, ulong FileHandle, ulong IoStatusBlock, ulong FileInformation, uint Length)
+        private static NTSTATUS HandleFileInternalInformation(BinaryEmulator Instance, WinFile File, ulong IoStatusBlock, ulong FileInformation, uint Length)
         {
             if (Length < FileInternalInformationSize)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
             }
 
-            Instance._emulator.WriteMemory(FileInformation + 0x00, FileHandle, 8);
-            Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FileInternalInformationSize);
+            // FILE_INTERNAL_INFORMATION.IndexNumber must be the file's stable unique id — the SAME value for
+            // every handle opened on the same path — so file-identity comparisons (std::filesystem::equivalent,
+            // GetFileInformationByHandle nFileIndex) see two opens of one file as equivalent. Keying it on the
+            // handle value made each open report a different index (never equivalent); key it on the path
+            // instead, matching FileIdInformation's FileId derivation.
+            Instance._emulator.WriteMemory(FileInformation + 0x00, PathFileId(File?.Path), 8);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FileInternalInformationSize);
             return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        /// <summary>
+        /// Deterministic 64-bit file id derived from the (normalised) path via FNV-1a. Stable across handles,
+        /// so two opens of the same file report the same id (required for file-identity comparisons).
+        /// </summary>
+        private static ulong PathFileId(string Path)
+        {
+            string Normalised = (Path ?? string.Empty).Replace('/', '\\').TrimEnd('\\', '\0');
+            ulong Hash = 14695981039346656037UL;
+            for (int i = 0; i < Normalised.Length; i++)
+            {
+                Hash ^= char.ToLowerInvariant(Normalised[i]);
+                Hash *= 1099511628211UL;
+            }
+            return Hash;
         }
 
         private static NTSTATUS HandleFileAccessInformation(BinaryEmulator Instance, ulong FileHandle, ulong IoStatusBlock, ulong FileInformation, uint Length)
         {
             if (Length < FileAccessInformationSize)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
             }
 
             AccessMask Permissions = Instance.WinHelper.HandleManager.GetPermissionsByHandle(FileHandle);
             Instance._emulator.WriteMemory(FileInformation + 0x00, (uint)Permissions, 4);
-            Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FileAccessInformationSize);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FileAccessInformationSize);
             return NTSTATUS.STATUS_SUCCESS;
         }
 
@@ -179,7 +207,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     uint ToWrite = (uint)Math.Min((ulong)NameBytes.Length, Writable);
                     Instance._emulator.WriteMemory(FileInformation + 0x04, NameBytes, ToWrite);
                 }
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_BUFFER_OVERFLOW, RequiredSize);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_BUFFER_OVERFLOW, RequiredSize);
                 return NTSTATUS.STATUS_BUFFER_OVERFLOW;
             }
 
@@ -187,7 +215,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (NameBytes.Length != 0)
                 Instance._emulator.WriteMemory(FileInformation + 0x04, NameBytes, (uint)NameBytes.Length);
 
-            Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, RequiredSize);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, RequiredSize);
             return NTSTATUS.STATUS_SUCCESS;
         }
 
@@ -195,13 +223,13 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Length < FilePositionInformationSize)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
             }
 
             ulong Position = File == null || File.Position < 0 ? 0UL : unchecked((ulong)File.Position);
             Instance._emulator.WriteMemory(FileInformation + 0x00, Position, 8);
-            Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FilePositionInformationSize);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FilePositionInformationSize);
             return NTSTATUS.STATUS_SUCCESS;
         }
 
@@ -209,7 +237,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Length < FileNetworkOpenInformationSize)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
             }
 
@@ -229,7 +257,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Instance._emulator.WriteMemory(FileInformation + 0x30, (uint)Attributes, 4);
             Instance._emulator.WriteMemory(FileInformation + 0x34, 0u, 4);
 
-            Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FileNetworkOpenInformationSize);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FileNetworkOpenInformationSize);
             return NTSTATUS.STATUS_SUCCESS;
         }
 
@@ -237,7 +265,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Length < FileAttributeTagInformationSize)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
             }
 
@@ -251,7 +279,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Instance._emulator.WriteMemory(FileInformation + 0x00, (uint)Attributes, 4);
             Instance._emulator.WriteMemory(FileInformation + 0x04, 0u, 4);
 
-            Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FileAttributeTagInformationSize);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FileAttributeTagInformationSize);
             return NTSTATUS.STATUS_SUCCESS;
         }
 
@@ -259,23 +287,17 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Length < FileIdInformationSize)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
             }
 
-            ulong Hash = 14695981039346656037UL;
-            string Path = File.Path ?? string.Empty;
-            for (int i = 0; i < Path.Length; i++)
-            {
-                Hash ^= Path[i];
-                Hash *= 1099511628211UL;
-            }
+            ulong Hash = PathFileId(File.Path);
 
             Instance._emulator.WriteMemory(FileInformation + 0x00, 0x1234ABCDu);
             Instance._emulator.WriteMemory(FileInformation + 0x08, Hash, 8);
             Instance._emulator.WriteMemory(FileInformation + 0x10, 0UL, 8);
 
-            Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FileIdInformationSize);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FileIdInformationSize);
             return NTSTATUS.STATUS_SUCCESS;
         }
 
@@ -283,7 +305,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Length < FileAllInformationFixedSize)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
             }
 
@@ -329,11 +351,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong BytesWritten = FileAllInformationNameOffset + NameBytesToWrite;
             if (NameBytesToWrite < (uint)NameByteLength)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_BUFFER_OVERFLOW, BytesWritten);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_BUFFER_OVERFLOW, BytesWritten);
                 return NTSTATUS.STATUS_BUFFER_OVERFLOW;
             }
 
-            Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, BytesWritten);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, BytesWritten);
             return NTSTATUS.STATUS_SUCCESS;
         }
 
@@ -341,12 +363,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Length < RequiredSize)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
             }
 
             Instance._emulator.WriteMemory(FileInformation + 0x00, Value, 4);
-            Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, RequiredSize);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, RequiredSize);
             return NTSTATUS.STATUS_SUCCESS;
         }
 

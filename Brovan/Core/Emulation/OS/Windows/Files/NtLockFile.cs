@@ -31,28 +31,28 @@ namespace Brovan.Core.Emulation.OS.Windows
             WinFile FileObj = Instance.WinHelper.GetFileByHandle(FileHandle, AccessMask.GiveTemp);
             if (FileObj == null)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_HANDLE, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_HANDLE, 0);
                 SignalEvent(Instance, EventHandle, NTSTATUS.STATUS_INVALID_HANDLE);
                 return NTSTATUS.STATUS_INVALID_HANDLE;
             }
 
             if (FileObj.Device)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_DEVICE_REQUEST, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_DEVICE_REQUEST, 0);
                 SignalEvent(Instance, EventHandle, NTSTATUS.STATUS_INVALID_DEVICE_REQUEST);
                 return NTSTATUS.STATUS_INVALID_DEVICE_REQUEST;
             }
 
             if (FileObj.Directory)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_PARAMETER, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_PARAMETER, 0);
                 SignalEvent(Instance, EventHandle, NTSTATUS.STATUS_INVALID_PARAMETER);
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
             }
 
             if (!Instance.WinHelper.TryReadFileLockRange(ByteOffsetPtr, LengthPtr, out ulong Offset, out ulong Length, out NTSTATUS RangeStatus))
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, RangeStatus, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, RangeStatus, 0);
                 SignalEvent(Instance, EventHandle, RangeStatus);
                 return RangeStatus;
             }
@@ -65,7 +65,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (FailImmediately)
                 {
-                    Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_LOCK_NOT_GRANTED, 0);
+                    Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_LOCK_NOT_GRANTED, 0);
                     SignalEvent(Instance, EventHandle, NTSTATUS.STATUS_LOCK_NOT_GRANTED);
                     return NTSTATUS.STATUS_LOCK_NOT_GRANTED;
                 }
@@ -74,7 +74,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             FileObj.AddLock(Offset, Length, Key, ExclusiveLock);
-            Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 0);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 0);
             SignalEvent(Instance, EventHandle, NTSTATUS.STATUS_SUCCESS);
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)

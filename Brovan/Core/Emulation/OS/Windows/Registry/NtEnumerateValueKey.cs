@@ -18,7 +18,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
+            // Bitness-agnostic: the KEY_*_INFORMATION output structures are flat offset/length records,
+            // identical on x86 and x64; only ARM/other stays unimplemented.
+            if (Instance._binary.Architecture == BinaryArchitecture.x64 || Instance._binary.Architecture == BinaryArchitecture.x86)
             {
                 ulong KeyHandle = Instance.WinHelper.GetArg64(0);
                 uint Index = (uint)Instance.WinHelper.GetArg64(1);

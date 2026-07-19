@@ -7,14 +7,38 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
+            if (Instance._binary.Architecture != BinaryArchitecture.x64 && Instance._binary.Architecture != BinaryArchitecture.x86)
                 return Instance.WinUnimplemented;
+
+            bool Wow64 = Instance._binary.Architecture != BinaryArchitecture.x64;
 
             ulong ThreadHandle = Instance.WinHelper.GetArg64(0);
             uint ThreadInformationClass = (uint)Instance.WinHelper.GetArg64(1);
             ulong ThreadInformation = Instance.WinHelper.GetArg64(2);
             uint ThreadInformationLength = (uint)Instance.WinHelper.GetArg64(3);
             ulong ReturnLengthPtr = Instance.WinHelper.GetArg64(4);
+
+            // ThreadBasicInformation is the one class with an explicit bitness-aware layout below. Every OTHER
+            // class in the switch either writes a fixed-size scalar (DWORD/byte) that's bitness-invariant
+            // (ThreadIsIoPending / ThreadDynamicCodePolicyInfo / ThreadIsTerminated / ThreadPriorityBoost /
+            // ThreadHideFromDebugger / ThreadAmILastThread) or a Windows struct that's the same shape on both
+            // (ThreadIdealProcessorEx = PROCESSOR_NUMBER, 0x28 bytes). Only the three pointer-sized-buffer
+            // classes (ThreadQuerySetWin32StartAddress / ThreadAffinityMask / ThreadUmsInformation) still emit
+            // an 8-byte value that would overrun a 4-byte x86 caller buffer — those stay gated to x64. Note
+            // the previous blanket gate rejected class 42 (ThreadDynamicCodePolicyInfo) on x86, which combase's
+            // CoInitializeSecurity probes; the STATUS_NOT_SUPPORTED it received drove the "kernel too old"
+            // branch that left an internal singleton NULL.
+            if (Wow64)
+            {
+                switch ((THREADINFOCLASS)ThreadInformationClass)
+                {
+                    case THREADINFOCLASS.ThreadQuerySetWin32StartAddress:
+                    case THREADINFOCLASS.ThreadAffinityMask:
+                    case THREADINFOCLASS.ThreadUmsInformation:
+                        Instance.TriggerEventMessage($"[!] NtQueryInformationThread (x86): class {(THREADINFOCLASS)ThreadInformationClass} not implemented", LogFlags.Issues);
+                        return Instance.WinUnimplemented;
+                }
+            }
 
             if (ReturnLengthPtr != 0 && !Instance.IsRegionMapped(ReturnLengthPtr, 4))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -55,7 +79,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 case THREADINFOCLASS.ThreadBasicInformation:
                     {
-                        uint RequiredSize = 0x30;
+                        // THREAD_BASIC_INFORMATION: 0x1C on x86 (TebBaseAddress + CLIENT_ID + AffinityMask are
+                        // pointer-sized), 0x30 on x64.
+                        uint RequiredSize = Wow64 ? 0x1Cu : 0x30u;
                         NTSTATUS Status = ValidateOutputBuffer(RequiredSize);
                         if (Status != NTSTATUS.STATUS_SUCCESS)
                             return Status;
@@ -66,6 +92,21 @@ namespace Brovan.Core.Emulation.OS.Windows
                         uint ExitStatus = ThreadObj.State == EmulatedThreadState.Terminated
                             ? unchecked((uint)ThreadObj.ExitCode)
                             : (uint)NTSTATUS.STATUS_PENDING;
+
+                        if (Wow64)
+                        {
+                            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x00, 4), ExitStatus);
+                            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x04, 4), (uint)WinEmulatedThread.GetState(ThreadObj).Teb);
+                            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x08, 4), Instance.WinHelper.PID);
+                            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x0C, 4), ThreadObj.ThreadId);
+                            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x10, 4), 1u);
+                            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x14, 4), (uint)ThreadObj.EffectivePriority);
+                            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x18, 4), (uint)ThreadObj.BasePriority);
+                            if (!Instance.WriteMemory(ThreadInformation, Buffer.Slice(0, (int)RequiredSize)))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                            WriteReturnLength(RequiredSize);
+                            return NTSTATUS.STATUS_SUCCESS;
+                        }
 
                         BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x00, 4), ExitStatus);
                         BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x08, 8), WinEmulatedThread.GetState(ThreadObj).Teb);

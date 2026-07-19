@@ -64,6 +64,8 @@ namespace Brovan.Core.Emulation
         public string ReadMemoryString(ulong address, int length, Encoding encoding)
             => Inner.ReadMemoryString(address, length, encoding);
 
+        public bool WriteGdtr(ulong Base, uint Limit)
+            => Inner.WriteGdtr(Base, Limit);
         public bool WriteRegister(Registers register, ulong value)
             => Inner.WriteRegister(register, value);
         public bool WriteRegister(int register, ulong value)
