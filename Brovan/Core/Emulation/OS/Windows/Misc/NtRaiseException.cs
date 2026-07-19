@@ -121,10 +121,46 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Instance.Threads[(uint)Instance.CurrentThreadId] = CurrentThread;
             if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
+            {
                 Instance.TriggerEventMessage($"[!] NtRaiseException triggered with Exception Code: 0x{ExceptionCode:X}", LogFlags.Issues);
+
+                // [CLR-AV] For an access violation, localise the faulting instruction to module+rva and
+                // report the accessed address + access kind. A near-null fault address is coreclr's
+                // deliberate managed null-check AV (VEH-handled, benign); a wild address is a real fault.
+                // This identifies which runtime function faults when the .NET init deadlocks
+                // (F-CLRINIT-AV): the worker that would signal the loader work-complete event dies here,
+                // stranding main + the finalizer on that event. ExceptionInformation[0] = access kind
+                // (0 read / 1 write / 8 execute), [1] = accessed data address.
+                if (ExceptionCode == 0xC0000005)
+                {
+                    ulong FaultRip = Instance.ReadMemoryULong(ExceptionRecordPtr + 0x10);
+                    ulong AccessKind = Parameters.Length > 0 ? Parameters[0] : 0;
+                    ulong AccessAddr = Parameters.Length > 1 ? Parameters[1] : 0;
+                    string Kind = AccessKind == 0 ? "read" : AccessKind == 1 ? "write" : AccessKind == 8 ? "execute" : $"0x{AccessKind:X}";
+                    Instance.TriggerEventMessage($"[!] [CLR-AV] tid={Instance.CurrentThreadId} faultRip=0x{FaultRip:X} ({DescribeModuleRva(Instance, FaultRip)}) access={Kind} addr=0x{AccessAddr:X}", LogFlags.Issues);
+                }
+            }
             Instance._emulator.StopEmulation();
 
             return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        // If <addr> lies inside a loaded module's image, return "name+0xrva", else "unmapped".
+        private static string DescribeModuleRva(BinaryEmulator Instance, ulong Addr)
+        {
+            if (Instance.WinHelper?.WinModules == null)
+                return "unmapped";
+
+            foreach (WinModule M in Instance.WinHelper.WinModules)
+            {
+                if (M == null || M.SizeOfImage == 0)
+                    continue;
+
+                if (Addr >= M.MappedBase && Addr < M.MappedBase + M.SizeOfImage)
+                    return $"{M.Name}+0x{Addr - M.MappedBase:X}";
+            }
+
+            return "unmapped";
         }
     }
 }
