@@ -2055,6 +2055,7 @@ namespace Brovan.Core.Emulation
                 Flags = AllocationType.None
             });
 
+            LogFreedRegion("ReleaseMemory", Start, End - Start);
             return true;
         }
 
@@ -2156,6 +2157,7 @@ namespace Brovan.Core.Emulation
                 Flags = AllocationType.None
             });
 
+            LogFreedRegion("ReleaseMemoryRange", Start, End - Start);
             return true;
         }
 

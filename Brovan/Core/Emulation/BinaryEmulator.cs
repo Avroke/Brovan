@@ -1490,6 +1490,7 @@ namespace Brovan.Core.Emulation
             {
                 RemoveMemoryRegion(Region);
                 _freedmemory.Add(Region);
+                LogFreedRegion("UnmapMemoryRegion", Address, Region.Size);
                 _freedMemorySorted = false;
                 TriggerDebugMessage(() => $"memory: unmapped base=0x{Address:X} size=0x{Region.Size:X}");
                 return true;
@@ -3017,6 +3018,50 @@ namespace Brovan.Core.Emulation
                         Found++;
                     }
                 }
+                TriggerEventMessage(Sb.ToString(), LogFlags.Issues);
+            }
+            catch
+            {
+                // best-effort diagnostic
+            }
+        }
+
+        /// <summary>
+        /// Logs a region entering the freed set (base+size+source), plus the guest caller chain when the
+        /// base is in the private-CRT-heap VA band — the region implicated in the rare F-CLRINIT-AV
+        /// CRT-heap use-after-free (msvcrt _calloc_impl allocates from a _crtheap whose backing was
+        /// freed). Identifies which guest caller releases the still-live heap region. Issues-gated,
+        /// best-effort.
+        /// </summary>
+        private void LogFreedRegion(string Source, ulong Base, ulong Size)
+        {
+            if ((Settings.Flags & LogFlags.Issues) == 0)
+                return;
+
+            try
+            {
+                System.Text.StringBuilder Sb = new System.Text.StringBuilder();
+                Sb.Append($"[-] [FREE-TRACK] {Source} base=0x{Base:X} size=0x{Size:X}");
+
+                if (Base >= 0x100000000UL && Base < 0x110000000UL)
+                {
+                    Sb.Append(" freed-by:");
+                    ulong Rsp = ReadRegister(Registers.UC_X86_REG_RSP);
+                    int Found = 0;
+                    for (ulong Off = 0; Off <= 0x180 && Found < 8; Off += 8)
+                    {
+                        if (!IsRegionMapped(Rsp + Off, 8))
+                            continue;
+                        ulong Val = ReadMemoryULong(Rsp + Off);
+                        string M = DescribeModuleAddress(Val);
+                        if (M != null)
+                        {
+                            Sb.Append($" +0x{Off:X}={M}");
+                            Found++;
+                        }
+                    }
+                }
+
                 TriggerEventMessage(Sb.ToString(), LogFlags.Issues);
             }
             catch
