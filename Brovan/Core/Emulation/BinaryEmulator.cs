@@ -2604,6 +2604,15 @@ namespace Brovan.Core.Emulation
             long LivelockSpinSlices = 0;
             bool LivelockReported = false;
 
+            // Idle-GetMessage-pump watchdog (frontier F2). Counts consecutive scheduler iterations that
+            // fall into the GetMessage-park poll with NOTHING runnable and NO timed wakeup pending — i.e.
+            // an idle message pump whose wait cannot be satisfied (no timer will fire, no runnable thread
+            // can PostMessage). Reset to 0 the instant any thread actually runs, so a real pump fed by a
+            // periodically-runnable worker never accumulates. After the bound, terminate cleanly instead
+            // of polling to the wall-clock budget. Shared x64/x86 (both al-khaser binaries park here).
+            long GetMessageParkFutilePolls = 0;
+            const long GetMessageParkFutilePollLimit = 256;
+
             if (Debug)
                 if (Debug)
                     TriggerDebugMessage($"scheduler: start threads={ThreadOrder.Count} levels={Levels} baseQuantum={BaseQuantumInstructions} maxInstructions={MaxTotalInstructions} maxSlices={MaxSlices}");
@@ -2680,6 +2689,20 @@ namespace Brovan.Core.Emulation
 
                         if (HasActiveGetMessageWait())
                         {
+                            // No runnable thread + no timed wakeup (TryGetNextWaitSleepMs returned false
+                            // above) + an active GetMessage wait ⇒ nothing can ever queue a message or
+                            // fire a timer to wake it. Poll a bounded number of times (a productive pump
+                            // whose worker is runnable never reaches here — it would be dequeued and reset
+                            // the counter), then terminate cleanly as an idle-pump deadlock rather than
+                            // spinning to the wall-clock timeout.
+                            if (++GetMessageParkFutilePolls > GetMessageParkFutilePollLimit)
+                            {
+                                if (Debug)
+                                    if (Debug)
+                                        TriggerDebugMessage($"scheduler: idle GetMessage pump, no wakeup source — terminating cleanly total={Total} slices={Slices}");
+                                return true;
+                            }
+
                             const int MessagePumpPollMs = 10;
                             Thread.Sleep(MessagePumpPollMs);
                             AdvanceEmulatedTimeMilliseconds(MessagePumpPollMs, AdvanceTimestampCounter: true);
@@ -2703,6 +2726,9 @@ namespace Brovan.Core.Emulation
                         if (Debug)
                             TriggerDebugMessage($"scheduler: switch {CurrentThreadId} -> {ImmaBeEmulatedOOO.ThreadId} queue={SelectedLevel} state={ImmaBeEmulatedOOO.State} rip=0x{ImmaBeEmulatedOOO.Context?.RIP ?? 0:X}");
                 }
+
+                // A thread is about to run — real progress — so the idle-pump watchdog resets.
+                GetMessageParkFutilePolls = 0;
 
                 SwitchToThread((int)ImmaBeEmulatedOOO.ThreadId);
                 EmulatedThreadState StateBeforeSlice = ImmaBeEmulatedOOO.State;
