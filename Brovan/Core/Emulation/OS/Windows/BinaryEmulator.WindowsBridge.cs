@@ -1539,6 +1539,35 @@ namespace Brovan.Core.Emulation
             return Module;
         }
 
+        // High sparse VA window (well above the ~32 GiB span MapUniqueAddress manages) used for huge
+        // base=NULL reservations and large SEC_RESERVE sections, so a multi-TiB reserve never collides
+        // with image/heap/stack allocations. Single source of truth for the three callers that place
+        // such reserves: ReserveSparseSection here, and NtAllocateVirtualMemory[Ex].FindFreeBaseAddress.
+        public const ulong HighSparseBase = 0x0000_1000_0000_0000UL; // 16 TiB
+        public const ulong HighSparseCeil = 0x0000_7FF0_0000_0000UL; // just under the x64 user ceiling
+        public const ulong HighSparseStride = 0x0000_0001_0000_0000UL; // 4 GiB stride
+
+        /// <summary>
+        /// Finds a free hole of <paramref name="AlignedSize"/> bytes in the high sparse VA window
+        /// (see <see cref="HighSparseBase"/>). Metadata search only — does NOT reserve; the caller
+        /// reserves (or hands the base back to a syscall that will). Returns the base, or 0 if the
+        /// window has no free hole large enough. <paramref name="AlignedSize"/> must already be
+        /// page-aligned.
+        /// </summary>
+        public ulong FindHighSparseHole(ulong AlignedSize)
+        {
+            if (AlignedSize == 0)
+                return 0;
+
+            for (ulong Candidate = HighSparseBase; Candidate + AlignedSize <= HighSparseCeil; Candidate += HighSparseStride)
+            {
+                if (!IsRegionInUse(Candidate, AlignedSize))
+                    return Candidate;
+            }
+
+            return 0;
+        }
+
         /// <summary>
         /// Reserves a large (&gt; 4 GiB) address-space range as metadata only, with no host
         /// backing — the sparse counterpart of <see cref="MapUniqueAddress"/>, for SEC_RESERVE
@@ -1553,23 +1582,11 @@ namespace Brovan.Core.Emulation
             if (Size == 0)
                 return 0;
 
-            // Search the high user-mode VA space, well above the ~32 GiB window MapUniqueAddress
-            // manages, so a huge reserve never collides with image/heap/stack allocations.
-            const ulong SparseSearchBase = 0x0000_1000_0000_0000UL; // 16 TiB
-            const ulong SparseSearchCeil = 0x0000_7FF0_0000_0000UL; // just under the x64 user ceiling
-            const ulong Step = 0x0000_0001_0000_0000UL;             // 4 GiB stride
+            ulong Candidate = FindHighSparseHole(Size);
+            if (Candidate == 0)
+                return 0;
 
-            for (ulong Candidate = SparseSearchBase; Candidate + Size <= SparseSearchCeil; Candidate += Step)
-            {
-                if (!IsRegionInUse(Candidate, Size))
-                {
-                    if (ReserveMemory(Candidate, Size, Protect))
-                        return Candidate;
-                    return 0;
-                }
-            }
-
-            return 0;
+            return ReserveMemory(Candidate, Size, Protect) ? Candidate : 0;
         }
 
         public bool ReserveMemory(ulong BaseAddress, ulong Size, uint Protect)
@@ -2082,12 +2099,27 @@ namespace Brovan.Core.Emulation
 
             ulong AllocationBase = Anchor.AllocationBase;
 
+            // Does the released range cover this allocation's anchor (its AllocationBase)? If so, every
+            // surviving piece of the allocation must be re-anchored (see the post-loop pass below):
+            // otherwise a survivor keeps an AllocationBase pointing into freed, reusable VA — a later
+            // reservation reuses that base, and a whole-allocation ReleaseMemory(base) then groups the
+            // still-live survivor with it and unmaps it. This is the RtlCreateHeap over-reserve pattern
+            // (reserve big, align up, release the excess-front): the heap survives as the higher piece,
+            // so the .NET GC's later reserve+release of that reused base would tear the live CRT heap out
+            // from under msvcrt (_calloc_impl use-after-free -> RtlAllocateHeap fault). AnchorFreed is a
+            // property of the allocation (base vs the freed range), so it is computed once here.
+            bool AnchorFreed = AllocationBase >= Start && AllocationBase < End;
+
             // Rescued/decommitted-page tracking for the released range is torn down first: the range
             // "truly frees" and any subsequent access there must fault.
             ReclaimRescuedPages(Start, End - Start);
 
             List<MemoryRegion> Regions = EnumerateMemoryRegionsByBase().ToList();
             List<MemoryRegion> NewRegions = new List<MemoryRegion>(Regions.Count + 2);
+            // Indices into NewRegions of the surviving pieces that belong to this allocation — the split
+            // Left/Right pieces AND any sibling region of the same allocation lying entirely beyond the
+            // freed range. Collected so the post-loop re-anchor can retarget them together.
+            List<int> GroupSurvivors = new List<int>();
             bool ReleasedAny = false;
 
             foreach (MemoryRegion Region in Regions)
@@ -2102,6 +2134,9 @@ namespace Brovan.Core.Emulation
                 ulong RegionEnd = GetRangeEnd(Region.BaseAddress, Region.Size);
                 if (RegionEnd <= Start || RegionStart >= End)
                 {
+                    // Sibling of this allocation entirely outside the freed range: survives untouched, but
+                    // it is still part of the group so it must be re-anchored if the anchor was freed.
+                    GroupSurvivors.Add(NewRegions.Count);
                     NewRegions.Add(Region);
                     continue;
                 }
@@ -2111,28 +2146,13 @@ namespace Brovan.Core.Emulation
                 ulong LeftSize = OverlapStart - RegionStart;
                 ulong RightSize = RegionEnd - OverlapEnd;
 
-                // When the released range covers this allocation's anchor (its AllocationBase), the
-                // surviving pieces must be re-anchored to their own base. Otherwise a survivor keeps an
-                // AllocationBase that now points into freed, reusable VA: a later reservation reusing that
-                // base inherits the same AllocationBase, and a whole-allocation ReleaseMemory(base) then
-                // groups BOTH by AllocationBase and unmaps the still-live survivor. This is exactly the
-                // RtlCreateHeap over-reserve pattern (reserve big, align up, release the excess-front): the
-                // heap survives as the higher piece and would otherwise inherit the freed reservation base,
-                // so the .NET GC's later reserve+release of that reused base tears the live CRT heap out
-                // from under msvcrt (_calloc_impl use-after-free -> RtlAllocateHeap fault). Re-anchoring
-                // also makes RtlDestroyHeap(heapBase) release the survivor correctly. When the anchor is
-                // NOT freed (it survives elsewhere), keep the original AllocationBase so a genuine
-                // whole-allocation release still reaches every piece.
-                bool AnchorFreed = Region.AllocationBase >= Start && Region.AllocationBase < End;
-
                 if (LeftSize > 0)
                 {
                     MemoryRegion Left = Region;
                     Left.BaseAddress = RegionStart;
                     Left.Size = LeftSize;
                     Left.RequestedSize = LeftSize;
-                    if (AnchorFreed)
-                        Left.AllocationBase = RegionStart;
+                    GroupSurvivors.Add(NewRegions.Count);
                     NewRegions.Add(Left);
                 }
 
@@ -2148,14 +2168,39 @@ namespace Brovan.Core.Emulation
                     Right.BaseAddress = OverlapEnd;
                     Right.Size = RightSize;
                     Right.RequestedSize = RightSize;
-                    if (AnchorFreed)
-                        Right.AllocationBase = OverlapEnd;
+                    GroupSurvivors.Add(NewRegions.Count);
                     NewRegions.Add(Right);
                 }
             }
 
             if (!ReleasedAny)
                 return false;
+
+            // Re-anchor pass: when the freed range covered the allocation's anchor, retarget EVERY
+            // surviving piece of the allocation to the lowest surviving base. Because AnchorFreed means
+            // AllocationBase >= Start and every group member lives at or above AllocationBase, all
+            // survivors sit at or above End — so the lowest surviving base is always outside the freed
+            // range, giving a coherent, non-freed anchor that (a) keeps no survivor pointing into freed VA
+            // and (b) leaves the remainder releasable as one unit via ReleaseMemory(newAnchor). The
+            // validated single-region front-release case (one Right survivor) re-anchors it to its own
+            // base exactly as before — byte-identical. When the anchor is NOT freed, survivors keep the
+            // original AllocationBase so a genuine whole-allocation release still reaches every piece.
+            if (AnchorFreed && GroupSurvivors.Count > 0)
+            {
+                ulong NewAnchor = ulong.MaxValue;
+                foreach (int Idx in GroupSurvivors)
+                {
+                    if (NewRegions[Idx].BaseAddress < NewAnchor)
+                        NewAnchor = NewRegions[Idx].BaseAddress;
+                }
+
+                foreach (int Idx in GroupSurvivors)
+                {
+                    MemoryRegion Survivor = NewRegions[Idx];
+                    Survivor.AllocationBase = NewAnchor;
+                    NewRegions[Idx] = Survivor;
+                }
+            }
 
             ReplaceMemoryRegions(NewRegions.OrderBy(R => R.BaseAddress).ToList());
 
@@ -2465,68 +2510,6 @@ namespace Brovan.Core.Emulation
                         WinModule PreviousModule = PreviousRip != 0 ? FindModuleByAddress(PreviousRip, Helper) : null;
                         if ((Settings.Flags & LogFlags.General) != 0)
                             TriggerEventMessage($"[!] [ENTRY] {CurrentModule.Name}!{Func} @ 0x{Address:X} from {PreviousModule?.Name} @ 0x{PreviousRip:X}", LogFlags.General);
-
-                        // Top-level CRT SEH filter: _seh_filter_exe(ULONG ExceptionNum, PEXCEPTION_POINTERS).
-                        // x64: RCX = exception code, RDX = PEXCEPTION_POINTERS. Dump the EXCEPTION_RECORD so
-                        // an exception that reached the process's last-chance filter (e.g. an unhandled
-                        // managed 0xE0434352 propagating out of coreclr) is legible: its raise-address maps
-                        // to the module/offset that threw.
-                        if ((Settings.Flags & LogFlags.General) != 0 &&
-                            _binary.Architecture == BinaryArchitecture.x64 &&
-                            Func.Contains("seh_filter", StringComparison.OrdinalIgnoreCase))
-                        {
-                            ulong PtrsAddr = ReadRegister(Registers.UC_X86_REG_RDX);
-                            if (PtrsAddr != 0 && IsRegionMapped(PtrsAddr, 0x10))
-                            {
-                                ulong RecAddr = ReadMemoryULong(PtrsAddr + 0x00);
-                                if (RecAddr != 0 && IsRegionMapped(RecAddr, 0x28))
-                                {
-                                    uint Code = ReadMemoryUInt(RecAddr + 0x00);
-                                    ulong ExcAddr = ReadMemoryULong(RecAddr + 0x10);
-                                    uint NumParams = ReadMemoryUInt(RecAddr + 0x18);
-                                    if (NumParams > 15) NumParams = 15;
-                                    WinModule ExcModule = FindModuleByAddress(ExcAddr, Helper);
-                                    ulong ExcRva = ExcModule != null ? (ExcAddr - ExcModule.MappedBase) : 0;
-                                    System.Text.StringBuilder Ps = new System.Text.StringBuilder();
-                                    for (uint i = 0; i < NumParams && IsRegionMapped(RecAddr + 0x20UL + i * 8, 8); i++)
-                                        Ps.Append($"0x{ReadMemoryULong(RecAddr + 0x20UL + i * 8):X} ");
-                                    TriggerEventMessage($"[!] [SEH-FILTER] code=0x{Code:X8} raised @ 0x{ExcAddr:X} ({ExcModule?.Name ?? "?"}+0x{ExcRva:X}) nparams={NumParams} params=[ {Ps}]", LogFlags.General);
-
-                                    // For a managed CLR throw (EXCEPTION_COMPLUS) the raise-address is always
-                                    // inside KERNELBASE!RaiseException, which hides the runtime function that
-                                    // threw. SEH filters run BEFORE unwinding, so the throw-site frames are
-                                    // still live below this filter: the captured CONTEXT (ExceptionPointers->
-                                    // ContextRecord, at [RDX+8]) holds the raising RSP. Walk it and map return
-                                    // addresses to module+offset so the topmost coreclr frame — the runtime
-                                    // function that raised the exception — becomes legible.
-                                    if (Code == 0xE0434352u)
-                                    {
-                                        ulong CtxAddr = ReadMemoryULong(PtrsAddr + 0x08);
-                                        if (CtxAddr != 0 && IsRegionMapped(CtxAddr, 0x100))
-                                        {
-                                            ulong RspCtx = ReadMemoryULong(CtxAddr + 0x98);
-                                            ulong RipCtx = ReadMemoryULong(CtxAddr + 0xF8);
-                                            WinModule RipMod = FindModuleByAddress(RipCtx, Helper);
-                                            System.Text.StringBuilder Ss = new System.Text.StringBuilder();
-                                            Ss.Append($"[!] [COMPLUS-STACK] hr=0x{(NumParams > 0 ? (uint)ReadMemoryULong(RecAddr + 0x20) : 0):X8} rip=0x{RipCtx:X} ({RipMod?.Name ?? "?"}+0x{(RipMod != null ? RipCtx - RipMod.MappedBase : 0):X}) frames:");
-                                            int Found = 0;
-                                            for (ulong off = 0; off <= 0x800 && Found < 24; off += 8)
-                                            {
-                                                if (!IsRegionMapped(RspCtx + off, 8)) continue;
-                                                ulong Val = ReadMemoryULong(RspCtx + off);
-                                                WinModule FrameMod = FindModuleByAddress(Val, Helper);
-                                                if (FrameMod != null)
-                                                {
-                                                    Ss.Append($" +0x{off:X}={FrameMod.Name}+0x{Val - FrameMod.MappedBase:X}");
-                                                    Found++;
-                                                }
-                                            }
-                                            TriggerEventMessage(Ss.ToString(), LogFlags.General);
-                                        }
-                                    }
-                                }
-                            }
-                        }
                     }
                 }
             }
