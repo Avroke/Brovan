@@ -1907,20 +1907,29 @@ parks the same way with or without it, and implementing it on x86 only would div
 x64 baseline. There is no evidence the timer is needed: every al-khaser result is captured before
 the pump.
 
-**Residual (shared x64+x86, NOT x86-specific): the parked GUI pump doesn't reach a clean
-`ExitProcess`.** Once the last runnable thread parks in a `GetMessage` wait with no message source,
-`RunMlfqScheduler` enters the `HasActiveGetMessageWait()` poll branch
-(`BinaryEmulator.cs` ~L2681): `Thread.Sleep(10ms)` + advance virtual time, re-scan wakeups,
-repeat — forever, because with `SetTimer` unimplemented no `WM_TIMER` is ever queued and no other
-thread posts a message. This poll increments neither `Total` nor `Slices`, so it is bounded only
-by the scan's wall-clock cancellation (→ `Timeout` verdict) or, interactively, hangs. **`al-khaser_x64`
-does exactly the same** (both `exit=124` at 420s in the interactive harness), so this is a core
-MLFQ-scheduler concern — cleanly terminating an idle GUI pump with no possible wakeup source —
-not a WOW64 gap. It should be a deliberate scheduler change validated against the full AntiVm +
-fast cohorts (a mis-tuned bail would cut off a worker-posted-message pump), not a WOW64 patch.
-Sketch of the safe guard: in the `HasActiveGetMessageWait()` branch, if there are no registered
-timers AND no live non-parked thread that could `PostMessage`, the wait is unsatisfiable →
-terminate cleanly (analogous to `LivelockEscapeSlices`, but for the all-parked case).
+**Idle-pump clean termination — DONE (scheduler frontier F2, shared x64+x86).** Once the last
+runnable thread parked in a `GetMessage` wait with no message source, `RunMlfqScheduler`'s
+`HasActiveGetMessageWait()` poll branch (`BinaryEmulator.cs` ~L2681) polled forever
+(`Thread.Sleep(10ms)` + advance virtual time), bounded only by the scan's wall-clock cancellation —
+so the interactive harness hung to the timeout (both binaries `exit=124`) and a production scan
+would report `Timeout` for a sample that actually finished. That branch is reached only when
+**nothing is runnable AND no thread has a timed wakeup** (`TryGetNextWaitSleepMs` already returned
+false just above) AND a `GetMessage` wait is active — so the wait can *never* be satisfied (no timer
+will fire — `SetTimer` is unimplemented on both bitnesses; no runnable thread can `PostMessage`; a
+thread with a timed wakeup takes the earlier sleep-advance branch, not this one). Added a bounded
+idle-pump watchdog (sibling to the `LivelockEscapeSlices` spin watchdog): count consecutive futile
+park-polls, **reset to 0 the instant any thread actually runs**, and after 256 terminate the
+scheduler cleanly. A real pump fed by a periodically-runnable worker never accumulates (that worker
+is dequeued and run, resetting the counter), so only a genuinely deadlocked idle pump bails. Result:
+
+| | before | after |
+|---|---|---|
+| `al-khaser_x86` | `exit=124` @420s (hang) | **`exit=0` @116s, 237 GOOD / 18 BAD** |
+| `al-khaser_x64` | `exit=124` @300s+ (hang) | **`exit=0` @45s, 244 GOOD / 11 BAD** |
+
+Both now run all 15 sections and reach a **clean terminus with the full result set** instead of
+hanging; GOOD/BAD counts unchanged. **al-khaser x86/WOW64 now emulates end-to-end and exits
+cleanly, at parity with x64.**
 Nearby gaps still `NOT_SUPPORTED` on x86:
 `NtQueryInformationThread` (ThreadHideFromDebugger / ThreadDynamicCodePolicyInfo),
 `NtQuerySystemInformation` class `0x73`. (`NtQueryVirtualMemory`
