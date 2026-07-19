@@ -2948,6 +2948,29 @@ namespace Brovan.Core.Emulation
         }
 
         /// <summary>
+        /// Classifies an unmapped-fault address so the log discriminates the cause: an address inside a
+        /// Brovan-freed region is a use-after-free (a MEM_RELEASE / decommit-reclaim over-unmap); a
+        /// decommitted page that reached here is a decommit-rescue miss; anything else is a wild or
+        /// corrupted pointer value (never-mapped) — e.g. corrupted heap free-list metadata. Diagnostic
+        /// only; used to root-cause the rare .NET-init RtlAllocateHeap fault (F-CLRINIT-AV).
+        /// </summary>
+        private string ClassifyFaultAddress(ulong Address)
+        {
+            try
+            {
+                if (_freedmemory != null && _freedmemory.Count > 0 && IsRegionFreed(Address, true))
+                    return " [freed-region: use-after-free]";
+                if (DecommittedPages.Contains(Address & ~0xFFFUL))
+                    return " [decommitted: rescue-miss]";
+            }
+            catch
+            {
+                return " [classify-error]";
+            }
+            return " [never-mapped: wild/corrupt-ptr]";
+        }
+
+        /// <summary>
         /// Handles invalid memory operations and pass the exception to user-mode.
         /// </summary>
         private bool InvalidMemoryHandler(BackendMemoryAccessType Type, ulong Address, uint Size, ulong value)
@@ -2974,7 +2997,7 @@ namespace Brovan.Core.Emulation
 
             ulong Rip = ReadRegister(IPRegister);
             if ((Settings.Flags & LogFlags.Issues) != 0)
-                TriggerEventMessage($"[-] Invalid memory {GetAction(Type)} related to the address 0x{Address:X} at 0x{Rip:X}.", LogFlags.Issues);
+                TriggerEventMessage($"[-] Invalid memory {GetAction(Type)} related to the address 0x{Address:X} at 0x{Rip:X}{ClassifyFaultAddress(Address)}.", LogFlags.Issues);
 
             bool Continue = false;
             if (Settings.InvalidOperationsCallback != null)
