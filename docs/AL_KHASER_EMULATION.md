@@ -1891,17 +1891,36 @@ Sandbox / VM detection suite runs end-to-end (Debugger, DLL Injection, Generic S
 KVM, Parallels, QEMU, Timing-attacks, Virtual PC, VirtualBox, VMWare, Wine, Xen — every 15-section
 banner is now printed).
 
-**Next frontier — message-pump spin: `NtUserGetMessage` (0x1006) / `NtUserSetTimer` (0x1018)
-still gated to x64.** With combase's `CoInitializeSecurity` clean, al-khaser enters a message
-pump (`GetMessage` loop) for a timing / focus probe that expects a `WM_TIMER` fired by
-`SetTimer(hwnd, id, ms, callback)`. On WOW64 x86 both syscalls fall through to `WinUnimplemented`:
-`NtUserGetMessage` returns `STATUS_NOT_SUPPORTED` immediately (so the pump busy-loops instead of
-waiting for a message that never comes), and `NtUserSetTimer` never registers the timer that
-would have signalled a `WM_TIMER` into the queue. Removing just the `NtUserGetMessage` x64 gate
-isn't enough — the x64 handler puts the thread into `WaitState` and returns `STATUS_PENDING`,
-which without a timer/message source deadlocks the whole scheduler (Brovan drops the WOW64
-x86 into an infinite pump). Real fix needs: (a) `NtUserGetMessage` bitness-agnostic, (b)
-`NtUserSetTimer` bitness-agnostic, (c) the timer-fires-`WM_TIMER`-into-queue wiring on x86.
+**Message-pump spin — FIXED (`NtUserGetMessage` now bitness-agnostic); residual is a shared
+scheduler-park.** After printing all 237 results al-khaser enters a final `GetMessage` pump
+(`SetTimer` + `while (GetMessage(&msg, NULL, 0, 0) > 0)`). `NtUserGetMessage` (0x1006) was gated
+to x64, so on WOW64 the 32-bit `user32!GetMessageW` wrapper got `STATUS_NOT_SUPPORTED` and spun
+its retry loop **~10.7 million** times before the wall-clock budget. Fixed by removing the gate:
+the handler already reads args via `GetArg64`, and `Win32kHelper.WriteMessage` / `TryReadMessage`
+are now bitness-aware (28-byte MSG on x86 vs 48 on x64 — a 64-bit MSG written into a 32-bit
+caller's buffer scrambles `wParam`/`lParam`/`pt`). WOW64 now gets the **exact x64 terminus**:
+`NtUserGetMessage` returns `STATUS_PENDING` **once**, the thread parks (spin count 10.7M → 1),
+verdict stays **237 GOOD / 18 BAD**.
+
+**`NtUserSetTimer` (0x1018) is intentionally left unimplemented on BOTH bitnesses** — the pump
+parks the same way with or without it, and implementing it on x86 only would diverge from the
+x64 baseline. There is no evidence the timer is needed: every al-khaser result is captured before
+the pump.
+
+**Residual (shared x64+x86, NOT x86-specific): the parked GUI pump doesn't reach a clean
+`ExitProcess`.** Once the last runnable thread parks in a `GetMessage` wait with no message source,
+`RunMlfqScheduler` enters the `HasActiveGetMessageWait()` poll branch
+(`BinaryEmulator.cs` ~L2681): `Thread.Sleep(10ms)` + advance virtual time, re-scan wakeups,
+repeat — forever, because with `SetTimer` unimplemented no `WM_TIMER` is ever queued and no other
+thread posts a message. This poll increments neither `Total` nor `Slices`, so it is bounded only
+by the scan's wall-clock cancellation (→ `Timeout` verdict) or, interactively, hangs. **`al-khaser_x64`
+does exactly the same** (both `exit=124` at 420s in the interactive harness), so this is a core
+MLFQ-scheduler concern — cleanly terminating an idle GUI pump with no possible wakeup source —
+not a WOW64 gap. It should be a deliberate scheduler change validated against the full AntiVm +
+fast cohorts (a mis-tuned bail would cut off a worker-posted-message pump), not a WOW64 patch.
+Sketch of the safe guard: in the `HasActiveGetMessageWait()` branch, if there are no registered
+timers AND no live non-parked thread that could `PostMessage`, the wait is unsatisfiable →
+terminate cleanly (analogous to `LivelockEscapeSlices`, but for the all-parked case).
 Nearby gaps still `NOT_SUPPORTED` on x86:
 `NtQueryInformationThread` (ThreadHideFromDebugger / ThreadDynamicCodePolicyInfo),
 `NtQuerySystemInformation` class `0x73`. (`NtQueryVirtualMemory`
