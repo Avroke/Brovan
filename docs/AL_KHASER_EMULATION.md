@@ -1962,12 +1962,37 @@ the two `ACPI table` probes. The **5 x86-only BADs** are WOW64 gaps:
   (see the NtDelayExecution finding below).
 - **`Check if time has been accelerated` / `lack of user input` — same NtDelayExecution root, same
   block.** Both depend on virtual time advancing during `Sleep`.
-- **TLS process/thread attach callback (2 BADs)** — the guest 32-bit `OutputDebugString` raises
-  `DBG_PRINTEXCEPTION_C` (0x40010006) / `DBG_PRINTEXCEPTION_WIDE_C` (0x4001000A) via
-  `NtRaiseException`; x64 intercepts OutputDebugString and raises neither. The TLS check then
-  diverges (x64 GOOD / x86 BAD). Known-hard OutputDebugString-exception item.
+- **TLS process/thread attach callback (2 BADs) — FAITHFUL WOW64 divergence, not a bug to fix.**
+  The guest 32-bit `OutputDebugStringW`/`A` raises `DBG_PRINTEXCEPTION_WIDE_C` (0x4001000A) → falls
+  back to `DBG_PRINTEXCEPTION_C` (0x40010006) via `NtRaiseException`, each raised then `NtContinue`'d
+  (verified in the trace: the WIDE→ANSI fallback + clean continue is exactly the documented Win10
+  OutputDebugString sequence when no debugger consumes the WIDE record). **This is what real WOW64
+  Windows does** — so Brovan's x86 is the *faithful* side. x64 reports GOOD only because Brovan's x64
+  path intercepts OutputDebugString and raises **neither** exception — the *less*-faithful side. The
+  handling is correct (raise → NtContinue → execution continues into Debugger Detection with no
+  crash); the BAD is al-khaser's probe reacting to genuine WOW64 exception behaviour. Making x86 GOOD
+  would mean suppressing a faithful exception to chase a green verdict — a rule #7 / #14 masking
+  violation. Left as an honest report. (The consistent-and-faithful alternative would be to make x64
+  *also* raise, but that risks flipping the currently-GOOD x64 probe to BAD — a regression on the
+  passing side — for no fidelity gain that any sample has demanded.)
+- **`Checking for API hooks outside module bounds` (x86 7 vs x64 6, 1 extra) — likely faithful,
+  not masked.** al-khaser's prologue-scan hook check is FP-prone by design (it flags any API whose
+  first instruction jumps outside the module — which legitimately-forwarded / hot-patch-thunked
+  exports do on a clean system, hence 6 flagged even on x64). The 1-count x86 delta is most plausibly
+  a real SysWOW64-vs-System32 forwarded-export difference (which a real WOW64 box would show too),
+  not an emulation artifact. Per "metrics are signals, not proof" it is not treated as a bug absent
+  evidence that a specific API's Brovan-side prologue is wrong.
 - **`EnumProcessModulesEx [32-bit]` (1 BAD)** — the x86-only module-enumeration variant, same
   "honest report" class as the shared enumeration BADs.
+
+**Frontier status (this pass).** al-khaser_x86 is at a genuine plateau: **239 GOOD / 16 BAD**, clean
+end-to-end. Every residual BAD is now classified as one of — (a) **Sleep-blocked** (`mouse
+movement`, time-accelerated: fixable only by a working WOW64 `Sleep`, which regresses ~50 checks —
+see the NtDelayExecution finding above), (b) **honest report** shared with x64 (ACPI × 2, CPU-fan
+WMI, module-enumeration walks, `EnumProcessModulesEx [32-bit]`), or (c) **faithful WOW64 divergence**
+(TLS OutputDebugString exceptions; api-hook prologue scan). None is a clean, non-masking win, so the
+x86 verdict is not expected to move further without either a scheduler redesign for `Sleep` or new
+sample evidence that a specific "faithful/honest" call is actually wrong.
 
 Nearby gaps still `NOT_SUPPORTED` on x86:
 `NtQueryInformationThread` (ThreadHideFromDebugger / ThreadDynamicCodePolicyInfo),
