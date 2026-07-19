@@ -1932,27 +1932,36 @@ hanging; GOOD/BAD counts unchanged. **al-khaser x86/WOW64 now emulates end-to-en
 cleanly, at parity with x64.**
 
 **BAD-probe parity — closing the x86↔x64 delta.** With the run clean end-to-end, the residual
-false positives are: **x64 = 11 BAD, x86 = 18 BAD**. The 11 shared BADs are the "honest reports"
+false positives are now: **x64 = 11 BAD, x86 = 16 BAD** (down from 18 — `FindWindowEx` and
+`NtYieldExecution` fixed across the last two passes). The 11 shared BADs are the "honest reports"
 both bitnesses give — the module-enumeration walks (`GetModuleInformation`, hidden-modules,
 `LdrEnumerateLoadedModules`, `EnumProcessModulesEx [ALL]/[64-bit]`) that faithfully report the
 loader-mapped system DLLs, plus `VM Driver Services`, `lack of user input`, `CPU fan via WMI`, and
-the two `ACPI table` probes. The **7 x86-only BADs** are WOW64 gaps:
+the two `ACPI table` probes. The **5 x86-only BADs** are WOW64 gaps:
 
 - **`FindWindow("VBoxTrayToolWndClass")` — FIXED** (`NtUserFindWindowEx` was x64-gated; the 32-bit
   wrapper mis-read `NOT_SUPPORTED` as a found HWND → phantom VBox window). Now bitness-aware
   (`UNICODE_STRING` 8-byte on x86 / 16 on x64) → the probe returns NULL → **GOOD**. Result:
   **x86 237 → 238 GOOD / 18 → 17 BAD**, x64 unchanged at 244.
-- **`Checking mouse movement` / `Check if time has been accelerated` / `Checking NtYieldExecution`
-  (3 BADs, timing) — blocked on a WOW64 syscall-return-EIP frontier.** These all fail because
-  `NtDelayExecution` (0x60034) and `NtYieldExecution` (0x10046) are x64-gated → `NOT_SUPPORTED` on
-  WOW64, so Sleep doesn't advance virtual time (elapsed ≈ 0 → "time accelerated") and the yield
-  probe counts every call as manipulated. **Naive gate removal crashes** Debugger Detection at
-  `0xC0000005` (~15.75M): both handlers manually advance EIP via `WriteRegister(IPRegister,
-  GetSyscallRip(...) + 2)`, which is correct for the 2-byte x64 `syscall` but mis-lands on the
-  WOW64 stub (the working `NtUserGetMessage` never hits this because its PENDING park sets
-  `IP = SyscallRip` to *re-run*, not advance). Correct fix needs the WOW64 syscall-return EIP
-  semantics (likely: let the dispatcher advance on WOW64 instead of the handler) — a deliberate,
-  separately-validated change, reverted for now to hold the 238-GOOD line.
+- **`Checking NtYieldExecution` (1 BAD) — FIXED.** `NtYieldExecution` (0x10046) was x64-gated →
+  `NOT_SUPPORTED` on WOW64, which the scheduler-manipulation probe read as a tell. The earlier
+  naive-gate-removal crash (`0xC0000005` in Debugger Detection) is now root-caused to the
+  **WOW64 syscall-return-EIP model** (see the dedicated section below): the handler's unconditional
+  `WriteRegister(IPRegister, SyscallRip + 2)` double-stepped on WOW64. Fix scopes the manual `+2` to
+  x64 (byte-for-byte preserved) and lets the WOW64 `sysenter` auto-advance carry the return; the
+  reschedule path writes `SyscallRip` so the post-return auto-advance lands at `+2`. Result:
+  **x86 238 → 239 GOOD / 17 → 16 BAD**, x64 unchanged at 244.
+- **`Checking mouse movement` (1 BAD) — GetCursorPos ungated, but the probe stays BAD (Sleep
+  dependency).** `NtUserCallTwoParam` (the GetCursorPos multiplexer, code 0x7F) was x64-gated → the
+  cursor POINT stayed (0,0) on WOW64. Ungated (the body is already bitness-agnostic — POINT is 8
+  bytes on both), so GetCursorPos now returns the real jittered position: a genuine WOW64 correctness
+  fix on a path al-khaser exercises, and zero-regression. But the probe **still reports BAD** because
+  al-khaser `Sleep`s once between its two cursor reads and the cursor's position is a function of the
+  virtual clock — with `NtDelayExecution` gated the clock barely advances, so the two reads coincide.
+  Making the probe flip requires a working WOW64 `Sleep`, which is **not tractable without regression**
+  (see the NtDelayExecution finding below).
+- **`Check if time has been accelerated` / `lack of user input` — same NtDelayExecution root, same
+  block.** Both depend on virtual time advancing during `Sleep`.
 - **TLS process/thread attach callback (2 BADs)** — the guest 32-bit `OutputDebugString` raises
   `DBG_PRINTEXCEPTION_C` (0x40010006) / `DBG_PRINTEXCEPTION_WIDE_C` (0x4001000A) via
   `NtRaiseException`; x64 intercepts OutputDebugString and raises neither. The TLS check then
@@ -1967,6 +1976,55 @@ MemoryMappedFilenameInformation, `NtQueryInformationFile`, and syscall `0x1E9`
 `NtWow64IsProcessorFeaturePresent` are now closed — see below.)
 
 The **x86 registry** sibling gap is now closed (see below).
+
+#### The WOW64 syscall-return-EIP model (definitive)
+
+Every earlier "naive gate removal crashes" note traces to one asymmetry, now pinned by an A/B test
+(`NtYieldExecution` ungated with the x64 path held byte-for-byte identical, WOW64 the only variable
+— it flipped GOOD with **no** x64 change and no crash, and every other known-good handler fits the
+same rule):
+
+- **x64 `syscall` INSN hook** — if the handler *writes* the IP register, that value is used verbatim
+  (no auto-advance); if it does *not*, Unicorn auto-advances RIP past the 2-byte `syscall`.
+- **WOW64 `sysenter` INSN hook** — Unicorn auto-advances EIP by 2 after the handler returns
+  **unconditionally**, whether or not the handler wrote EIP (the same quirk `NtRaiseException`
+  compensates for with its `EIP - 2` pre-subtraction).
+
+Consequences for handler authors:
+- A plain return-value handler (writes RAX/EAX via `SetRawSyscallReturn`, never touches IP) is
+  correct on **both** — both hooks auto-advance. This is why the trivially-bitness-agnostic sweep
+  worked: those handlers never write IP.
+- A handler that manually advances (`WriteRegister(IP, SyscallRip + 2)`) is correct on x64 (its write
+  suppresses the auto-advance) but **double-steps on WOW64** (write + unconditional +2 → `SyscallRip
+  + 4`, past the WOW64 `push edx ; ret` trampoline → `0xC0000005`). This was the exact
+  NtYieldExecution / NtDelayExecution crash.
+- To make the guest **resume at `Target`** from a handler that writes IP: write `Wow64 ? Target - 2 :
+  Target`. To make it **re-execute the syscall** (a park): write `Wow64 ? SyscallRip - 2 :
+  SyscallRip`. The scheduler's `CompleteWait` wake path is separate (it sets `Context.RIP =
+  WaitReturnRIP` directly and re-enters via `Emulate`, bypassing the hook), so park **wake** is
+  already bitness-agnostic — only the park-*time* handler write needs the rule.
+
+#### "Should we just remove all the `WinUnimplemented` x64 gates?" — no, and here is the evidence
+
+64 handlers still carry an `if (Architecture != x64) return WinUnimplemented` gate. A blanket sweep
+is the wrong shape of change: a gate is only safe to drop when the handler body is already
+bitness-agnostic. Two outcomes from this pass make the point concretely:
+
+- **Safe (dropped):** `NtYieldExecution`, `NtUserCallTwoParam` (GetCursorPos), and the earlier
+  `NtUserFindWindowEx` / `NtUserGetMessage` — bodies already read args via `GetArg64` and write
+  pointer-/POINT-sized OUT slots correctly. Each verified individually against **both** al-khaser
+  binaries.
+- **Unsafe (kept gated):** **`NtDelayExecution`.** Ungating it — via *either* the deadline park
+  *or* an inline "advance the virtual clock and return" model — makes `Sleep` actually consume
+  virtual time, and that **regresses al-khaser_x86 from 239 to ~182 GOOD**: advancing the clock during
+  `Sleep` perturbs al-khaser's control flow and it skips ~50 process-enumeration / WMI checks (the run
+  diverges mid-anti-VM section, e.g. at `Checking NTEventLog from WMI`). The park variant and the
+  inline-advance variant both regress, and both diverge at a *different* check each run — i.e. the
+  perturbation is timing-sensitive, not a fixable off-by-one. A single verdict flip (`mouse movement`)
+  at the cost of ~50 checks is a net loss, so the gate stays until the interaction between
+  virtual-time advancement and al-khaser's late-section scheduling is understood. This is exactly the
+  "make all samples green" anti-pattern the rules warn against — the gate encodes real "not safely
+  ungatable yet" knowledge, not laziness.
 
 #### Parent-process `std::filesystem::equivalent` regression → root-caused (this pass)
 
