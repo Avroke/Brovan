@@ -2111,12 +2111,28 @@ namespace Brovan.Core.Emulation
                 ulong LeftSize = OverlapStart - RegionStart;
                 ulong RightSize = RegionEnd - OverlapEnd;
 
+                // When the released range covers this allocation's anchor (its AllocationBase), the
+                // surviving pieces must be re-anchored to their own base. Otherwise a survivor keeps an
+                // AllocationBase that now points into freed, reusable VA: a later reservation reusing that
+                // base inherits the same AllocationBase, and a whole-allocation ReleaseMemory(base) then
+                // groups BOTH by AllocationBase and unmaps the still-live survivor. This is exactly the
+                // RtlCreateHeap over-reserve pattern (reserve big, align up, release the excess-front): the
+                // heap survives as the higher piece and would otherwise inherit the freed reservation base,
+                // so the .NET GC's later reserve+release of that reused base tears the live CRT heap out
+                // from under msvcrt (_calloc_impl use-after-free -> RtlAllocateHeap fault). Re-anchoring
+                // also makes RtlDestroyHeap(heapBase) release the survivor correctly. When the anchor is
+                // NOT freed (it survives elsewhere), keep the original AllocationBase so a genuine
+                // whole-allocation release still reaches every piece.
+                bool AnchorFreed = Region.AllocationBase >= Start && Region.AllocationBase < End;
+
                 if (LeftSize > 0)
                 {
                     MemoryRegion Left = Region;
                     Left.BaseAddress = RegionStart;
                     Left.Size = LeftSize;
                     Left.RequestedSize = LeftSize;
+                    if (AnchorFreed)
+                        Left.AllocationBase = RegionStart;
                     NewRegions.Add(Left);
                 }
 
@@ -2132,6 +2148,8 @@ namespace Brovan.Core.Emulation
                     Right.BaseAddress = OverlapEnd;
                     Right.Size = RightSize;
                     Right.RequestedSize = RightSize;
+                    if (AnchorFreed)
+                        Right.AllocationBase = OverlapEnd;
                     NewRegions.Add(Right);
                 }
             }
