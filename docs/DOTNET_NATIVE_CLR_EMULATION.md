@@ -916,16 +916,27 @@ n'est qu'une question de *quelle enveloppe de bootstrap* attaquer en premier.
   riche (`Console.WriteLine` + `for`/`List`/LINQ) **charge bien `System.Console.dll` + `System.Linq.dll`,
   exécute ~140 M instructions**, mais **lève une `ArgumentOutOfRangeException` non gérée
   (`0xE0434352`, hr `0x80131502`) au fond de l'init de `System.Console`** → terminaison `0xE0434352`.
-  Diagnostic (trace `[CONDRV-API]` ajoutée puis retirée) : le CRT natif imprime via `NtWriteFile` direct
-  (OK — cf. `hello_native`), **mais `System.Console` de .NET Core dialogue avec `\Device\ConDrv` par
-  `NtDeviceIoControlFile(IoctlConDrvIssueUserIo)`** et le `ConsoleServer` reçoit un **`ApiNumber` parasite**
-  (une valeur pointeur, l'offset `0x28` du header ne correspond pas au `CONSOLE_API_MSG` de ce build) **et
-  un `OutputBuffer` vide (`outLen=0`)** → `HandleIssueUserIo` sort par la garde de buffer vide sans servir
-  la requête → `GetConsoleOutputCP`/`GetConsoleScreenBufferInfo` renvoient 0/garbage → l'init `Console`
-  jette. **C'est un chantier ConDrv à part** (protocole `CONSOLE_API_MSG` + acheminement des buffers
-  METHOD_NEITHER par `NtDeviceIoControlFile`, offsets du header, mécanisme de réponse), pas un stub isolé.
+  Le CRT natif imprime via `NtWriteFile` direct (OK — cf. `hello_native`), **mais `System.Console` de
+  .NET Core dialogue avec `\Device\ConDrv` par `NtDeviceIoControlFile(IoctlConDrvIssueUserIo=0x00500016)`**.
+  Le `ConsoleServer` lit l'`ApiNumber` à l'offset `0x28` du buffer message, or **ce n'est PAS là qu'il est**
+  → il lit une valeur-pointeur parasite, et l'`OutputBuffer` du IOCTL est vide (`outLen=0`) → `HandleIssueUserIo`
+  sort par la garde de buffer vide sans servir la requête → les requêtes console renvoient 0/garbage →
+  l'init `Console` jette. **Protocole filaire décodé (dump `[CONDRV-RAW]`/`[CONDRV-SUB]`, retirés)** — le
+  buffer message du IOCTL est un **`CD_USER_DEFINED_IO`** :
+  `[0x00] HANDLE Client · [0x08] ULONG InputCount · [0x0C] ULONG OutputCount · [0x10] CD_IO_BUFFER[]`, chaque
+  **`CD_IO_BUFFER = { ULONG Size; ULONG Pad; PVOID Buffer; }`** (16 o). Donc pour `InputCount=OutputCount=1` :
+  buffer d'entrée `{ Size=[0x10], Buf=[0x18] }`, buffer de sortie `{ Size=[0x20], Buf=[0x28] }`.
+  **L'`ApiNumber` (0x0100xxxx) est le 1er DWORD du sous-buffer d'ENTRÉE**, pas du message : dump confirmé
+  `inData=[08 00 00 01 …]` = `0x01000008` = `ApiGetConsoleMode` (constante déjà présente dans `ConsoleServer`).
+  Le sous-buffer d'entrée porte `CONSOLE_MSG_HEADER { ApiNumber; ApiDescriptorSize } + params` ; **la réponse
+  doit être écrite dans le sous-buffer de SORTIE** (`Buf=[0x28]`, `Size=[0x20]`) via `Instance.WriteMemory`,
+  pas dans `Data.OutputBuffer` (vide). **Correctif à faire** (chantier ConsoleServer ciblé, mais par-API donc
+  non trivial) : dans `HandleIssueUserIo`, parser `CD_USER_DEFINED_IO` depuis `Data.InputBuffer`, lire
+  l'`ApiNumber`+params via `Instance.ReadMemory(InBuf, InSize)`, servir l'API, écrire la réponse via
+  `Instance.WriteMemory(OutBuf, …)`. Pour débloquer `Console.WriteLine` il suffit de `GetConsoleMode`
+  (init) + `WriteConsole` (sortie) corrects ; risque de régression sur les apps console natives → à valider.
   Le milestone J5 (atteindre `Main` managé, déterministe) reste **acquis** ; la sortie console managée est
-  la prochaine étape.
+  la prochaine étape, désormais avec le protocole filaire connu.
 - **F-FRAMEWORK — surface BCL réelle.** Selon ce que l'assembly touche, le CLR
   charge de plus en plus d'assemblies système ⇒ plus de fichiers VFS + plus de
   syscalls. La couverture croît avec le corpus, pas d'un coup.
