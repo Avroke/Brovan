@@ -2973,8 +2973,11 @@ namespace Brovan.Core.Emulation
 
         /// <summary>
         /// Maps a guest address to "module+0xrva" if it lies inside a loaded Windows module, else null.
+        /// Single source of truth for the address-to-module symbolisation used by the diagnostic dumps
+        /// (fault call-stack, free-track, NtRaiseException [CLR-AV]); callers that want a placeholder
+        /// for an unmapped address append <c>?? "unmapped"</c>.
         /// </summary>
-        private string DescribeModuleAddress(ulong Address)
+        internal string DescribeModuleRva(ulong Address)
         {
             if (WinHelper?.WinModules == null)
                 return null;
@@ -3011,7 +3014,7 @@ namespace Brovan.Core.Emulation
                     if (!IsRegionMapped(Rsp + Off, 8))
                         continue;
                     ulong Val = ReadMemoryULong(Rsp + Off);
-                    string M = DescribeModuleAddress(Val);
+                    string M = DescribeModuleRva(Val);
                     if (M != null)
                     {
                         Sb.Append($" +0x{Off:X}={M}");
@@ -3053,7 +3056,7 @@ namespace Brovan.Core.Emulation
                         if (!IsRegionMapped(Rsp + Off, 8))
                             continue;
                         ulong Val = ReadMemoryULong(Rsp + Off);
-                        string M = DescribeModuleAddress(Val);
+                        string M = DescribeModuleRva(Val);
                         if (M != null)
                         {
                             Sb.Append($" +0x{Off:X}={M}");

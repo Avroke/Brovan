@@ -137,30 +137,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                     ulong AccessKind = Parameters.Length > 0 ? Parameters[0] : 0;
                     ulong AccessAddr = Parameters.Length > 1 ? Parameters[1] : 0;
                     string Kind = AccessKind == 0 ? "read" : AccessKind == 1 ? "write" : AccessKind == 8 ? "execute" : $"0x{AccessKind:X}";
-                    Instance.TriggerEventMessage($"[!] [CLR-AV] tid={Instance.CurrentThreadId} faultRip=0x{FaultRip:X} ({DescribeModuleRva(Instance, FaultRip)}) access={Kind} addr=0x{AccessAddr:X}", LogFlags.Issues);
+                    Instance.TriggerEventMessage($"[!] [CLR-AV] tid={Instance.CurrentThreadId} faultRip=0x{FaultRip:X} ({Instance.DescribeModuleRva(FaultRip) ?? "unmapped"}) access={Kind} addr=0x{AccessAddr:X}", LogFlags.Issues);
                 }
             }
             Instance._emulator.StopEmulation();
 
             return NTSTATUS.STATUS_SUCCESS;
-        }
-
-        // If <addr> lies inside a loaded module's image, return "name+0xrva", else "unmapped".
-        private static string DescribeModuleRva(BinaryEmulator Instance, ulong Addr)
-        {
-            if (Instance.WinHelper?.WinModules == null)
-                return "unmapped";
-
-            foreach (WinModule M in Instance.WinHelper.WinModules)
-            {
-                if (M == null || M.SizeOfImage == 0)
-                    continue;
-
-                if (Addr >= M.MappedBase && Addr < M.MappedBase + M.SizeOfImage)
-                    return $"{M.Name}+0x{Addr - M.MappedBase:X}";
-            }
-
-            return "unmapped";
         }
     }
 }
