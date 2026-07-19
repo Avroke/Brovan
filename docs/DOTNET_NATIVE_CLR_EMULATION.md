@@ -869,9 +869,9 @@ n'est qu'une question de *quelle enveloppe de bootstrap* attaquer en premier.
   avant `Main`.
 - **F-CLRINIT-AV — déterminisme de J5 : use-after-free du tas CRT → AV `RtlAllocateHeap` → deadlock loader — ✅ RÉSOLU.**
   Avant correctif : J5 **fiable dans le cas commun mais non déterministe** (~**1/22** runs deadlockaient tôt,
-  ~19 M instr, le reste propre à ~110,35 M). **Après correctif : 45/45 runs propres, 0 faute** (batch de
-  validation ; baseline ~2 fautes attendues) + régression native intacte (`hello_native` : sortie propre,
-  1,97 M instr). **Cause racine symbolisée** (llvm-symbolizer + PDB Microsoft) : sur le run
+  ~19 M instr, le reste propre à ~110,35 M). **Après correctif : 105/105 runs propres, 0 faute** (deux batchs
+  45 + 60 ; baseline ~4-5 fautes attendues, P(0|non-corrigé) < 1 %) + régression native intacte
+  (`hello_native` : sortie propre, 1,97 M instr). **J5 est désormais déterministe.** **Cause racine symbolisée** (llvm-symbolizer + PDB Microsoft) : sur le run
   qui deadlocke, l'instruction fautante `ntdll!RtlAllocateHeap+0x2A9C0` est `cmp [rbx+0x10], 0xDDEEDDEE`
   (lecture de la **signature `_SEGMENT_HEAP`**) avec `rbx=rcx=HeapHandle` **corrompu** → **ce n'est pas
   une corruption de free-list mais un `HeapHandle` invalide passé à `RtlAllocateHeap`**. Chaîne d'appel
