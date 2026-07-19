@@ -880,8 +880,13 @@ n'est qu'une question de *quelle enveloppe de bootstrap* attaquer en premier.
   coreclr/clrjit) pour identifier la fonction runtime qui faute et le gap émulateur sous-jacent
   (probable : mécanisme d'AV matérielle utilisé par coreclr — null-check / write-barrier / suspension
   GC via redirection — dont le VEH n'est pas correctement ré-entré). **`NtTerminateProcess(NULL)`**
-  (reap des threads de fond au shutdown) est **corrigé** en amont, pour que le chemin de sortie propre
-  post-`Main` soit prêt une fois le déterminisme rétabli.
+  (reap des threads de fond au shutdown) est **corrigé** en amont : **validé bout-en-bout** sur un run
+  où l'AV n'a pas fauté — `Main` retourne 5, `RtlExitUserProcess` → `NtTerminateProcess(NULL,5)` reape
+  le finalizer + les workers (`STATUS_SUCCESS`, plus d'`ACCESS_DENIED`), self-terminate, puis
+  **`Scheduler finished: no live threads`** à ~110 M instructions. Avant ce correctif, le meilleur cas
+  atteignait `Exit(5)` mais spinnait sur les threads runtime orphelins ; désormais le processus se
+  termine proprement. Reste donc uniquement le **déterminisme** (l'AV non-déterministe ci-dessus) pour
+  un J5 fiable à 100 %.
 - **F-FRAMEWORK — surface BCL réelle.** Selon ce que l'assembly touche, le CLR
   charge de plus en plus d'assemblies système ⇒ plus de fichiers VFS + plus de
   syscalls. La couverture croît avec le corpus, pas d'un coup.
