@@ -2971,6 +2971,61 @@ namespace Brovan.Core.Emulation
         }
 
         /// <summary>
+        /// Maps a guest address to "module+0xrva" if it lies inside a loaded Windows module, else null.
+        /// </summary>
+        private string DescribeModuleAddress(ulong Address)
+        {
+            if (WinHelper?.WinModules == null)
+                return null;
+
+            foreach (var M in WinHelper.WinModules)
+            {
+                if (M == null || M.SizeOfImage == 0)
+                    continue;
+                if (Address >= M.MappedBase && Address < M.MappedBase + M.SizeOfImage)
+                    return $"{M.Name}+0x{Address - M.MappedBase:X}";
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// On an invalid-memory fault, dump the key argument registers and the return-address chain
+        /// (stack slots that resolve inside a loaded module) as module+rva, so the caller that supplied
+        /// a bad pointer is identifiable. Diagnostic only, Issues-gated, best-effort (never throws).
+        /// Root-causes the F-CLRINIT-AV fault: RtlAllocateHeap reads [HeapHandle+0x10] (the segment-heap
+        /// signature) with a garbage HeapHandle — this names the caller that passed it.
+        /// </summary>
+        private void DumpFaultCallStack()
+        {
+            try
+            {
+                ulong Rsp = ReadRegister(Registers.UC_X86_REG_RSP);
+                ulong Rcx = ReadRegister(Registers.UC_X86_REG_RCX);
+                ulong Rbx = ReadRegister(Registers.UC_X86_REG_RBX);
+                System.Text.StringBuilder Sb = new System.Text.StringBuilder();
+                Sb.Append($"[-] [FAULT-CTX] rsp=0x{Rsp:X} rcx=0x{Rcx:X} rbx=0x{Rbx:X} callers:");
+                int Found = 0;
+                for (ulong Off = 0; Off <= 0x120 && Found < 8; Off += 8)
+                {
+                    if (!IsRegionMapped(Rsp + Off, 8))
+                        continue;
+                    ulong Val = ReadMemoryULong(Rsp + Off);
+                    string M = DescribeModuleAddress(Val);
+                    if (M != null)
+                    {
+                        Sb.Append($" +0x{Off:X}={M}");
+                        Found++;
+                    }
+                }
+                TriggerEventMessage(Sb.ToString(), LogFlags.Issues);
+            }
+            catch
+            {
+                // best-effort diagnostic
+            }
+        }
+
+        /// <summary>
         /// Handles invalid memory operations and pass the exception to user-mode.
         /// </summary>
         private bool InvalidMemoryHandler(BackendMemoryAccessType Type, ulong Address, uint Size, ulong value)
@@ -2997,7 +3052,10 @@ namespace Brovan.Core.Emulation
 
             ulong Rip = ReadRegister(IPRegister);
             if ((Settings.Flags & LogFlags.Issues) != 0)
+            {
                 TriggerEventMessage($"[-] Invalid memory {GetAction(Type)} related to the address 0x{Address:X} at 0x{Rip:X}{ClassifyFaultAddress(Address)}.", LogFlags.Issues);
+                DumpFaultCallStack();
+            }
 
             bool Continue = false;
             if (Settings.InvalidOperationsCallback != null)
