@@ -5254,7 +5254,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             foreach (WinRegistryNotification Notification in Completed)
             {
-                if (Notification.IoStatusBlock != 0 && Emulator.IsRegionMapped(Notification.IoStatusBlock, 0x10))
+                // IO_STATUS_BLOCK is guest-bitness-sized (8 bytes on x86 / 16 on x64). Requiring the x64 size
+                // would skip an otherwise-valid 8-byte IOSB that sits within 8 bytes of a page end on WOW64,
+                // leaving the guest's NtNotifyChangeKey wait forever incomplete.
+                if (Notification.IoStatusBlock != 0 && Emulator.IsRegionMapped(Notification.IoStatusBlock, (ulong)(Emulator.GuestPointerSize * 2)))
                     WriteIoStatusBlock(Emulator, Notification.IoStatusBlock, NTSTATUS.STATUS_SUCCESS, 0);
 
                 if (Notification.EventHandle != 0)

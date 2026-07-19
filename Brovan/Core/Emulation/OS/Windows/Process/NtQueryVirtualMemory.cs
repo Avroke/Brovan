@@ -55,6 +55,20 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Instance._binary.Architecture == BinaryArchitecture.x64 || Instance._binary.Architecture == BinaryArchitecture.x86)
             {
                 bool Wow64 = Instance._binary.Architecture != BinaryArchitecture.x64;
+
+                // User-mode address ceiling is bitness-dependent. The x64 value (MmHighestUserAddress) never
+                // gates a 32-bit address and would size a WOW64 free region as ~127 TB (truncated to a garbage
+                // 32-bit RegionSize). Use the real x86 ceiling — 0x7FFEFFFF, or 0xFFFEFFFF for a large-address-
+                // aware image (the extra 2 GB a WOW64 LAA process gets) — matching NtQuerySystemInformation's
+                // SystemBasicInformation bounds so the two syscalls stay mutually consistent.
+                ulong UserCeiling = MmHighestUserAddress;
+                if (Wow64)
+                {
+                    bool LargeAddressAware = Instance._binary.PE != null &&
+                        (Instance._binary.PE.Characteristics & System.Reflection.PortableExecutable.Characteristics.LargeAddressAware) != 0;
+                    UserCeiling = LargeAddressAware ? 0xFFFEFFFFUL : 0x7FFEFFFFUL;
+                }
+
                 ulong ProcessHandle = Instance.WinHelper.GetArg64(0);
                 ulong Address = Instance.WinHelper.GetArg64(1);
                 MEMORY_INFORMATION_CLASS MemoryInformationClass = (MEMORY_INFORMATION_CLASS)Instance.WinHelper.GetArg64(2);
@@ -90,7 +104,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     // get an endless run of 0x1000-byte MEM_FREE regions (see the free-region branch
                     // below) and never terminate. Kernel addresses stay on the normal path so driver
                     // queries are unaffected.
-                    if (Address > MmHighestUserAddress && Address < KernelCanonicalBase)
+                    if (Address > UserCeiling && Address < KernelCanonicalBase)
                         return NTSTATUS.STATUS_INVALID_PARAMETER;
 
                     // MEMORY_BASIC_INFORMATION size is bitness-dependent (three pointer-sized fields): 0x1C on
@@ -206,8 +220,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                             // single-page fallback so its size can't underflow.
                             if (Next != ulong.MaxValue)
                                 FreeSize = Next - FreeBase;
-                            else if (FreeBase <= MmHighestUserAddress)
-                                FreeSize = MmHighestUserAddress - FreeBase + 1;
+                            else if (FreeBase <= UserCeiling)
+                                FreeSize = UserCeiling - FreeBase + 1;
                             else
                                 FreeSize = 0x1000UL;
 

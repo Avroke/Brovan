@@ -148,10 +148,18 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Section.Initialized = true;
                 }
 
-                Instance._emulator.WriteMemory(Instance.PEB + 0x88, Base, 8);
-                Instance._emulator.WriteMemory(Instance.PEB + 0x98, Base + 0x10, 8);
-                Instance._emulator.WriteMemory(Instance.PEB + 0x380, Base, 8);
-                Instance._emulator.WriteMemory(Instance.PEB + 0x90, Base + 0x3000, 8);
+                // These four fields are the x64 PEB CSR/shared-section offsets, written pointer-wide (8).
+                // On WOW64 Instance.PEB is the 32-bit PEB (different offsets, 4-byte pointers) and its CSR
+                // fields are already published at bootstrap by WindowsGuest.SetupCsrReadOnlySharedSection32
+                // (PEB+0x4C/0x54/0x248) — writing the x64 offsets here would land on unrelated 32-bit fields
+                // and clobber 4 bytes past each. Restrict to the x64 PEB.
+                if (Instance._binary.Architecture == BinaryArchitecture.x64)
+                {
+                    Instance._emulator.WriteMemory(Instance.PEB + 0x88, Base, 8);
+                    Instance._emulator.WriteMemory(Instance.PEB + 0x98, Base + 0x10, 8);
+                    Instance._emulator.WriteMemory(Instance.PEB + 0x380, Base, 8);
+                    Instance._emulator.WriteMemory(Instance.PEB + 0x90, Base + 0x3000, 8);
+                }
 
                 Instance.WritePointer(BaseAddressPtr, Base);
                 Instance.WritePointer(ViewSizePtr, Size);

@@ -360,7 +360,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                             if (Processes == null)
                                 Processes = new List<WinProcess>();
 
-                            ulong EntrySize = 0x70;
+                            // SYSTEM_PROCESS_INFORMATION is bitness-dependent: the x64 header (ImageName
+                            // UNICODE_STRING @ 0x38 with an 8-byte Buffer, PID/PPID @ 0x50/0x58) is laid out
+                            // differently from the x86 header (8-byte UNICODE_STRING, PID/PPID @ 0x44/0x48). A
+                            // WOW64 process-enumeration walk fed the x64 layout gets a corrupt list. Emit the
+                            // layout that matches the guest.
+                            bool Wow64Proc = Instance._binary.Architecture != BinaryArchitecture.x64;
+                            ulong EntrySize = Wow64Proc ? 0xB8UL : 0x70UL;
                             ulong RequiredLength = (ulong)Processes.Count * EntrySize;
 
                             if (SystemInformationLength < RequiredLength)
@@ -386,24 +392,33 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                                 uint NextEntryOffset = (i == Processes.Count - 1) ? 0 : (uint)EntrySize;
 
-                                Instance._emulator.WriteMemory(Current + 0x00, NextEntryOffset);
-                                Instance._emulator.WriteMemory(Current + 0x04, 1u);
+                                Instance._emulator.WriteMemory(Current + 0x00, NextEntryOffset); // NextEntryOffset
+                                Instance._emulator.WriteMemory(Current + 0x04, 1u);              // NumberOfThreads
 
-                                ulong ImageNameField = Current + 0x38; // ImageName field which contains the process name.
+                                // ImageName lives at +0x38 on both bitnesses; the whole entry was zero-filled
+                                // above, so a process with no readable name is left as an empty UNICODE_STRING.
+                                bool HasName = !string.IsNullOrEmpty(P.Name) && P.Status != ProtectionStatus.Unaccessible;
 
-                                if (!string.IsNullOrEmpty(P.Name) && P.Status != ProtectionStatus.Unaccessible)
-                                    Instance.WinHelper.SetUnicodeString(ImageNameField, P.Name);
+                                if (Wow64Proc)
+                                {
+                                    // x86: ImageName is an 8-byte UNICODE_STRING (Buffer @ +4); BasePriority @
+                                    // 0x40, UniqueProcessId @ 0x44, InheritedFromUniqueProcessId @ 0x48 (4-byte).
+                                    if (HasName)
+                                        Instance.WinHelper.SetUnicodeString32((uint)(Current + 0x38), P.Name);
+                                    Instance._emulator.WriteMemory(Current + 0x40, 8u, 4);           // BasePriority
+                                    Instance._emulator.WriteMemory(Current + 0x44, (uint)P.PID, 4);  // UniqueProcessId
+                                    Instance._emulator.WriteMemory(Current + 0x48, (uint)P.PPID, 4); // InheritedFromUniqueProcessId
+                                }
                                 else
                                 {
-                                    Instance._emulator.WriteMemory(ImageNameField + 0x00, (ushort)0, 2);
-                                    Instance._emulator.WriteMemory(ImageNameField + 0x02, (ushort)0, 2);
-                                    Instance._emulator.WriteMemory(ImageNameField + 0x08, 0UL);
+                                    // x64: ImageName is a 16-byte UNICODE_STRING (Buffer @ +8); BasePriority @
+                                    // 0x48, UniqueProcessId @ 0x50, InheritedFromUniqueProcessId @ 0x58 (8-byte).
+                                    if (HasName)
+                                        Instance.WinHelper.SetUnicodeString(Current + 0x38, P.Name);
+                                    Instance._emulator.WriteMemory(Current + 0x48, 8);
+                                    Instance._emulator.WriteMemory(Current + 0x50, (ulong)P.PID);
+                                    Instance._emulator.WriteMemory(Current + 0x58, (ulong)P.PPID);
                                 }
-
-                                Instance._emulator.WriteMemory(Current + 0x48, 8);
-
-                                Instance._emulator.WriteMemory(Current + 0x50, (ulong)P.PID); // UniqueProcessId
-                                Instance._emulator.WriteMemory(Current + 0x58, (ulong)P.PPID); // InheritedFromUniqueProcessId
 
                                 Current += EntrySize;
                             }
