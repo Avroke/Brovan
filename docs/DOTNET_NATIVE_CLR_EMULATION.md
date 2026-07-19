@@ -911,6 +911,21 @@ n'est qu'une question de *quelle enveloppe de bootstrap* attaquer en premier.
   atteignait `Exit(5)` mais spinnait sur les threads runtime orphelins ; désormais le processus se
   termine proprement. Reste donc uniquement le **déterminisme** (l'AV non-déterministe ci-dessus) pour
   un J5 fiable à 100 %.
+- **F-CONSOLE-MANAGED — `System.Console` managé via ConDrv (frontière active, sortie observable).**
+  Le J5 trivial (`Main` = `return 5`) est déterministe (F-CLRINIT-AV résolu). Un programme managé plus
+  riche (`Console.WriteLine` + `for`/`List`/LINQ) **charge bien `System.Console.dll` + `System.Linq.dll`,
+  exécute ~140 M instructions**, mais **lève une `ArgumentOutOfRangeException` non gérée
+  (`0xE0434352`, hr `0x80131502`) au fond de l'init de `System.Console`** → terminaison `0xE0434352`.
+  Diagnostic (trace `[CONDRV-API]` ajoutée puis retirée) : le CRT natif imprime via `NtWriteFile` direct
+  (OK — cf. `hello_native`), **mais `System.Console` de .NET Core dialogue avec `\Device\ConDrv` par
+  `NtDeviceIoControlFile(IoctlConDrvIssueUserIo)`** et le `ConsoleServer` reçoit un **`ApiNumber` parasite**
+  (une valeur pointeur, l'offset `0x28` du header ne correspond pas au `CONSOLE_API_MSG` de ce build) **et
+  un `OutputBuffer` vide (`outLen=0`)** → `HandleIssueUserIo` sort par la garde de buffer vide sans servir
+  la requête → `GetConsoleOutputCP`/`GetConsoleScreenBufferInfo` renvoient 0/garbage → l'init `Console`
+  jette. **C'est un chantier ConDrv à part** (protocole `CONSOLE_API_MSG` + acheminement des buffers
+  METHOD_NEITHER par `NtDeviceIoControlFile`, offsets du header, mécanisme de réponse), pas un stub isolé.
+  Le milestone J5 (atteindre `Main` managé, déterministe) reste **acquis** ; la sortie console managée est
+  la prochaine étape.
 - **F-FRAMEWORK — surface BCL réelle.** Selon ce que l'assembly touche, le CLR
   charge de plus en plus d'assemblies système ⇒ plus de fichiers VFS + plus de
   syscalls. La couverture croît avec le corpus, pas d'un coup.
