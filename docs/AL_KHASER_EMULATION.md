@@ -1902,12 +1902,49 @@ isn't enough — the x64 handler puts the thread into `WaitState` and returns `S
 which without a timer/message source deadlocks the whole scheduler (Brovan drops the WOW64
 x86 into an infinite pump). Real fix needs: (a) `NtUserGetMessage` bitness-agnostic, (b)
 `NtUserSetTimer` bitness-agnostic, (c) the timer-fires-`WM_TIMER`-into-queue wiring on x86.
-Nearby non-fatal gaps still `NOT_SUPPORTED` on x86:
-`NtQueryVirtualMemory` (MemoryMappedFilenameInformation), `NtQueryInformationThread`
-(ThreadHideFromDebugger / ThreadDynamicCodePolicyInfo), `NtQueryInformationFile`,
-`NtQuerySystemInformation` class `0x73`, syscall `0x1E9`.
+Nearby gaps still `NOT_SUPPORTED` on x86:
+`NtQueryInformationThread` (ThreadHideFromDebugger / ThreadDynamicCodePolicyInfo),
+`NtQuerySystemInformation` class `0x73`. (`NtQueryVirtualMemory`
+MemoryMappedFilenameInformation, `NtQueryInformationFile`, and syscall `0x1E9`
+`NtWow64IsProcessorFeaturePresent` are now closed — see below.)
 
 The **x86 registry** sibling gap is now closed (see below).
+
+#### Parent-process `std::filesystem::equivalent` regression → root-caused (this pass)
+
+A container rebuild surfaced a regression: al-khaser_x86 was terminating at
+**~24 GOOD** with a combase-region CRT `__fastfail` (`int 29h`, code 7) at the
+*end* of Debugger Detection, instead of the expected 237. Root cause was **not**
+host-dependent (the host reproduces 237 fine) — it was introduced by the prior
+session's last commit (`6fe5024`, which implemented `ProcessImageFileNameWin32`
+on x86) interacting with two latent x86 gaps:
+
+1. **`ProcessImageFileNameWin32` wrote a 16-byte `UNICODE_STRING64` on x86.**
+   `StructSerializer.GetStructSize<UNICODE_STRING64>` is *not* pointer-aware for
+   a plain `ulong Buffer` (it returns 16 on both bitnesses), so the WOW64 caller
+   (`kernelbase!QueryFullProcessImageNameW`) read `Buffer` at +4 (the x64 pad
+   word) as NULL and `memcpy`'d the parent image name from NULL → `0xC0000005`.
+   Fixed to size the header + OUT Buffer pointer to the guest (8-byte header /
+   Buffer @ +4 on x86; 16 / Buffer @ +8 on x64).
+2. With the parent image path now correctly resolved (`C:\Windows\explorer.exe`),
+   al-khaser calls `std::filesystem::equivalent(parentPath, expectedExplorerPath)`
+   (`MSVCP140!_Equivalent`, IAT `0x17218`). `_Equivalent` opens **both** files
+   and issues **`NtQueryInformationFile`** to read the file id and compare
+   identity. `NtQueryInformationFile` was **gated to x64** → `STATUS_NOT_SUPPORTED`
+   on WOW64 → `_Equivalent` returned an error → al-khaser's `if (equivalent(...))`
+   threw an **uncaught `std::filesystem_error`** → CRT `__fastfail`. Fixed by
+   making `NtQueryInformationFile` bitness-agnostic (GetArg64 args,
+   `GuestPointerSize*2` IO_STATUS_BLOCK, fixed struct bodies are bitness-invariant)
+   and making `FILE_INTERNAL_INFORMATION`/`FILE_ID_INFORMATION` report a
+   **path-derived** file id (stable across handles) instead of the per-open handle
+   value — so the two opens of the same file compare equal.
+
+Net: back to **237 GOOD / 18 BAD**, now with a genuinely-working parent-process
+filesystem-equivalence check (open + stat + compare) rather than the emulator
+crashing. The `NOT_SUPPORTED`-era 237 dodged both bugs only because
+`QueryFullProcessImageNameW` failed early and al-khaser never reached
+`equivalent()`. x64 unaffected (244 GOOD; the file-info + UNICODE_STRING layouts
+are byte-identical on x64). Terminus is once again the message-pump spin.
 
 **Landed alongside — WOW64 registry syscalls.** The same DLL init was issuing a burst
 of `NtOpenKey` (SSN 0x12) returning `NOT_SUPPORTED` because the whole registry family
