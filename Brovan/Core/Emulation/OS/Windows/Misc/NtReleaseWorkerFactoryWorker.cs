@@ -28,6 +28,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             WorkerFactoryHelper.EnsureWorkerThreads(Instance, Factory);
+
+            // The release enqueued work onto the factory's completion queue but signalled no waitable
+            // object. Wake a worker already parked in NtWaitForWorkViaWorkerFactory so it re-runs its
+            // wait, dequeues the release, and executes the queued work — otherwise a parked worker
+            // stays blocked forever (INFINITE) and the released work never runs, deadlocking the .NET
+            // thread pool during runtime startup. (EnsureWorkerThreads only creates *new* workers; it
+            // does not wake existing parked ones.)
+            Instance.WakeWorkerFactoryWaitersForFactory(WorkerFactoryHandle);
             return NTSTATUS.STATUS_SUCCESS;
         }
     }

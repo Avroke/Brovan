@@ -54,14 +54,30 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (Release)
                 {
-                    if (RegionSize != 0)
-                        return NTSTATUS.STATUS_INVALID_PARAMETER;
-
                     if (Instance.IsRegionFreed(BaseAddress, false))
                     {
                         if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
                             Instance.TriggerEventMessage($"[!!] Double-Free detected for the allocated memory that have the base address 0x{BaseAddress:X}.", LogFlags.Issues);
                         return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
+                    }
+
+                    // A non-zero RegionSize with MEM_RELEASE is a *partial* release of [base, base+size):
+                    // the syscall splits the reservation and keeps the remainder. The "RegionSize must be
+                    // 0" rule is enforced by the Win32 VirtualFree wrapper (real guest kernelbase code),
+                    // NOT by NtFreeVirtualMemory — ntdll's own RtlpSecMemFreeVirtualMemory / the module
+                    // loader over-reserve for alignment then release the excess directly via this syscall.
+                    // Rejecting it made every direct sized release fail, which aborted LdrLoadDll and
+                    // surfaced as LoadLibraryEx returning ERROR_INVALID_PARAMETER -> coreclr
+                    // EEFileLoadException(E_INVALIDARG), terminating every managed process before Main.
+                    if (RegionSize != 0)
+                    {
+                        if (!Instance.ReleaseMemoryRange(BaseAddress, RegionSize))
+                            return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
+
+                        Instance.WriteWatch?.Unregister(BaseAddress);
+                        Instance._emulator.WriteMemory(BaseAddressPtr, BaseAddress & ~0xFFFUL);
+                        Instance._emulator.WriteMemory(RegionSizePtr, BinaryEmulator.AlignUp(RegionSize, PageSize));
+                        return NTSTATUS.STATUS_SUCCESS;
                     }
 
                     if (!Instance.ReleaseMemory(BaseAddress))
@@ -145,14 +161,25 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (Release)
                 {
-                    if (RegionSize != 0)
-                        return NTSTATUS.STATUS_INVALID_PARAMETER;
-
+                    // See the x64 path: a non-zero RegionSize with MEM_RELEASE is a partial release of
+                    // [base, base+size); the "RegionSize must be 0" rule lives in the Win32 VirtualFree
+                    // wrapper, not the NtFreeVirtualMemory syscall, so a direct caller succeeds.
                     if (Instance.IsRegionFreed(BaseAddress, false))
                     {
                         if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
                             Instance.TriggerEventMessage($"[!!] Double-Free detected for the allocated memory that have the base address 0x{BaseAddress:X}.", LogFlags.Issues);
                         return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
+                    }
+
+                    if (RegionSize != 0)
+                    {
+                        if (!Instance.ReleaseMemoryRange(BaseAddress, RegionSize))
+                            return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
+
+                        Instance.WriteWatch?.Unregister(BaseAddress);
+                        Instance._emulator.WriteMemory(BaseAddressPtr, (uint)(BaseAddress & ~0xFFFUL));
+                        Instance._emulator.WriteMemory(RegionSizePtr, (uint)BinaryEmulator.AlignUp(RegionSize, PageSize));
+                        return NTSTATUS.STATUS_SUCCESS;
                     }
 
                     if (!Instance.ReleaseMemory(BaseAddress))

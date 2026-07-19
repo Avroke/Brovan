@@ -89,6 +89,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             ulong AlignedSize = BinaryEmulator.AlignUp(Size, PageSize);
 
+            // Huge base=NULL reservations (e.g. the .NET code/executable allocator, or the GC with
+            // W^X off) don't fit the ~128 GiB window scanned below. Place them in the high sparse
+            // VA space — the same window used for large SEC_RESERVE sections (see
+            // BinaryEmulator.FindHighSparseHole / ReserveSparseSection). Reserves are metadata-only;
+            // pages are committed on demand.
+            if (IsX64 && AlignedSize > 0x0000_0004_0000_0000UL) // > 16 GiB
+                return Instance.FindHighSparseHole(AlignedSize);
+
             ulong Candidate = IsX64 ? 0x0000000100000000UL : 0x00100000UL;
             Candidate = BinaryEmulator.AlignUp(Candidate, AllocationGranularity);
 

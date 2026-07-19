@@ -1495,6 +1495,7 @@ namespace Brovan.Core.Emulation
             {
                 RemoveMemoryRegion(Region);
                 _freedmemory.Add(Region);
+                LogFreedRegion("UnmapMemoryRegion", Address, Region.Size);
                 _freedMemorySorted = false;
                 TriggerDebugMessage(() => $"memory: unmapped base=0x{Address:X} size=0x{Region.Size:X}");
                 return true;
@@ -1856,8 +1857,40 @@ namespace Brovan.Core.Emulation
             StopAfterSyntheticInstruction(IP + 3);
         }
 
+        // Growth/guard headroom mapped BELOW StackLimit for every thread stack. Windows reserves a
+        // stack larger than its committed part and lets the owner place a PAGE_GUARD page just below
+        // StackLimit (the low watermark) to catch/grow on overflow; the .NET runtime manages exactly
+        // such a guard during init (coreclr Thread stack setup commits a guard at StackLimit - a few
+        // pages). Brovan otherwise maps a stack as one fully-committed block with nothing below, so
+        // that guard commit lands on unmapped space and fails. Committing a modest headroom below the
+        // usable stack makes the guard commit succeed with no change to the usable stack seen by
+        // native guests (their RSP still lives in [StackLimit, StackBase) exactly as before).
+        private const ulong ThreadStackGuardHeadroom = 0x00100000UL; // 1 MiB
+
         internal ulong AllocateThreadStack(ulong StackSize)
         {
+            ulong Total = AlignToPageSize(StackSize + ThreadStackGuardHeadroom);
+
+            // Model the stack the Windows way: RESERVE the whole [base, base+Total) range, then COMMIT
+            // only the usable stack at the top, leaving the lower headroom reserved-but-uncommitted so
+            // a guest (coreclr) can commit its own PAGE_GUARD page just below StackLimit. Using the
+            // reserve->commit path (instead of MapUniqueAddress, whose regions are not flagged
+            // reserved/committed) is what lets CommitMemory accept that guard-page commit.
+            const uint PageReadWrite = 0x04;
+            ulong Candidate = AlignToPageSize(BaseAddress);
+            for (int Guard = 0; Guard < 0x200000 && Candidate + Total < MaxAddress; Guard++)
+            {
+                if (!IsRegionInUse(Candidate, Total) && ReserveMemory(Candidate, Total, PageReadWrite))
+                {
+                    ulong StackLimit = Candidate + ThreadStackGuardHeadroom;
+                    if (CommitMemory(StackLimit, StackSize, PageReadWrite))
+                        return StackLimit;
+                    break; // reserved but couldn't commit — fall back
+                }
+                Candidate = AlignToPageSize(Candidate + Total);
+            }
+
+            // Fallback: legacy fully-mapped stack (no headroom) if the reserve+commit path can't place it.
             return MapUniqueAddress(StackSize, MemoryProtection.ReadWrite);
         }
 
@@ -2090,6 +2123,10 @@ namespace Brovan.Core.Emulation
             Thread.WaitDeadline = -1;
             Thread.State = EmulatedThreadState.Terminated;
             SchedulerRefreshRequested = true;
+
+            if ((Settings.Flags & LogFlags.General) != 0)
+                TriggerEventMessage($"[!] TryTerminateThread {Thread.ThreadId} ({Thread.Name}) exit=0x{(uint)ExitCode:X}.", LogFlags.General);
+
             return true;
         }
 
@@ -2323,6 +2360,12 @@ namespace Brovan.Core.Emulation
                 }
                 else if (Thread.State == EmulatedThreadState.Waiting && Thread.WaitActive && TrySatisfyThreadWait(Thread))
                 {
+                    // [EVT-WAKE] instrumentation: capture the satisfied handle set before
+                    // CompleteThreadWait clears it, so the scan-driven wake of an event waiter
+                    // (the 0x8C loader-rendezvous case) is legible against [EVT-SET]/[WAIT-PARK].
+                    if ((Settings.Flags & LogFlags.General) != 0 && Thread.WaitHandles != null && Thread.WaitHandles.Count > 0)
+                        TriggerEventMessage($"[!] [EVT-WAKE] tid={Thread.ThreadId} satisfiedIndex={Thread.WaitSatisfiedIndex} timedOut={Thread.WaitTimedOut} handle0=0x{Thread.WaitHandles[0]:X}", LogFlags.General);
+
                     CompleteThreadWait(Thread);
                     Changed = true;
                 }
@@ -2672,6 +2715,8 @@ namespace Brovan.Core.Emulation
                             if (Debug)
                                 if (Debug)
                                     TriggerDebugMessage($"scheduler: finished no live threads total={Total} slices={Slices}");
+                            if ((Settings.Flags & LogFlags.General) != 0)
+                                TriggerEventMessage($"[!] Scheduler finished: no live threads (all terminated) total={Total}.", LogFlags.General);
                             return true;
                         }
 
@@ -2713,6 +2758,17 @@ namespace Brovan.Core.Emulation
                         if (Debug)
                             if (Debug)
                                 TriggerDebugMessage($"scheduler: no runnable thread and no pending wakeup total={Total} slices={Slices}");
+
+                        if ((Settings.Flags & LogFlags.General) != 0)
+                        {
+                            foreach (EmulatedThread Parked in Threads.Values)
+                            {
+                                if (Parked == null || Parked.State == EmulatedThreadState.Terminated)
+                                    continue;
+                                TriggerEventMessage($"[!] Scheduler ending with parked thread {Parked.ThreadId} ({Parked.Name}) state={Parked.State} rip=0x{Parked.Context?.RIP ?? 0:X} deadline={Parked.WaitDeadline}.", LogFlags.General);
+                            }
+                        }
+
                         return true;
                     }
                 }
@@ -2763,6 +2819,9 @@ namespace Brovan.Core.Emulation
 
                     ImmaBeEmulatedOOO.State = EmulatedThreadState.Terminated;
                     SchedulerRefreshRequested = true;
+
+                    if ((Settings.Flags & LogFlags.General) != 0)
+                        TriggerEventMessage($"[!] Thread {ImmaBeEmulatedOOO.ThreadId} ({ImmaBeEmulatedOOO.Name}) died in slice via {ex.GetType().Name}: {ex.Message}; rip=0x{RipBeforeSlice:X} exit=0x{(uint)ImmaBeEmulatedOOO.ExitCode:X}.", LogFlags.General);
                 }
                 finally
                 {
@@ -2836,6 +2895,9 @@ namespace Brovan.Core.Emulation
                         ImmaBeEmulatedOOO.ExitCode = unchecked((int)(uint)ImmaBeEmulatedOOO.Context?.RAX);
 
                     ImmaBeEmulatedOOO.State = EmulatedThreadState.Terminated;
+
+                    if ((Settings.Flags & LogFlags.General) != 0)
+                        TriggerEventMessage($"[!] Thread {ImmaBeEmulatedOOO.ThreadId} ({ImmaBeEmulatedOOO.Name}) returned to the entry sentinel; exit code 0x{(uint)ImmaBeEmulatedOOO.ExitCode:X}; last-slice-rip=0x{RipBeforeSlice:X}.", LogFlags.General);
                 }
                 else if (ImmaBeEmulatedOOO.State == EmulatedThreadState.Running)
                 {
@@ -2966,6 +3028,131 @@ namespace Brovan.Core.Emulation
         }
 
         /// <summary>
+        /// Classifies an unmapped-fault address so the log discriminates the cause: an address inside a
+        /// Brovan-freed region is a use-after-free (a MEM_RELEASE / decommit-reclaim over-unmap); a
+        /// decommitted page that reached here is a decommit-rescue miss; anything else is a wild or
+        /// corrupted pointer value (never-mapped) — e.g. corrupted heap free-list metadata. Diagnostic
+        /// only; used to root-cause the rare .NET-init RtlAllocateHeap fault (F-CLRINIT-AV).
+        /// </summary>
+        private string ClassifyFaultAddress(ulong Address)
+        {
+            try
+            {
+                if (_freedmemory != null && _freedmemory.Count > 0 && IsRegionFreed(Address, true))
+                    return " [freed-region: use-after-free]";
+                if (DecommittedPages.Contains(Address & ~0xFFFUL))
+                    return " [decommitted: rescue-miss]";
+            }
+            catch
+            {
+                return " [classify-error]";
+            }
+            return " [never-mapped: wild/corrupt-ptr]";
+        }
+
+        /// <summary>
+        /// Maps a guest address to "module+0xrva" if it lies inside a loaded Windows module, else null.
+        /// Single source of truth for the address-to-module symbolisation used by the diagnostic dumps
+        /// (fault call-stack, free-track, NtRaiseException [CLR-AV]); callers that want a placeholder
+        /// for an unmapped address append <c>?? "unmapped"</c>.
+        /// </summary>
+        internal string DescribeModuleRva(ulong Address)
+        {
+            if (WinHelper?.WinModules == null)
+                return null;
+
+            foreach (var M in WinHelper.WinModules)
+            {
+                if (M == null || M.SizeOfImage == 0)
+                    continue;
+                if (Address >= M.MappedBase && Address < M.MappedBase + M.SizeOfImage)
+                    return $"{M.Name}+0x{Address - M.MappedBase:X}";
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// On an invalid-memory fault, dump the key argument registers and the return-address chain
+        /// (stack slots that resolve inside a loaded module) as module+rva, so the caller that supplied
+        /// a bad pointer is identifiable. Diagnostic only, Issues-gated, best-effort (never throws).
+        /// Root-causes the F-CLRINIT-AV fault: RtlAllocateHeap reads [HeapHandle+0x10] (the segment-heap
+        /// signature) with a garbage HeapHandle — this names the caller that passed it.
+        /// </summary>
+        private void DumpFaultCallStack()
+        {
+            try
+            {
+                ulong Rsp = ReadRegister(Registers.UC_X86_REG_RSP);
+                ulong Rcx = ReadRegister(Registers.UC_X86_REG_RCX);
+                ulong Rbx = ReadRegister(Registers.UC_X86_REG_RBX);
+                System.Text.StringBuilder Sb = new System.Text.StringBuilder();
+                Sb.Append($"[-] [FAULT-CTX] rsp=0x{Rsp:X} rcx=0x{Rcx:X} rbx=0x{Rbx:X} callers:");
+                int Found = 0;
+                for (ulong Off = 0; Off <= 0x120 && Found < 8; Off += 8)
+                {
+                    if (!IsRegionMapped(Rsp + Off, 8))
+                        continue;
+                    ulong Val = ReadMemoryULong(Rsp + Off);
+                    string M = DescribeModuleRva(Val);
+                    if (M != null)
+                    {
+                        Sb.Append($" +0x{Off:X}={M}");
+                        Found++;
+                    }
+                }
+                TriggerEventMessage(Sb.ToString(), LogFlags.Issues);
+            }
+            catch
+            {
+                // best-effort diagnostic
+            }
+        }
+
+        /// <summary>
+        /// Logs a region entering the freed set (base+size+source), plus the guest caller chain when the
+        /// base is in the private-CRT-heap VA band — the region implicated in the rare F-CLRINIT-AV
+        /// CRT-heap use-after-free (msvcrt _calloc_impl allocates from a _crtheap whose backing was
+        /// freed). Identifies which guest caller releases the still-live heap region. Issues-gated,
+        /// best-effort.
+        /// </summary>
+        private void LogFreedRegion(string Source, ulong Base, ulong Size)
+        {
+            if ((Settings.Flags & LogFlags.Issues) == 0)
+                return;
+
+            try
+            {
+                System.Text.StringBuilder Sb = new System.Text.StringBuilder();
+                Sb.Append($"[-] [FREE-TRACK] {Source} base=0x{Base:X} size=0x{Size:X}");
+
+                if (Base >= 0x100000000UL && Base < 0x110000000UL)
+                {
+                    Sb.Append(" freed-by:");
+                    ulong Rsp = ReadRegister(Registers.UC_X86_REG_RSP);
+                    int Found = 0;
+                    for (ulong Off = 0; Off <= 0x180 && Found < 8; Off += 8)
+                    {
+                        if (!IsRegionMapped(Rsp + Off, 8))
+                            continue;
+                        ulong Val = ReadMemoryULong(Rsp + Off);
+                        string M = DescribeModuleRva(Val);
+                        if (M != null)
+                        {
+                            Sb.Append($" +0x{Off:X}={M}");
+                            Found++;
+                        }
+                    }
+                }
+
+                TriggerEventMessage(Sb.ToString(), LogFlags.Issues);
+            }
+            catch
+            {
+                // best-effort diagnostic
+            }
+        }
+
+        /// <summary>
         /// Handles invalid memory operations and pass the exception to user-mode.
         /// </summary>
         private bool InvalidMemoryHandler(BackendMemoryAccessType Type, ulong Address, uint Size, ulong value)
@@ -2992,7 +3179,10 @@ namespace Brovan.Core.Emulation
 
             ulong Rip = ReadRegister(IPRegister);
             if ((Settings.Flags & LogFlags.Issues) != 0)
-                TriggerEventMessage($"[-] Invalid memory {GetAction(Type)} related to the address 0x{Address:X} at 0x{Rip:X}.", LogFlags.Issues);
+            {
+                TriggerEventMessage($"[-] Invalid memory {GetAction(Type)} related to the address 0x{Address:X} at 0x{Rip:X}{ClassifyFaultAddress(Address)}.", LogFlags.Issues);
+                DumpFaultCallStack();
+            }
 
             bool Continue = false;
             if (Settings.InvalidOperationsCallback != null)

@@ -75,6 +75,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             Instance._emulator.WriteRegister(Instance.IPRegister, WinEmulatedThread.GetState(Thread).WaitResumeRIP);
             Instance._emulator.StopEmulation();
 
+            if ((Instance.Settings.Flags & LogFlags.General) != 0)
+                Instance.TriggerEventMessage($"[!] [WAIT-PARK] tid={Thread.ThreadId} parks on handle=0x{Handle:X} ({Obj.GetType().Name}) deadline={Deadline}", LogFlags.General);
+
             return NTSTATUS.STATUS_PENDING;
         }
     }

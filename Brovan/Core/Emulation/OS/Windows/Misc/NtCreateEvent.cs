@@ -29,6 +29,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (!Instance.WritePointer(EventHandlePtr, (ulong)Handle.Handle))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
+                if ((Instance.Settings.Flags & LogFlags.General) != 0)
+                    Instance.TriggerEventMessage($"[!] [NEW-EVENT] handle=0x{Handle.Handle:X} eventType={EventType} initialState={InitialState} tid={Instance.CurrentThreadId}", LogFlags.General);
+
                 return NTSTATUS.STATUS_SUCCESS;
             }
             return Instance.WinUnimplemented;

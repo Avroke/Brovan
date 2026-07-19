@@ -14,6 +14,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             ulong AlignedSize = BinaryEmulator.AlignUp(Size, PageSize);
 
+            // Huge base=NULL reservations (see NtAllocateVirtualMemory.FindFreeBaseAddress) go to
+            // the high sparse VA window; reserves are metadata-only, committed on demand.
+            if (IsX64 && AlignedSize > 0x0000_0004_0000_0000UL) // > 16 GiB
+                return Instance.FindHighSparseHole(AlignedSize);
+
             ulong Candidate = IsX64 ? 0x0000000100000000UL : 0x00100000UL;
             Candidate = BinaryEmulator.AlignUp(Candidate, AllocationGranularity);
 

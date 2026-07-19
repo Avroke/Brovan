@@ -1192,6 +1192,22 @@ namespace Brovan.Core.Emulation.Guests
                 }
             }
 
+            // Host path that lives inside the staged virtual drive (VirtualFS/<Drive>/...): reverse-map
+            // it back to its guest drive-letter path (…/VirtualFS/C/Users/u/Desktop/mc2/x.exe →
+            // C:\Users\u\Desktop\mc2\x.exe). A sample staged in-place under the VFS thereby presents its
+            // real co-located directory to the guest, so the loader resolves adjacent dependencies (a
+            // self-contained .NET app's coreclr runtime, an app's sibling DLLs) at the same directory it
+            // searches. Without this, the sample is flattened onto a fresh synthetic desktop as a lone
+            // file and any adjacent-dependency resolution fails in-guest (the apphost aborts with
+            // "The application to execute does not exist" before coreclr ever loads). External sample
+            // paths (not under the VFS root) are untouched and still flatten as before.
+            string GuestFromVfs = TryMapHostPathToGuestDrivePath(Location);
+            if (!string.IsNullOrWhiteSpace(GuestFromVfs))
+            {
+                _guestImagePath = GuestFromVfs;
+                return _guestImagePath;
+            }
+
             // Extract the leaf with GeneralHelper.IO.WindowsLeafName — Path.GetFileName is
             // host-relative and does not treat '\\' as a separator on a Linux analysis host,
             // so it would return the whole backslashed host path as the "file name".
@@ -1203,6 +1219,60 @@ namespace Brovan.Core.Emulation.Guests
 
             _guestImagePath = $@"C:\Users\{GuestUserName}\Desktop\{Leaf}";
             return _guestImagePath;
+        }
+
+        /// <summary>
+        /// If <paramref name="HostPath"/> resolves inside the staged virtual filesystem's drive root
+        /// (<c>VirtualFS/&lt;Drive&gt;/…</c>), returns the corresponding guest drive-letter path
+        /// (e.g. <c>C:\Users\u\Desktop\mc2\x.exe</c>); otherwise <c>null</c>. This lets a sample that was
+        /// deliberately staged in-place under the VFS present its real co-located directory to the guest
+        /// instead of being flattened onto a synthetic desktop as a lone file. Only single-letter drive
+        /// folders (C, E, …) map to a guest drive — the <c>Linux</c> subtree and any non-drive folder
+        /// return null. Failures are non-fatal (fall through to the flatten path).
+        /// </summary>
+        private static string TryMapHostPathToGuestDrivePath(string HostPath)
+        {
+            if (string.IsNullOrWhiteSpace(HostPath))
+                return null;
+
+            try
+            {
+                string Root = GeneralHelper.IO.VirtualFileSystemRoot;
+                if (string.IsNullOrWhiteSpace(Root))
+                    return null;
+
+                string FullHost = Path.GetFullPath(HostPath);
+                string FullRoot = Path.GetFullPath(Root);
+
+                // Anchor on a trailing separator so a sibling directory such as "VirtualFS-old" cannot
+                // match the "VirtualFS" prefix.
+                string RootPrefix = FullRoot.EndsWith(Path.DirectorySeparatorChar.ToString(), StringComparison.Ordinal)
+                    ? FullRoot
+                    : FullRoot + Path.DirectorySeparatorChar;
+
+                if (!FullHost.StartsWith(RootPrefix, StringComparison.Ordinal))
+                    return null;
+
+                string Relative = FullHost.Substring(RootPrefix.Length);
+                string[] Segments = Relative.Split(new[] { Path.DirectorySeparatorChar, '/' }, StringSplitOptions.RemoveEmptyEntries);
+                if (Segments.Length < 1)
+                    return null;
+
+                string Drive = Segments[0];
+                if (Drive.Length != 1 || !char.IsLetter(Drive[0]))
+                    return null;
+
+                char DriveLetter = char.ToUpperInvariant(Drive[0]);
+                if (Segments.Length == 1)
+                    return $"{DriveLetter}:\\";
+
+                string Rest = string.Join("\\", Segments, 1, Segments.Length - 1);
+                return $"{DriveLetter}:\\{Rest}";
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         /// <summary>
@@ -1231,6 +1301,12 @@ namespace Brovan.Core.Emulation.Guests
             Dictionary<string, string> Env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
                 { "PROCESSOR_ARCHITECTURE", Instance._binary.Architecture == BinaryArchitecture.x64 ? "AMD64" : "x86" },
+                // W^X double-mapped executable memory (two VAs — one RX, one RW — sharing one
+                // backing) is not emulable under the single-address memory model; the .NET runtime
+                // uses it for JIT code by default. Tell any .NET guest to fall back to a single RWX
+                // code mapping (which Brovan runs correctly) so coreclr can JIT + execute. Ignored by
+                // non-.NET guests. See docs/DOTNET_NATIVE_CLR_EMULATION.md (F-WXMAP).
+                { "DOTNET_EnableWriteXorExecute", "0" },
                 { "OS", "Windows_NT" },
                 { "NUMBER_OF_PROCESSORS", "8" },
                 { "TEMP", @$"C:\Users\{Username}\AppData\Local\Temp" },

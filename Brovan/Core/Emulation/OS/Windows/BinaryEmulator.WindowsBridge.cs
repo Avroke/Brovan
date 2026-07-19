@@ -503,6 +503,49 @@ namespace Brovan.Core.Emulation
             return WokeThread;
         }
 
+        /// <summary>
+        /// Wakes a worker parked in NtWaitForWorkViaWorkerFactory for the given factory after work
+        /// (a release completion or a queued packet) has been posted directly to the factory's I/O
+        /// completion queue — the NtReleaseWorkerFactoryWorker path, which enqueues work but does not
+        /// itself signal any waitable object. Without this, a worker that is already parked (deadline
+        /// INFINITE) never re-runs its wait to dequeue the work, so the released work never executes:
+        /// the .NET thread pool then never runs the item that would alert the main thread (WaitOnAddress
+        /// / NtWaitForAlertByThreadId), and the process deadlocks in runtime startup before Main.
+        /// </summary>
+        internal bool WakeWorkerFactoryWaitersForFactory(ulong WorkerFactoryHandle)
+        {
+            bool WokeThread = false;
+
+            if (WinHelper == null || WorkerFactoryHandle == 0)
+                return false;
+
+            WindowsWakeThreadSnapshot.Clear();
+            foreach (EmulatedThread Thread in Threads.Values)
+                WindowsWakeThreadSnapshot.Add(Thread);
+
+            for (int i = 0; i < WindowsWakeThreadSnapshot.Count; i++)
+            {
+                EmulatedThread Thread = WindowsWakeThreadSnapshot[i];
+                if (Thread == null || Thread.State != EmulatedThreadState.Waiting || !Thread.WaitActive)
+                    continue;
+
+                WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
+                if (State == null || !State.WorkerFactoryWaitActive || State.WorkerFactoryHandle != WorkerFactoryHandle)
+                    continue;
+
+                if (!TrySatisfyThreadWait(Thread))
+                    continue;
+
+                CompleteThreadWait(Thread);
+                WokeThread = true;
+                break; // one release wakes one worker
+            }
+
+            WindowsWakeThreadSnapshot.Clear();
+
+            return WokeThread;
+        }
+
         internal void MaterializeSignaledWaitPackets(ulong IoCompletionHandle)
         {
             if (WinHelper == null)
@@ -1415,7 +1458,14 @@ namespace Brovan.Core.Emulation
 
         public WinModule LoadWinLibrary(BinaryFile Library, bool TriggerMessage, bool AddToModuleList = true, ulong RequestedBase = 0, bool MapBySections = false)
         {
-            if (Library.FileFormat != BinaryFormat.PE || Library.Architecture != _binary.Architecture)
+            // A managed IL assembly can be AnyCPU (PE Machine = I386, so Architecture reads as x86) yet
+            // legitimately map into a 64-bit process — the CLR JITs its IL to the host architecture, and
+            // real Windows loads such images regardless of the Machine field. Rejecting them here made a
+            // dependency facade like System.Runtime.dll (PE32/I386/ILONLY) throw on load, which coreclr
+            // surfaced as a fatal EEFileLoadException(E_INVALIDARG) before Main. Only enforce the
+            // architecture match for NATIVE images (mirrors the NtMapViewOfSection image gate).
+            bool IsManagedLibrary = Library.PE != null && Library.PE.DotNetStatus != DotNetStatus.None;
+            if (Library.FileFormat != BinaryFormat.PE || (Library.Architecture != _binary.Architecture && !IsManagedLibrary))
                 throw new InvalidOperationException("Emulator tried to load a non-valid PE library.");
 
             ulong ImageSize = AlignToPageSize(Library.PE.SizeOfImage != 0 ? Library.PE.SizeOfImage : (uint)Library.BinarySize);
@@ -1487,6 +1537,56 @@ namespace Brovan.Core.Emulation
             Library.DisposeBinaryData();
             Library.Dispose();
             return Module;
+        }
+
+        // High sparse VA window (well above the ~32 GiB span MapUniqueAddress manages) used for huge
+        // base=NULL reservations and large SEC_RESERVE sections, so a multi-TiB reserve never collides
+        // with image/heap/stack allocations. Single source of truth for the three callers that place
+        // such reserves: ReserveSparseSection here, and NtAllocateVirtualMemory[Ex].FindFreeBaseAddress.
+        public const ulong HighSparseBase = 0x0000_1000_0000_0000UL; // 16 TiB
+        public const ulong HighSparseCeil = 0x0000_7FF0_0000_0000UL; // just under the x64 user ceiling
+        public const ulong HighSparseStride = 0x0000_0001_0000_0000UL; // 4 GiB stride
+
+        /// <summary>
+        /// Finds a free hole of <paramref name="AlignedSize"/> bytes in the high sparse VA window
+        /// (see <see cref="HighSparseBase"/>). Metadata search only — does NOT reserve; the caller
+        /// reserves (or hands the base back to a syscall that will). Returns the base, or 0 if the
+        /// window has no free hole large enough. <paramref name="AlignedSize"/> must already be
+        /// page-aligned.
+        /// </summary>
+        public ulong FindHighSparseHole(ulong AlignedSize)
+        {
+            if (AlignedSize == 0)
+                return 0;
+
+            for (ulong Candidate = HighSparseBase; Candidate + AlignedSize <= HighSparseCeil; Candidate += HighSparseStride)
+            {
+                if (!IsRegionInUse(Candidate, AlignedSize))
+                    return Candidate;
+            }
+
+            return 0;
+        }
+
+        /// <summary>
+        /// Reserves a large (&gt; 4 GiB) address-space range as metadata only, with no host
+        /// backing — the sparse counterpart of <see cref="MapUniqueAddress"/>, for SEC_RESERVE
+        /// sections whose size cannot be host-backed up front (the .NET 8 GC "regions" allocator
+        /// reserves ~2 TiB via NtCreateSection). The guest commits sub-ranges on demand through
+        /// NtAllocateVirtualMemory(MEM_COMMIT) → <see cref="CommitMemory"/>, which maps only the
+        /// pages actually touched. Returns the reserved base, or 0 if no free hole was found.
+        /// </summary>
+        public ulong ReserveSparseSection(ulong Size, uint Protect)
+        {
+            Size = AlignUp(Size, PageSize);
+            if (Size == 0)
+                return 0;
+
+            ulong Candidate = FindHighSparseHole(Size);
+            if (Candidate == 0)
+                return 0;
+
+            return ReserveMemory(Candidate, Size, Protect) ? Candidate : 0;
         }
 
         public bool ReserveMemory(ulong BaseAddress, ulong Size, uint Protect)
@@ -1972,6 +2072,155 @@ namespace Brovan.Core.Emulation
                 Flags = AllocationType.None
             });
 
+            LogFreedRegion("ReleaseMemory", Start, End - Start);
+            return true;
+        }
+
+        /// <summary>
+        /// Partial (sized) MEM_RELEASE: releases exactly the [BaseAddress, BaseAddress+Size) sub-range
+        /// of a reservation and keeps the remainder reserved. Mirrors <see cref="DecommitMemory"/>'s
+        /// Left/Mid/Right split, but the middle (overlapping) piece is fully released — its committed
+        /// host pages are unmapped and it becomes MEM_FREE — instead of staying reserved-decommitted.
+        /// This is the shape ntdll's loader / RtlpSecMemFreeVirtualMemory use when they over-reserve
+        /// for alignment and release the excess directly through the NtFreeVirtualMemory syscall.
+        /// </summary>
+        public bool ReleaseMemoryRange(ulong BaseAddress, ulong Size)
+        {
+            if (Size == 0 || WinHelper == null)
+                return false;
+
+            ulong Start = BaseAddress & ~0xFFFUL;
+            ulong End = AlignUp(BaseAddress + Size, PageSize);
+            if (End <= Start)
+                return false;
+
+            if (!TryFindMemoryRegion(Start, out MemoryRegion Anchor) || !Anchor.IsReserved)
+                return false;
+
+            ulong AllocationBase = Anchor.AllocationBase;
+
+            // Does the released range cover this allocation's anchor (its AllocationBase)? If so, every
+            // surviving piece of the allocation must be re-anchored (see the post-loop pass below):
+            // otherwise a survivor keeps an AllocationBase pointing into freed, reusable VA — a later
+            // reservation reuses that base, and a whole-allocation ReleaseMemory(base) then groups the
+            // still-live survivor with it and unmaps it. This is the RtlCreateHeap over-reserve pattern
+            // (reserve big, align up, release the excess-front): the heap survives as the higher piece,
+            // so the .NET GC's later reserve+release of that reused base would tear the live CRT heap out
+            // from under msvcrt (_calloc_impl use-after-free -> RtlAllocateHeap fault). AnchorFreed is a
+            // property of the allocation (base vs the freed range), so it is computed once here.
+            bool AnchorFreed = AllocationBase >= Start && AllocationBase < End;
+
+            // Rescued/decommitted-page tracking for the released range is torn down first: the range
+            // "truly frees" and any subsequent access there must fault.
+            ReclaimRescuedPages(Start, End - Start);
+
+            List<MemoryRegion> Regions = EnumerateMemoryRegionsByBase().ToList();
+            List<MemoryRegion> NewRegions = new List<MemoryRegion>(Regions.Count + 2);
+            // Indices into NewRegions of the surviving pieces that belong to this allocation — the split
+            // Left/Right pieces AND any sibling region of the same allocation lying entirely beyond the
+            // freed range. Collected so the post-loop re-anchor can retarget them together.
+            List<int> GroupSurvivors = new List<int>();
+            bool ReleasedAny = false;
+
+            foreach (MemoryRegion Region in Regions)
+            {
+                if (!Region.IsReserved || Region.AllocationBase != AllocationBase)
+                {
+                    NewRegions.Add(Region);
+                    continue;
+                }
+
+                ulong RegionStart = Region.BaseAddress;
+                ulong RegionEnd = GetRangeEnd(Region.BaseAddress, Region.Size);
+                if (RegionEnd <= Start || RegionStart >= End)
+                {
+                    // Sibling of this allocation entirely outside the freed range: survives untouched, but
+                    // it is still part of the group so it must be re-anchored if the anchor was freed.
+                    GroupSurvivors.Add(NewRegions.Count);
+                    NewRegions.Add(Region);
+                    continue;
+                }
+
+                ulong OverlapStart = Math.Max(RegionStart, Start);
+                ulong OverlapEnd = Math.Min(RegionEnd, End);
+                ulong LeftSize = OverlapStart - RegionStart;
+                ulong RightSize = RegionEnd - OverlapEnd;
+
+                if (LeftSize > 0)
+                {
+                    MemoryRegion Left = Region;
+                    Left.BaseAddress = RegionStart;
+                    Left.Size = LeftSize;
+                    Left.RequestedSize = LeftSize;
+                    GroupSurvivors.Add(NewRegions.Count);
+                    NewRegions.Add(Left);
+                }
+
+                // Middle piece is released: unmap any committed backend pages and drop the region.
+                if (Region.IsCommitted && IsRegionMapped(OverlapStart, 1))
+                    _emulator.UnmapMemory(OverlapStart, OverlapEnd - OverlapStart);
+
+                ReleasedAny = true;
+
+                if (RightSize > 0)
+                {
+                    MemoryRegion Right = Region;
+                    Right.BaseAddress = OverlapEnd;
+                    Right.Size = RightSize;
+                    Right.RequestedSize = RightSize;
+                    GroupSurvivors.Add(NewRegions.Count);
+                    NewRegions.Add(Right);
+                }
+            }
+
+            if (!ReleasedAny)
+                return false;
+
+            // Re-anchor pass: when the freed range covered the allocation's anchor, retarget EVERY
+            // surviving piece of the allocation to the lowest surviving base. Because AnchorFreed means
+            // AllocationBase >= Start and every group member lives at or above AllocationBase, all
+            // survivors sit at or above End — so the lowest surviving base is always outside the freed
+            // range, giving a coherent, non-freed anchor that (a) keeps no survivor pointing into freed VA
+            // and (b) leaves the remainder releasable as one unit via ReleaseMemory(newAnchor). The
+            // validated single-region front-release case (one Right survivor) re-anchors it to its own
+            // base exactly as before — byte-identical. When the anchor is NOT freed, survivors keep the
+            // original AllocationBase so a genuine whole-allocation release still reaches every piece.
+            if (AnchorFreed && GroupSurvivors.Count > 0)
+            {
+                ulong NewAnchor = ulong.MaxValue;
+                foreach (int Idx in GroupSurvivors)
+                {
+                    if (NewRegions[Idx].BaseAddress < NewAnchor)
+                        NewAnchor = NewRegions[Idx].BaseAddress;
+                }
+
+                foreach (int Idx in GroupSurvivors)
+                {
+                    MemoryRegion Survivor = NewRegions[Idx];
+                    Survivor.AllocationBase = NewAnchor;
+                    NewRegions[Idx] = Survivor;
+                }
+            }
+
+            ReplaceMemoryRegions(NewRegions.OrderBy(R => R.BaseAddress).ToList());
+
+            _freedmemory.Add(new MemoryRegion
+            {
+                BaseAddress = Start,
+                Size = End - Start,
+                RequestedSize = End - Start,
+                AllocationBase = Start,
+                AllocationProtect = 0,
+                Protect = 0,
+                IsReserved = false,
+                IsCommitted = false,
+                InitialProtections = MemoryProtection.None,
+                Protections = MemoryProtection.None,
+                SpecialProtections = SpecialProtections.None,
+                Flags = AllocationType.None
+            });
+
+            LogFreedRegion("ReleaseMemoryRange", Start, End - Start);
             return true;
         }
 
@@ -2175,6 +2424,7 @@ namespace Brovan.Core.Emulation
         private void InstructionHandler(ulong Address, uint Size)
         {
             Instruction++;
+
             // 64-bit IRETQ (48 CF) is emulated here because Unicorn's own IRETQ diverges
             // in the flat long-mode setup (proven: with this path disabled al-khaser bails
             // 14M instructions early). Only a 2-byte instruction can be `48 CF`, and it is
