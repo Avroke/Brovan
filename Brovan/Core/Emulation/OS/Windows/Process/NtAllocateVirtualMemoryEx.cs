@@ -159,16 +159,16 @@ namespace Brovan.Core.Emulation.OS.Windows
                 ulong RegionSize = BinaryEmulator.AlignUp(RegionSizeRaw, PageSize);
                 ulong BaseAddress = Instance.ReadMemoryULong(BaseAddressPtr);
 
-                bool Reserve = (AllocationTypeValue & 0x2000UL) != 0; // MEM_RESERVE
-                bool Commit = (AllocationTypeValue & 0x1000UL) != 0;  // MEM_COMMIT
+                bool Reserve = (AllocationTypeValue & 0x2000UL) != 0;
+                bool Commit = (AllocationTypeValue & 0x1000UL) != 0;
 
                 if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                     Instance.TriggerEventMessage($"[+] NtAllocateVirtualMemoryEx (BaseAddress: 0x{BaseAddress:X}, RegionSize: {RegionSize}, Commit: {Commit}, Reserve: {Reserve})", LogFlags.Syscall);
 
                 if (!Reserve && !Commit)
                 {
-                    if ((AllocationTypeValue & 0x00080000UL) != 0 || // MEM_RESET
-                        (AllocationTypeValue & 0x01000000UL) != 0) // MEM_RESET_UNDO
+                    if ((AllocationTypeValue & 0x00080000UL) != 0 ||
+                        (AllocationTypeValue & 0x01000000UL) != 0)
                         return Instance.WinUnimplemented;
 
                     return NTSTATUS.STATUS_INVALID_PARAMETER;

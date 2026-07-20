@@ -324,9 +324,6 @@ namespace Brovan.Core.Emulation
         {
             Span<byte> Header = stackalloc byte[24];
 
-            // Pcap global header layout:
-            // 0x00 magic, 0x04 version major, 0x06 version minor, 0x08 timezone offset,
-            // 0x0C timestamp accuracy, 0x10 snapshot length, 0x14 link type.
             BinaryPrimitives.WriteUInt32LittleEndian(Header.Slice(0, 4), PcapMagic);
             BinaryPrimitives.WriteUInt16LittleEndian(Header.Slice(4, 2), PcapVersionMajor);
             BinaryPrimitives.WriteUInt16LittleEndian(Header.Slice(6, 2), PcapVersionMinor);
@@ -368,9 +365,6 @@ namespace Brovan.Core.Emulation
             int TransportLength = Protocol == ProtocolType.Tcp ? 20 : 8;
             int TotalLength = HeaderLength + TransportLength + Payload.Length;
 
-            // IPv4 header offsets:
-            // 0x00 version/IHL, 0x01 DSCP/ECN, 0x02 total length, 0x04 identification,
-            // 0x06 flags/fragment offset, 0x08 TTL, 0x09 protocol.
             Span[0] = 0x45;
             Span[1] = 0;
             BinaryPrimitives.WriteUInt16BigEndian(Span.Slice(2, 2), (ushort)TotalLength);
@@ -417,8 +411,6 @@ namespace Brovan.Core.Emulation
 
         private static void BuildUdpPacket(Span<byte> Transport, IPEndPoint Source, IPEndPoint Destination, ReadOnlySpan<byte> Payload, bool IsIpv6)
         {
-            // UDP header offsets:
-            // 0x00 source port, 0x02 destination port, 0x04 length, 0x06 checksum.
             BinaryPrimitives.WriteUInt16BigEndian(Transport.Slice(0, 2), (ushort)Source.Port);
             BinaryPrimitives.WriteUInt16BigEndian(Transport.Slice(2, 2), (ushort)Destination.Port);
             BinaryPrimitives.WriteUInt16BigEndian(Transport.Slice(4, 2), (ushort)(8 + Payload.Length));
@@ -431,10 +423,6 @@ namespace Brovan.Core.Emulation
 
         private static void BuildTcpPacket(Span<byte> Transport, IPEndPoint Source, IPEndPoint Destination, ReadOnlySpan<byte> Payload, ulong Sequence, ulong Acknowledgment, byte Flags, bool IsIpv6)
         {
-            // TCP header offsets:
-            // 0x00 source port, 0x02 destination port, 0x04 sequence number,
-            // 0x08 acknowledgment number, 0x0C data offset/reserved, 0x0D flags,
-            // 0x0E window size, 0x10 checksum, 0x12 urgent pointer.
             BinaryPrimitives.WriteUInt16BigEndian(Transport.Slice(0, 2), (ushort)Source.Port);
             BinaryPrimitives.WriteUInt16BigEndian(Transport.Slice(2, 2), (ushort)Destination.Port);
             BinaryPrimitives.WriteUInt32BigEndian(Transport.Slice(4, 4), (uint)Sequence);
@@ -526,9 +514,6 @@ namespace Brovan.Core.Emulation
 
             Span<byte> Header = stackalloc byte[16];
 
-            // Packet record layout:
-            // 0x00 timestamp seconds, 0x04 timestamp microseconds,
-            // 0x08 captured length, 0x0C original length.
             BinaryPrimitives.WriteUInt32LittleEndian(Header.Slice(0, 4), TimestampSeconds);
             BinaryPrimitives.WriteUInt32LittleEndian(Header.Slice(4, 4), TimestampMicros);
             BinaryPrimitives.WriteUInt32LittleEndian(Header.Slice(8, 4), (uint)CapturedLength);

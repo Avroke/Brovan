@@ -316,9 +316,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         internal static bool WriteMessage(BinaryEmulator Instance, ulong Address, Win32kMessage Message)
         {
-            // MSG is bitness-dependent: 28 bytes on x86 (all fields 4-wide) vs 48 on x64 (HWND/WPARAM/LPARAM
-            // pointer-sized + alignment). Writing the x64 layout into a 32-bit caller's MSG overruns it and
-            // scrambles wParam/lParam/pt, so size it to the guest.
             if (Instance.GuestPointerSize == 4)
             {
                 if (Address == 0 || !Instance.IsRegionMapped(Address, MSG32_SIZE))
@@ -355,7 +352,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         {
             Message = default;
 
-            // Bitness-dependent MSG layout — 28 bytes on x86 (all fields 4-wide), 48 on x64.
             if (Instance.GuestPointerSize == 4)
             {
                 if (Address == 0 || !Instance.IsRegionMapped(Address, MSG32_SIZE))

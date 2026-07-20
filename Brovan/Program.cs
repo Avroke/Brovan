@@ -235,7 +235,6 @@ namespace Brovan
                 LogError($"[Global Unhandled Exception]: {ex.Message}\nStack Trace:\n\n{ex.StackTrace}");
             };
 
-            // Add a handler specifically for linux since .NET doesn't seem to show any stack traces on linux
             if (IsLinux)
             {
                 LinuxNativeCrashHandler.Install((sig, fault, rip, modulepath, modulebase, symbolname, symboladdr, siCode, trapNo, err) =>
@@ -426,7 +425,7 @@ namespace Brovan
                         Environment.Exit(-1);
                     }
 
-                    Environment.Exit(0); // it should exit by itself inside RestartProcessWithCfgDisabled but keep this here too just in case
+                    Environment.Exit(0);
                 }
 
                 if (Arg.StartsWith("--net=", StringComparison.OrdinalIgnoreCase))
@@ -494,7 +493,6 @@ namespace Brovan
             string[] ProgramArguments = ProgramArgumentsList.ToArray();
             string RawProgramArguments = BuildRawProgramArguments(ProgramArguments);
 
-            // Set the dll import resolver based on the platform
             NativeLibraryResolver.Register();
             EmulationMenu.EmulationMenu.RunEmulator(FilePath, Quick, Silent, Command, RawProgramArguments, ProgramArguments, NetworkPolicy, NoHooks, BackendKind, ScreenResolutionSpec);
         }

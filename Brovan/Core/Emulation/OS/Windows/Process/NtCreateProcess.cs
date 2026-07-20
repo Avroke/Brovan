@@ -51,7 +51,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 CreatedProcess.Arch = BinaryArchitecture.x64;
                 CreatedProcess.PPID = Instance.WinHelper.PID;
 
-                //CreatedProcess.Name = Instance._emulator.ReadMemoryString(ObjectAttrs.ObjectName.Buffer, (int)ObjectAttrs.Length, Encoding.Unicode);
                 CreatedProcess.PID = Instance.WinHelper.GenerateRandomPID();
                 CreatedProcess.RunningUser = Instance.WinHelper.CurrentUser;
                 Instance.WinHelper.InitializeProcessTimes(CreatedProcess, 0, false);
@@ -96,7 +95,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 CreatedProcess.Status = ProtectionStatus.None;
                 CreatedProcess.Arch = BinaryArchitecture.x86;
                 CreatedProcess.PPID = Instance.WinHelper.PID;
-                //CreatedProcess.Name = Instance._emulator.ReadMemoryString(ObjectAttrs.ObjectName.Buffer, (int)ObjectAttrs.Length, Encoding.Unicode);
                 uint NewPID = Instance.WinHelper.GenerateRandomPID();
                 CreatedProcess.PID = NewPID;
                 CreatedProcess.RunningUser = Instance.WinHelper.CurrentUser;

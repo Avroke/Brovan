@@ -95,10 +95,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 case THREADINFOCLASS.ThreadHideFromDebugger:
                     {
-                        // The correct call is NtSetInformationThread(hThread, ThreadHideFromDebugger, NULL, 0):
-                        // no payload, length must be zero. Al-khaser probes this by passing a bogus length
-                        // (e.g. 12345) and expecting STATUS_INFO_LENGTH_MISMATCH. Handle validation is
-                        // already done by ResolveThreadFromHandle above (bogus handle → STATUS_INVALID_HANDLE).
                         if (ThreadInformationLength != 0)
                             return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
 
@@ -119,7 +115,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                             return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                         uint Value = Instance._emulator.ReadMemoryUInt(ThreadInformationPtr);
-                        //Thread.BreakOnTermination = Value != 0;
                         return NTSTATUS.STATUS_SUCCESS;
                     }
 

@@ -117,8 +117,6 @@ namespace Brovan.Core.Emulation
         bool WriteRegisterByte(int register, byte value);
         bool WriteRegisterByte(Registers register, byte[] value);
 
-        // Writes the GDTR (base + limit). Needed to install a 32-bit FS→TEB segment descriptor, since MODE_32
-        // ignores the FS_BASE pseudo-register and the base must come from a GDT descriptor.
         bool WriteGdtr(ulong Base, uint Limit);
 
         ulong ReadRegister(Registers register);

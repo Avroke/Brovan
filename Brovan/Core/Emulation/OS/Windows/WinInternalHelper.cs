@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -442,51 +442,32 @@ namespace Brovan.Core.Emulation.OS.Windows
                     BinaryPrimitives.WriteInt64LittleEndian(Page.AsSpan(Offset, 8), Value);
                 }
 
-                // TickCountLow / TickCountLowDeprecated
                 WriteUInt32(OffsetTickCountLowDeprecated, unchecked((uint)Emulator.EmulatedTickCount64));
 
-                // InterruptTime
                 WriteInt64(OffsetInterruptTime, TimeSpan.FromHours(random.Next(2, 24)).Ticks);
 
-                // SystemTime
                 WriteInt64(OffsetSystemTime, Emulator.GetEmulatedSystemTimeFileTimeUtc());
 
-                // KdDebuggerEnabled
                 WriteByte(0x02D4, 0x00);
 
-                // SafeBootMode
                 WriteByte(0x02EC, 0x00);
 
-                // NtBuildNumber
                 WriteUInt32(OffsetNtBuildNumber, WindowsVersionInfo.BuildNumber);
 
-                // NtProductType (NtProductWinNt)
                 WriteUInt32(OffsetNtProductType, WindowsVersionInfo.ProductTypeWinNt);
                 WriteByte(OffsetProductTypeIsValid, 1);
 
-                // NtMajorVersion / NtMinorVersion
                 WriteUInt32(OffsetNtMajorVersion, WindowsVersionInfo.MajorVersion);
                 WriteUInt32(OffsetNtMinorVersion, WindowsVersionInfo.MinorVersion);
 
-                // SystemCall flag
                 WriteUInt32(OffsetSystemCallX64, 0);
 
-                // TickCountMultiplier — the standard Win10 value (0x0FA00000). kernel32!GetTickCount
-                // computes (TickCount.LowPart * TickCountMultiplier) >> 24; left at 0 the field made
-                // GetTickCount return 0 on every call, so a Sleep-delta timing check (al-khaser's
-                // accelerated_sleep: GetTickCount / Sleep(60s) / GetTickCount, detect if dwDiff <= 59s)
-                // always saw dwDiff == 0 and flagged emulated time. With TickCountQuad = InterruptTime /
-                // 156250 (one tick per 15.625 ms), this multiplier scales GetTickCount back to
-                // EmulatedTickCount64 milliseconds.
                 WriteUInt32(OffsetTickCountMultiplier, 0x0FA00000u);
 
-                // TickCount64
                 WriteUInt64(OffsetTickCountQuad, unchecked((ulong)Emulator.EmulatedTickCount64));
 
-                // Cookie
                 WriteUInt32(OffsetCookie, unchecked((uint)random.Next()));
 
-                // ActiveProcessorCount
                 WriteUInt32(0x03C0, unchecked((uint)Environment.ProcessorCount));
             }
 
@@ -500,18 +481,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             for (int i = 0; i < 64; i++)
                 Page[OffsetProcessorFeatures + i] = 0;
 
-            // Do not leak the host KUSER_SHARED_DATA XState configuration into the guest.
-            // Brovan's CPUID surface does not advertise XSAVE/OSXSAVE, and guest ntdll will
-            // enter XRSTOR-based context paths if the copied host XState bitmap remains set.
             Array.Clear(Page, OffsetXStateConfiguration, Page.Length - OffsetXStateConfiguration);
 
-            Page[OffsetProcessorFeatures + 6] = 1;  // SSE
-            Page[OffsetProcessorFeatures + 10] = 1; // SSE2
-            Page[OffsetProcessorFeatures + 13] = 1; // SSE3
-            Page[OffsetProcessorFeatures + 12] = 1; // NX
-            Page[OffsetProcessorFeatures + 23] = 1; // FASTFAIL
-            Page[OffsetProcessorFeatures + 28] = 1; // RDRAND
-            Page[OffsetProcessorFeatures + 32] = 1; // RDTSCP
+            Page[OffsetProcessorFeatures + 6] = 1;
+            Page[OffsetProcessorFeatures + 10] = 1;
+            Page[OffsetProcessorFeatures + 13] = 1;
+            Page[OffsetProcessorFeatures + 12] = 1;
+            Page[OffsetProcessorFeatures + 23] = 1;
+            Page[OffsetProcessorFeatures + 28] = 1;
+            Page[OffsetProcessorFeatures + 32] = 1;
 
             return Page;
         }
@@ -559,14 +537,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int LdrEntryOffsetInLoadOrderLinks = 0x00;
         private const int LdrEntryOffsetDllBase = 0x30;
         private const int LdrEntryOffsetSizeOfImage = 0x40;
-        private const int LdrEntryOffsetFullDllName = 0x48; // UNICODE_STRING
-        private const int LdrEntryOffsetBaseDllName = 0x58; // UNICODE_STRING
+        private const int LdrEntryOffsetFullDllName = 0x48;
+        private const int LdrEntryOffsetBaseDllName = 0x58;
 
         private const int UnicodeStringSize = 0x10;
         private const int UnicodeStringOffsetLength = 0x0;
         private const int UnicodeStringOffsetBuffer = 0x8;
 
-        private const int MaxUnicodeStringBytes = 0x800; // hard cap (bytes)
+        private const int MaxUnicodeStringBytes = 0x800;
 
         private readonly BinaryEmulator Emulator;
         private readonly WinSysHelper WinHelper;
@@ -679,11 +657,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal void Pump()
         {
-            // Throttle by EMULATED time, not host Stopwatch: a wall-clock throttle fired a
-            // host-load-dependent number of times, so RefreshLdrHooks ran at non-reproducible
-            // points and the guest-visible LDR state diverged run-to-run.
             long Now = Emulator.EmulatedTickCount64;
-            const long MinDelta = 1; // ~1 ms of emulated time between refreshes
+            const long MinDelta = 1;
             if (LastPumpTicks != 0 && (Now - LastPumpTicks) < MinDelta)
                 return;
 

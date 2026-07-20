@@ -10,13 +10,13 @@ namespace Brovan.Core.Emulation.OS.Windows
     ///
     /// <code>
     /// NTSTATUS NtGetWriteWatch(
-    ///   HANDLE ProcessHandle,        // arg0
-    ///   ULONG  Flags,                // arg1  (WRITE_WATCH_FLAG_RESET = 1)
-    ///   PVOID  BaseAddress,          // arg2
-    ///   SIZE_T RegionSize,           // arg3
-    ///   PVOID *UserAddressArray,     // arg4  (OUT: page addresses)
-    ///   PULONG_PTR EntriesInArray,   // arg5  (IN: capacity, OUT: count written)
-    ///   PULONG Granularity)          // arg6  (OUT: page size)
+    ///   HANDLE ProcessHandle,
+    ///   ULONG  Flags,
+    ///   PVOID  BaseAddress,
+    ///   SIZE_T RegionSize,
+    ///   PVOID *UserAddressArray,
+    ///   PULONG_PTR EntriesInArray,
+    ///   PULONG Granularity)
     /// </code>
     ///
     /// Only guest STORE instructions dirty a page (host-side stub writes bypass Unicorn's
@@ -61,18 +61,12 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             bool Reset = (Flags & WriteWatchManager.WriteWatchFlagReset) != 0;
 
-            // Probe the caller's output array for its DECLARED capacity BEFORE invoking
-            // TryGetWrites, because TryGetWrites applies the WRITE_WATCH_FLAG_RESET side-effect.
-            // Real Windows probes the buffer up front and does not reset when the probe faults;
-            // validating here (rather than after, against the returned count) preserves that
-            // ordering so an unmapped array never silently wipes the write-watch state.
             if (Capacity > 0 && (Capacity > ulong.MaxValue / 8 || !Instance.IsRegionMapped(UserAddressArray, Capacity * 8)))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             if (Instance.WriteWatch == null ||
                 !Instance.WriteWatch.TryGetWrites(BaseAddress, RegionSize, Capacity, Reset, out List<ulong> Pages))
             {
-                // The range was not allocated with MEM_WRITE_WATCH — real Windows rejects it.
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
             }
 

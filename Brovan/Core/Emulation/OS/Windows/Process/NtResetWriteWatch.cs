@@ -9,9 +9,9 @@ namespace Brovan.Core.Emulation.OS.Windows
     ///
     /// <code>
     /// NTSTATUS NtResetWriteWatch(
-    ///   HANDLE ProcessHandle,   // arg0
-    ///   PVOID  BaseAddress,     // arg1
-    ///   SIZE_T RegionSize)      // arg2
+    ///   HANDLE ProcessHandle,
+    ///   PVOID  BaseAddress,
+    ///   SIZE_T RegionSize)
     /// </code>
     ///
     /// al-khaser's write-watch "code write" probe relies on this: it writes generated code into
@@ -41,8 +41,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (BaseAddress == 0 || RegionSize == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            // Non-zero (STATUS_INVALID_PARAMETER) when the range is not a MEM_WRITE_WATCH region,
-            // matching kernel32's ResetWriteWatch returning a non-zero failure.
             if (Instance.WriteWatch == null || !Instance.WriteWatch.Reset(BaseAddress, RegionSize))
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 

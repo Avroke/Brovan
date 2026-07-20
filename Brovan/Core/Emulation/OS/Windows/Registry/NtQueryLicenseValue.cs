@@ -1,4 +1,4 @@
-﻿using Brovan.Core.Helpers;
+using Brovan.Core.Helpers;
 using System;
 using System.Text;
 using static Brovan.Core.Helpers.BinaryHelpers;
@@ -169,7 +169,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            // Bitness-agnostic: operates on an already-open KeyHandle; value payloads are flat records.
             if (Instance._binary.Architecture == BinaryArchitecture.x64 || Instance._binary.Architecture == BinaryArchitecture.x86)
             {
                 ulong ValueNamePtr = Instance.WinHelper.GetArg64(0);

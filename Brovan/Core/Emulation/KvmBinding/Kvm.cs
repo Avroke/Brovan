@@ -523,9 +523,6 @@ namespace Brovan.Core.Emulation
         {
             if (DisposedCheck()) return false;
 
-            // KVM programs the GDT through the special registers. WOW64 32-bit FS-base support (writing the
-            // per-thread FS descriptor into the GDT page) is only wired for the Unicorn backend today; here we
-            // at least keep GDTR coherent so nothing regresses when the caller points it at guest memory.
             LinuxKvmSpecialRegisters sregs = GetSpecialRegisters();
             sregs.Gdt.Base = Base;
             sregs.Gdt.Limit = (ushort)Limit;

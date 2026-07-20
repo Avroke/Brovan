@@ -6,7 +6,6 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            // Bitness-agnostic: args via GetArg64 (bitness-aware); the OUT event HANDLE is pointer-sized.
             if (Instance._binary.Architecture == BinaryArchitecture.x64 || Instance._binary.Architecture == BinaryArchitecture.x86)
             {
                 ulong EventHandlePtr = Instance.WinHelper.GetArg64(0);

@@ -33,56 +33,22 @@ namespace Brovan.Core.Emulation.Guests
 
         private readonly BlobData _blob;
         private readonly WindowsBlobLaunchMode _blobLaunchMode;
-        // Deterministic RNG for synthetic guest identity (username, computer name). Points at the
-        // emulator's per-sample seeded stream once Initialize runs; the fallback keeps a param-less
-        // access before init still deterministic. Was new Random() + crypto RNG -> a random-LENGTH
-        // username every run, whose variable length rippled into path/env/compare work and made the
-        // instruction stream (and thus depth) non-reproducible run-to-run.
         private Random _identityRandom;
         private IReadOnlyDictionary<uint, WinSyscallEntry> WinSyscallTable = new Dictionary<uint, WinSyscallEntry>();
         private WinModule _ntdllModule;
 
-        // Guest address of the WOW64 system-call trampoline (see SetupWow64SyscallTransition). A 32-bit
-        // ntdll routes every syscall through this address instead of executing a native `syscall`; the
-        // trampoline runs a `sysenter` that Brovan intercepts and dispatches through TryHandleSyscall.
-        // 0 for x64 guests (which use the real `syscall` instruction) and until it is set up.
         private ulong _wow64SyscallTrampoline;
 
-        // Guest address of the process-wide WOW64INFO structure (see SetupWow64Info). On a real WOW64
-        // process wow64.dll allocates this block and stores a pointer to it in every thread's TEB at
-        // TlsSlots[WOW64_TLS_WOW64INFO] (offset 0xE38 on the 32-bit TEB) BEFORE the 32-bit ntdll runs;
-        // ntdll's CPU-feature init then dereferences it (NativeSystemPageSize@0x00, CpuFlags@0x04,
-        // NativeMachine@0x20, EmulatedMachine@0x22) with no NULL guard. The pure-32-bit model has no
-        // wow64.dll, so Brovan synthesises the block once per process. 0 for x64 guests / until set up.
         private ulong _wow64InfoPtr;
-        // 32-bit TEB offset of TlsSlots[WOW64_TLS_WOW64INFO]. TlsSlots is at TEB+0xE10 (64 * 4 bytes);
-        // WOW64_TLS_WOW64INFO == 10, so the slot sits at 0xE10 + 10*4 = 0xE38. (On the 64-bit TEB the
-        // same slot is TEB64+0x1480 + 10*8 = 0x14D0 — the offset ntdll's dual-TEB path reads.)
         private const uint Wow64InfoTebSlotOffset32 = 0xE38;
 
-        // Guest address of the 32-bit GDT used to give FS a per-thread base = TEB. MODE_32 Unicorn ignores the
-        // FS_BASE pseudo-register, so the FS base must come from a real GDT descriptor (selector 0x53). Set up
-        // lazily on the first 32-bit context load; the FS descriptor's base is rewritten per thread switch.
         private ulong _gdt32Base;
-        // Selectors are DPL0 / RPL0. Real WOW64 uses ring-3 selectors (CS 0x23, SS/DS 0x2B, FS 0x53), but a
-        // ring-3 selector can only be loaded at CPL 3, and Unicorn's reg-write of CS does not perform the far
-        // transfer that would raise CPL — so RPL-3 loads #GP. DPL0/RPL0 keeps the loads consistent with the
-        // default CPL 0 while still giving FS the correct TEB base (all fs:[X] accesses resolve). The visible
-        // selector VALUES differ from a real WOW64 process; that is a known cosmetic gap, not a functional one.
-        private const int Wow64FsSelector = 0x50;      // GDT index 10, RPL 0 — FS → TEB
+        private const int Wow64FsSelector = 0x50;
         private const int Wow64FsGdtIndex = 10;
-        private const int Wow64DataSelector = 0x28;    // GDT index 5,  RPL 0 — flat SS/DS/ES
+        private const int Wow64DataSelector = 0x28;
         private const int Wow64DataGdtIndex = 5;
-        private const int Wow64CodeGdtIndex = 4;       // GDT index 4 — flat code (CS left at default flat)
+        private const int Wow64CodeGdtIndex = 4;
 
-        // A sample is loaded from an arbitrary host location (e.g. /tmp/.../al-khaser_x64.exe
-        // on a Linux analysis host). That host path must never be exposed to the guest — the
-        // PEB ImagePathName, GetModuleFileName, NtQueryVirtualMemory(MemorySectionName) and
-        // std::filesystem::equivalent would all read back a non-Windows path and either
-        // mis-fingerprint the process or fail to resolve. We present the sample under a
-        // realistic per-run guest path (C:\Users\<user>\Desktop\<leaf>) and keep the username
-        // stable so the process parameters and the environment block agree. Cached so every
-        // consumer sees one coherent identity.
         private string _guestUserName;
         private string _guestImagePath;
 
@@ -139,9 +105,6 @@ namespace Brovan.Core.Emulation.Guests
             if (!Instance.IsArchX86Guest)
                 throw new Exception("Windows guest supports only x86/x64.");
 
-            // Publish the ambient WOW64 file-system view before any DLL / syscall-table resolution runs:
-            // a 32-bit guest sources its system images from the SysWOW64 sub-view. Set for both bitnesses so
-            // the flag always tracks the current guest (a prior x64 run leaves it false again).
             GeneralHelper.Wow64GuestView = Instance._binary.Architecture == BinaryArchitecture.x86;
 
             _identityRandom = Instance.SeededRandom;
@@ -215,9 +178,6 @@ namespace Brovan.Core.Emulation.Guests
                 Module.Name = GeneralHelper.IO.WindowsLeafName(GuestImagePath);
                 Module.Path = GuestImagePath;
 
-                // Back the sample bytes in the virtual C: drive so the guest can open, stat and
-                // read its own image (GetModuleFileName + CreateFile on self,
-                // std::filesystem::equivalent) and drop siblings such as log.txt next to it.
                 GeneralHelper.IO.SeedGuestImageFile(GuestImagePath, Binary.GetBinaryData());
             }
 
@@ -313,10 +273,6 @@ namespace Brovan.Core.Emulation.Guests
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
                 Instance._emulator.WriteRegister(Registers.UC_X86_REG_GS_BASE, Teb);
             else
-                // Every 32-bit guest (WOW64 PE or raw blob) addresses its TEB through FS, so the FS segment
-                // base must track the current thread's TEB — this is what makes fs:[0x18]/fs:[0x30]/fs:[0xC0]
-                // (Self / PEB / WOW64 transition) resolve. MODE_32 ignores the FS_BASE pseudo-register, so the
-                // base is installed through a GDT descriptor (selector 0x53) instead — see SetupWow64Segments.
                 SetupWow64Segments(Instance, Teb);
         }
 
@@ -774,11 +730,6 @@ namespace Brovan.Core.Emulation.Guests
                     QueueUserModeException(Instance, NTSTATUS.STATUS_BREAKPOINT);
                     return true;
                 case 0x2D:
-                    // KiDebugService (int 2D). On real Windows without a kernel debugger the
-                    // kernel raises STATUS_BREAKPOINT and the CPU/kernel already advanced RIP
-                    // past the CD 2D opcode by the time the VEH runs — al-khaser's Interrupt_0x2d
-                    // probe VEH observes STATUS_BREAKPOINT with RIP already past the opcode and
-                    // returns EXCEPTION_CONTINUE_EXECUTION without adjusting RIP.
                     QueueUserModeException(Instance, NTSTATUS.STATUS_BREAKPOINT);
                     return true;
                 case 0x29:
@@ -863,38 +814,23 @@ namespace Brovan.Core.Emulation.Guests
             ulong Teb = Instance.MapUniqueAddress(0x2000, MemoryProtection.ReadWrite);
             if (Instance._binary.Architecture != BinaryArchitecture.x64)
             {
-                // 32-bit TEB (NT_TIB layout). Built for every 32-bit guest now — not just the raw-blob path —
-                // so a real WOW64 PE gets a valid TEB. Field offsets are the documented x86 TEB layout.
                 Instance._emulator.WriteMemoryByte(Teb, 0, 0x2000);
-                Instance._emulator.WriteMemory(Teb + 0x00, 0xFFFFFFFFu);                                  // NtTib.ExceptionList (SEH head sentinel)
-                Instance._emulator.WriteMemory(Teb + 0x04, (uint)(Thread.StackAddress + Thread.StackSize)); // NtTib.StackBase
-                Instance._emulator.WriteMemory(Teb + 0x08, (uint)Thread.StackAddress);                     // NtTib.StackLimit
-                Instance._emulator.WriteMemory(Teb + 0x18, (uint)Teb);                                     // NtTib.Self
-                Instance._emulator.WriteMemory(Teb + 0x20, WinHelper.PID);                                 // ClientId.UniqueProcess
-                Instance._emulator.WriteMemory(Teb + 0x24, Thread.ThreadId);                               // ClientId.UniqueThread
-                Instance._emulator.WriteMemory(Teb + 0x30, (uint)PEB);                                     // ProcessEnvironmentBlock
-                Instance._emulator.WriteMemory(Teb + 0x34, 0u);                                            // LastErrorValue
+                Instance._emulator.WriteMemory(Teb + 0x00, 0xFFFFFFFFu);
+                Instance._emulator.WriteMemory(Teb + 0x04, (uint)(Thread.StackAddress + Thread.StackSize));
+                Instance._emulator.WriteMemory(Teb + 0x08, (uint)Thread.StackAddress);
+                Instance._emulator.WriteMemory(Teb + 0x18, (uint)Teb);
+                Instance._emulator.WriteMemory(Teb + 0x20, WinHelper.PID);
+                Instance._emulator.WriteMemory(Teb + 0x24, Thread.ThreadId);
+                Instance._emulator.WriteMemory(Teb + 0x30, (uint)PEB);
+                Instance._emulator.WriteMemory(Teb + 0x34, 0u);
 
-                // TEB+0x60 = PEB. Not the documented x86 field (PEB is at +0x30 on x86), but the WOW64 GDI
-                // client code in gdi32full is compiled from the shared x64 source and reaches the PEB via the
-                // x64 layout: `mov ecx,[TEB+0xFDC]` (the delta from the 32-bit TEB to the 64-bit TEB) then
-                // `mov reg,[base+0x60]` (x64 TEB.ProcessEnvironmentBlock) → `[PEB+0xF8]` (GdiSharedHandleTable).
-                // Brovan models a single PEB and leaves TEB+0xFDC at 0 (so base stays this TEB), so publishing
-                // the PEB pointer at TEB+0x60 lets that chain resolve without a separate 64-bit TEB shadow.
                 Instance._emulator.WriteMemory(Teb + 0x60, (uint)PEB);
 
-                // WOW32Reserved (fs:[0xC0]) — the WOW64 system-call transition pointer. A 32-bit ntdll Nt*
-                // stub reaches the kernel through `call fs:[0xC0]` (or the sibling `jmp [Wow64Transition]`).
-                // Point it at our syscall trampoline so the transition dispatches to the C# handler.
                 if (_wow64SyscallTrampoline != 0)
                     Instance._emulator.WriteMemory(Teb + 0xC0, (uint)_wow64SyscallTrampoline);
 
-                Instance._emulator.WriteMemory(Teb + 0xC4, (uint)0x0409u);                                 // CurrentLocale
+                Instance._emulator.WriteMemory(Teb + 0xC4, (uint)0x0409u);
 
-                // TlsSlots[WOW64_TLS_WOW64INFO] — a pointer to the process-wide WOW64INFO block. wow64.dll
-                // sets this on a real WOW64 process before the 32-bit ntdll runs; the pure-32-bit model
-                // populates it here so ntdll's CPU-feature init doesn't dereference a NULL slot. See
-                // SetupWow64Info for the structure layout and why each field matters.
                 if (_wow64InfoPtr != 0)
                     Instance._emulator.WriteMemory(Teb + Wow64InfoTebSlotOffset32, (uint)_wow64InfoPtr);
 
@@ -1098,18 +1034,14 @@ namespace Brovan.Core.Emulation.Guests
             }
             else
             {
-                // x86: ntdll's LdrInitializeThunk is entered stdcall-style with a CONTEXT pointer as its first
-                // stack argument; on completion it NtContinue's to that CONTEXT, whose Eip is RtlUserThreadStart
-                // (Eax = entry, Ebx = parameter — the x86 RtlUserThreadStart ABI). Lay out the entry frame:
-                //   [ESP+0]=return sentinel  [ESP+4]=CONTEXT*  [ESP+8]=ntdll base
                 ulong StackTop = (Thread.StackAddress + Thread.StackSize) & ~0xFUL;
-                ulong RuntimeEsp = StackTop - 0x100;                 // ESP the thread runs on after NtContinue
+                ulong RuntimeEsp = StackTop - 0x100;
                 contextAddress = BuildInitialContext32(Instance, RtlUserThreadStart, RuntimeEsp, StartAddress, Parameter);
 
                 InitialRSP = StackTop - 0x20;
-                Instance._emulator.WriteMemory(InitialRSP + 0x0, 0u);                                   // return sentinel (LdrInitializeThunk never returns)
-                Instance._emulator.WriteMemory(InitialRSP + 0x4, (uint)contextAddress);                 // arg1: PCONTEXT
-                Instance._emulator.WriteMemory(InitialRSP + 0x8, (uint)(_ntdllModule?.MappedBase ?? 0)); // arg2: ntdll base
+                Instance._emulator.WriteMemory(InitialRSP + 0x0, 0u);
+                Instance._emulator.WriteMemory(InitialRSP + 0x4, (uint)contextAddress);
+                Instance._emulator.WriteMemory(InitialRSP + 0x8, (uint)(_ntdllModule?.MappedBase ?? 0));
             }
 
             Thread.Context.RIP = LdrInitializeThunk;
@@ -1181,7 +1113,6 @@ namespace Brovan.Core.Emulation.Guests
 
             string Location = Binary?.Location;
 
-            // Already a real drive-letter Windows path: keep it (Windows analysis host).
             if (!string.IsNullOrWhiteSpace(Location))
             {
                 string WinLocation = Location.Replace('/', '\\');
@@ -1192,9 +1123,6 @@ namespace Brovan.Core.Emulation.Guests
                 }
             }
 
-            // Extract the leaf with GeneralHelper.IO.WindowsLeafName — Path.GetFileName is
-            // host-relative and does not treat '\\' as a separator on a Linux analysis host,
-            // so it would return the whole backslashed host path as the "file name".
             string Leaf = null;
             if (!string.IsNullOrWhiteSpace(Location))
                 Leaf = GeneralHelper.IO.WindowsLeafName(Location).Trim().TrimEnd('\0');
@@ -1365,8 +1293,6 @@ namespace Brovan.Core.Emulation.Guests
 
                 if (IsPeImage || UsesDirectBlobStartup)
                 {
-                    // Guest-visible image path (C:\Users\<user>\Desktop\<leaf>) rather than the
-                    // raw host location — see ResolveGuestImagePath / the _guestImagePath field.
                     string ImagePath = ResolveGuestImagePath(Instance._binary);
                     if (string.IsNullOrWhiteSpace(ImagePath))
                         ImagePath = !string.IsNullOrWhiteSpace(MainModule.Path) ? MainModule.Path : (!string.IsNullOrWhiteSpace(MainModule.Name) ? MainModule.Name : "C:\\blob.bin");
@@ -1435,10 +1361,6 @@ namespace Brovan.Core.Emulation.Guests
             }
             else
             {
-                // 32-bit guest (WOW64 PE or raw blob): build the full 32-bit PEB + RTL_USER_PROCESS_PARAMETERS.
-                // Previously only a minimal PEB was populated (and only for the raw-blob path), leaving a real
-                // 32-bit PE without ProcessParameters — ntdll's loader then read a NULL command line / image
-                // path and faulted. BuildProcessEnvironment32 mirrors the x64 block with x86 field offsets.
                 BuildProcessEnvironment32(Instance, MainModule);
             }
 
@@ -1464,29 +1386,27 @@ namespace Brovan.Core.Emulation.Guests
         {
             bool IsPeImage = Instance._binary.FileFormat == BinaryFormat.PE;
 
-            // ---- PEB (32-bit) ----
-            Instance._emulator.WriteMemory(PEB + 0x00, (byte)0, 1);                                  // InheritedAddressSpace
-            Instance._emulator.WriteMemory(PEB + 0x01, (byte)0, 1);                                  // ReadImageFileExecOptions
-            Instance._emulator.WriteMemory(PEB + 0x02, (byte)0, 1);                                  // BeingDebugged
-            Instance._emulator.WriteMemory(PEB + 0x03, (byte)0, 1);                                  // BitField
-            Instance._emulator.WriteMemory(PEB + 0x04, 0xFFFFFFFFu);                                 // Mutant
-            Instance._emulator.WriteMemory(PEB + 0x08, (uint)MainModule.MappedBase);                 // ImageBaseAddress
-            Instance._emulator.WriteMemory(PEB + 0x0C, 0u);                                          // Ldr (filled by the loader)
-            Instance._emulator.WriteMemory(PEB + 0x38, (uint)ApiSetMap);                             // ApiSetMap
-            Instance._emulator.WriteMemory(PEB + 0x64, 8u, 4);                                       // NumberOfProcessors (x86 PEB @ 0x64; x64 uses 0xB8)
-            Instance._emulator.WriteMemory(PEB + 0xA4, WindowsVersionInfo.MajorVersion, 4);          // OSMajorVersion
-            Instance._emulator.WriteMemory(PEB + 0xA8, WindowsVersionInfo.MinorVersion, 4);          // OSMinorVersion
-            Instance._emulator.WriteMemory(PEB + 0xAC, WindowsVersionInfo.BuildNumberShort, 2);      // OSBuildNumber
-            Instance._emulator.WriteMemory(PEB + 0xAE, (ushort)0, 2);                                // OSCSDVersion
-            Instance._emulator.WriteMemory(PEB + 0xB0, WindowsVersionInfo.PlatformIdWin32Nt, 4);     // OSPlatformId
+            Instance._emulator.WriteMemory(PEB + 0x00, (byte)0, 1);
+            Instance._emulator.WriteMemory(PEB + 0x01, (byte)0, 1);
+            Instance._emulator.WriteMemory(PEB + 0x02, (byte)0, 1);
+            Instance._emulator.WriteMemory(PEB + 0x03, (byte)0, 1);
+            Instance._emulator.WriteMemory(PEB + 0x04, 0xFFFFFFFFu);
+            Instance._emulator.WriteMemory(PEB + 0x08, (uint)MainModule.MappedBase);
+            Instance._emulator.WriteMemory(PEB + 0x0C, 0u);
+            Instance._emulator.WriteMemory(PEB + 0x38, (uint)ApiSetMap);
+            Instance._emulator.WriteMemory(PEB + 0x64, 8u, 4);
+            Instance._emulator.WriteMemory(PEB + 0xA4, WindowsVersionInfo.MajorVersion, 4);
+            Instance._emulator.WriteMemory(PEB + 0xA8, WindowsVersionInfo.MinorVersion, 4);
+            Instance._emulator.WriteMemory(PEB + 0xAC, WindowsVersionInfo.BuildNumberShort, 2);
+            Instance._emulator.WriteMemory(PEB + 0xAE, (ushort)0, 2);
+            Instance._emulator.WriteMemory(PEB + 0xB0, WindowsVersionInfo.PlatformIdWin32Nt, 4);
 
             if (!IsPeImage && !UsesDirectBlobStartup)
             {
-                Instance._emulator.WriteMemory(PEB + 0x10, 0u);                                      // ProcessParameters (none)
+                Instance._emulator.WriteMemory(PEB + 0x10, 0u);
                 return;
             }
 
-            // ---- RTL_USER_PROCESS_PARAMETERS (32-bit) ----
             string ImagePath = ResolveGuestImagePath(Instance._binary);
             if (string.IsNullOrWhiteSpace(ImagePath))
                 ImagePath = !string.IsNullOrWhiteSpace(MainModule.Path) ? MainModule.Path : (!string.IsNullOrWhiteSpace(MainModule.Name) ? MainModule.Name : "C:\\blob.bin");
@@ -1500,17 +1420,6 @@ namespace Brovan.Core.Emulation.Guests
             static byte[] Wz(string s) => Encoding.Unicode.GetBytes(s + "\0");
 
             byte[] EnvBlock = BuildEnvironment(Instance, out ulong envSize);
-            // Full fixed size of the 32-bit RTL_USER_PROCESS_PARAMETERS header. It must cover EVERY trailing
-            // field — RedirectionDllName@0x2A4, HeapPartitionName@0x2AC, DefaultThreadpoolCpuSetMasks@0x2B4,
-            // DefaultThreadpoolThreadMaximum@0x2BC, HeapMemoryTypeMask@0x2C0 (through ~0x2C4 on current builds) —
-            // so the zero-fill below leaves them all NULL (their correct default) and the inline string buffers
-            // that follow don't overwrite them. Previously 0x2A0, which stopped short of HeapPartitionName: the
-            // CurrentDirectory buffer (written at HeaderSize) bled a path string into HeapPartitionName.Buffer
-            // (0x2B0). ntdll's RtlpHpShouldEnableSegmentHeap reads a non-NULL HeapPartitionName.Buffer as "this
-            // process was launched into a memory partition" and switches the process heap to the segment heap —
-            // whose RtlpHpVs free-chunk RB-tree then FAST_FAIL_INVALID_BALANCED_TREE'd during heap init. A classic
-            // 32-bit process has an empty HeapPartitionName and uses the NT heap; sizing the header correctly
-            // restores that. 0x300 gives margin beyond the last known field and keeps the 16-byte alignment.
             ulong HeaderSize = 0x300;
             ulong TotalSize = HeaderSize + (ulong)Wz(CurrentDir).Length + (ulong)Wz(ImagePath).Length + (ulong)Wz(CommandLine).Length + (ulong)Wz(WindowTitle).Length + (ulong)Wz(DesktopInfo).Length + envSize;
             TotalSize = BinaryEmulator.AlignUp(TotalSize, 0x10);
@@ -1533,31 +1442,31 @@ namespace Brovan.Core.Emulation.Guests
                 Cursor = BinaryEmulator.AlignUp(Cursor, 2);
             }
 
-            Instance._emulator.WriteMemory(ProcessParams + 0x08, 0x6001u, 4);                        // Flags (normalized)
+            Instance._emulator.WriteMemory(ProcessParams + 0x08, 0x6001u, 4);
             if (UsesDirectBlobStartup || (IsPeImage && Instance._binary.PE.Subsystem.HasFlag(Subsystem.WindowsCui)))
             {
-                Instance._emulator.WriteMemory(ProcessParams + 0x10, (uint)WinHelper.ConsoleHandle.Handle, 4); // ConsoleHandle
-                Instance._emulator.WriteMemory(ProcessParams + 0x14, 0u, 4);                          // ConsoleFlags
-                Instance._emulator.WriteMemory(ProcessParams + 0x18, (uint)WinHelper.STD_IN.Handle, 4);  // StandardInput
-                Instance._emulator.WriteMemory(ProcessParams + 0x1C, (uint)WinHelper.STD_OUT.Handle, 4); // StandardOutput
-                Instance._emulator.WriteMemory(ProcessParams + 0x20, (uint)WinHelper.STD_OUT.Handle, 4); // StandardError
+                Instance._emulator.WriteMemory(ProcessParams + 0x10, (uint)WinHelper.ConsoleHandle.Handle, 4);
+                Instance._emulator.WriteMemory(ProcessParams + 0x14, 0u, 4);
+                Instance._emulator.WriteMemory(ProcessParams + 0x18, (uint)WinHelper.STD_IN.Handle, 4);
+                Instance._emulator.WriteMemory(ProcessParams + 0x1C, (uint)WinHelper.STD_OUT.Handle, 4);
+                Instance._emulator.WriteMemory(ProcessParams + 0x20, (uint)WinHelper.STD_OUT.Handle, 4);
             }
-            WriteInlineUnicodeString(0x24, CurrentDir, ForcedMax: 1024);                             // CurrentDirectory.DosPath
-            WriteInlineUnicodeString(0x38, ImagePath);                                               // ImagePathName
-            WriteInlineUnicodeString(0x40, CommandLine);                                             // CommandLine
+            WriteInlineUnicodeString(0x24, CurrentDir, ForcedMax: 1024);
+            WriteInlineUnicodeString(0x38, ImagePath);
+            WriteInlineUnicodeString(0x40, CommandLine);
             ulong EnvPtr = Cursor;
             Instance._emulator.WriteMemory(EnvPtr, EnvBlock);
-            Instance._emulator.WriteMemory(ProcessParams + 0x48, (uint)EnvPtr, 4);                   // Environment
+            Instance._emulator.WriteMemory(ProcessParams + 0x48, (uint)EnvPtr, 4);
             Cursor += envSize;
             Cursor = BinaryEmulator.AlignUp(Cursor, 2);
-            WriteInlineUnicodeString(0x70, WindowTitle);                                             // WindowTitle
-            WriteInlineUnicodeString(0x78, DesktopInfo);                                             // DesktopInfo
-            Instance._emulator.WriteMemory(ProcessParams + 0x290, (uint)envSize, 4);                 // EnvironmentSize
+            WriteInlineUnicodeString(0x70, WindowTitle);
+            WriteInlineUnicodeString(0x78, DesktopInfo);
+            Instance._emulator.WriteMemory(ProcessParams + 0x290, (uint)envSize, 4);
 
             uint Used = (uint)(Cursor - ProcessParams);
             uint Length = Used < (uint)HeaderSize ? (uint)HeaderSize : Used;
-            Instance._emulator.WriteMemory(ProcessParams + 0x0, (uint)TotalSize, 4);                 // MaximumLength
-            Instance._emulator.WriteMemory(ProcessParams + 0x4, Length, 4);                          // Length
+            Instance._emulator.WriteMemory(ProcessParams + 0x0, (uint)TotalSize, 4);
+            Instance._emulator.WriteMemory(ProcessParams + 0x4, Length, 4);
 
             SetupCsrReadOnlySharedSection32(Instance);
             SetupGdiSharedHandleTable32(Instance);
@@ -1575,7 +1484,6 @@ namespace Brovan.Core.Emulation.Guests
         /// </summary>
         private void SetupGdiSharedHandleTable32(BinaryEmulator Instance)
         {
-            // Big enough to cover gdi32full's 0x180094 client read with headroom for the handle array.
             const ulong GdiSharedTableSize = 0x200000;
             ulong Table = Instance.MapUniqueAddress(GdiSharedTableSize, MemoryProtection.ReadWrite);
             if (Table == 0)
@@ -1612,9 +1520,9 @@ namespace Brovan.Core.Emulation.Guests
 
             NtMapViewOfSection.InitializeWindowsSharedSection(Instance, Base);
 
-            Instance._emulator.WriteMemory(PEB + 0x4C, (uint)Base, 4);          // ReadOnlySharedMemoryBase (client base)
-            Instance._emulator.WriteMemory(PEB + 0x54, (uint)(Base + 0x10), 4); // ReadOnlyStaticServerData (server-data descriptor)
-            Instance._emulator.WriteMemory(PEB + 0x248, (uint)Base, 4);         // server-view base (identity → remap is a no-op)
+            Instance._emulator.WriteMemory(PEB + 0x4C, (uint)Base, 4);
+            Instance._emulator.WriteMemory(PEB + 0x54, (uint)(Base + 0x10), 4);
+            Instance._emulator.WriteMemory(PEB + 0x248, (uint)Base, 4);
         }
 
         /// <summary>
@@ -1631,19 +1539,11 @@ namespace Brovan.Core.Emulation.Guests
             if (_wow64SyscallTrampoline != 0)
                 return;
 
-            // pop edx ; sysenter ; push edx ; ret  — pop discards the ntdll-stub return address that
-            // `call fs:[0xC0]` / `jmp [Wow64Transition]` left on top, so at the sysenter the guest ESP points
-            // at the ORIGINAL caller's return address with the syscall arguments immediately above it (ESP+4,
-            // ESP+8, …) — exactly what GetArg32 / ReadWindowsSyscallArguments expect. push restores it so the
-            // final ret returns into the stub's `ret N`, which cleans the stdcall arguments.
             byte[] Trampoline = { 0x5A, 0x0F, 0x34, 0x52, 0xC3 };
             ulong TrampolinePage = Instance.MapUniqueAddress(0x1000, MemoryProtection.ReadExecute);
             Instance._emulator.WriteMemory(TrampolinePage, Trampoline);
             _wow64SyscallTrampoline = TrampolinePage;
 
-            // Point ntdll's Wow64Transition global at the trampoline. The Nt* stub variant
-            // `mov edx, Wow64SystemServiceCall ; call edx` reaches `jmp [Wow64Transition]`; both the direct
-            // fs:[0xC0] call and this indirect path must land on the trampoline.
             if (_ntdllModule != null && _ntdllModule.ExportsByName != null &&
                 _ntdllModule.ExportsByName.TryGetValue("Wow64Transition", out ulong TransitionRva) && TransitionRva != 0)
             {
@@ -1675,18 +1575,18 @@ namespace Brovan.Core.Emulation.Guests
             if (_wow64InfoPtr != 0)
                 return;
 
-            const int Wow64InfoSize = 0x40;                 // >= 0x24 (last field EmulatedMachine@0x22); page-rounded by the allocator.
-            const ushort ImageFileMachineAmd64 = 0x8664;    // native machine of the x64 host running WOW64.
-            const ushort ImageFileMachineI386 = 0x014C;     // emulated machine of the 32-bit process.
-            const uint CpuFlagsUseSyscallQpc = 0x2;         // bit 0x2 → syscall QPC path (not the `int 0x81` fast path).
-            const uint NativeSystemPageSize = 0x1000;       // x64 host native page size = 4096 (ntdll bit-scans it → page shift 12).
+            const int Wow64InfoSize = 0x40;
+            const ushort ImageFileMachineAmd64 = 0x8664;
+            const ushort ImageFileMachineI386 = 0x014C;
+            const uint CpuFlagsUseSyscallQpc = 0x2;
+            const uint NativeSystemPageSize = 0x1000;
 
             ulong Block = Instance.MapUniqueAddress(Wow64InfoSize, MemoryProtection.ReadWrite);
             Instance._emulator.WriteMemory(Block, new byte[Wow64InfoSize]);
-            Instance._emulator.WriteMemory(Block + 0x00, NativeSystemPageSize);          // NativeSystemPageSize (0x1000 → page shift 12)
-            Instance._emulator.WriteMemory(Block + 0x04, CpuFlagsUseSyscallQpc);         // CpuFlags
-            Instance._emulator.WriteMemory(Block + 0x20, ImageFileMachineAmd64, 2);      // NativeMachine
-            Instance._emulator.WriteMemory(Block + 0x22, ImageFileMachineI386, 2);       // EmulatedMachine
+            Instance._emulator.WriteMemory(Block + 0x00, NativeSystemPageSize);
+            Instance._emulator.WriteMemory(Block + 0x04, CpuFlagsUseSyscallQpc);
+            Instance._emulator.WriteMemory(Block + 0x20, ImageFileMachineAmd64, 2);
+            Instance._emulator.WriteMemory(Block + 0x22, ImageFileMachineI386, 2);
             _wow64InfoPtr = Block;
         }
 
@@ -1711,27 +1611,22 @@ namespace Brovan.Core.Emulation.Guests
                 return D;
             }
 
-            const byte AccessDpl0Code = 0x9A;    // present, DPL0, code, readable
-            const byte AccessDpl0Data = 0x92;    // present, DPL0, data, writable
-            const byte Flags4KB32 = 0xC;         // 4KB granularity, 32-bit
+            const byte AccessDpl0Code = 0x9A;
+            const byte AccessDpl0Data = 0x92;
+            const byte Flags4KB32 = 0xC;
 
             if (_gdt32Base == 0)
             {
                 _gdt32Base = Instance.MapUniqueAddress(0x1000, MemoryProtection.ReadWrite);
                 Instance._emulator.WriteMemory(_gdt32Base, new byte[0x1000]);
-                // Flat code / data descriptors. Loading a custom GDTR turns the default SS=0 into a null
-                // selector (stack pushes then #GP), so SS/DS/ES must be reloaded with valid flat selectors.
                 Instance._emulator.WriteMemory(_gdt32Base + Wow64CodeGdtIndex * 8, MakeDescriptor(0, 0xFFFFF, AccessDpl0Code, Flags4KB32), 8);
                 Instance._emulator.WriteMemory(_gdt32Base + Wow64DataGdtIndex * 8, MakeDescriptor(0, 0xFFFFF, AccessDpl0Data, Flags4KB32), 8);
                 Instance._emulator.WriteGdtr(_gdt32Base, 0x1000 - 1);
                 Instance._emulator.WriteRegister(Registers.UC_X86_REG_SS, Wow64DataSelector);
                 Instance._emulator.WriteRegister(Registers.UC_X86_REG_DS, Wow64DataSelector);
                 Instance._emulator.WriteRegister(Registers.UC_X86_REG_ES, Wow64DataSelector);
-                // CS is left at the flat MODE_32 default (Unicorn faults on a mid-run CS reload); flat code
-                // fetch is already correct.
             }
 
-            // (Re)write the FS descriptor with this thread's TEB base, then reload FS so the cached base updates.
             Instance._emulator.WriteMemory(_gdt32Base + Wow64FsGdtIndex * 8, MakeDescriptor((uint)Teb, 0xFFFFF, AccessDpl0Data, Flags4KB32), 8);
             Instance._emulator.WriteRegister(Registers.UC_X86_REG_FS, Wow64FsSelector);
         }
@@ -1748,21 +1643,21 @@ namespace Brovan.Core.Emulation.Guests
             const uint CONTEXT_INTEGER = 0x2;
             const uint CONTEXT_SEGMENTS = 0x4;
 
-            ulong ContextSize = 0x2CC;                                   // sizeof(CONTEXT) on x86
+            ulong ContextSize = 0x2CC;
             ulong ContextAddress = Instance.MapUniqueAddress(ContextSize, MemoryProtection.ReadWrite);
             Instance._emulator.WriteMemory(ContextAddress, new byte[ContextSize]);
-            Instance._emulator.WriteMemory(ContextAddress + 0x00, CONTEXT_i386 | CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_SEGMENTS, 4); // ContextFlags
-            Instance._emulator.WriteMemory(ContextAddress + 0x8C, 0x0000u, 4);   // SegGs
-            Instance._emulator.WriteMemory(ContextAddress + 0x90, 0x0053u, 4);   // SegFs
-            Instance._emulator.WriteMemory(ContextAddress + 0x94, 0x002Bu, 4);   // SegEs
-            Instance._emulator.WriteMemory(ContextAddress + 0x98, 0x002Bu, 4);   // SegDs
-            Instance._emulator.WriteMemory(ContextAddress + 0xA4, (uint)Ebx, 4); // Ebx
-            Instance._emulator.WriteMemory(ContextAddress + 0xB0, (uint)Eax, 4); // Eax
-            Instance._emulator.WriteMemory(ContextAddress + 0xB8, (uint)Eip, 4); // Eip
-            Instance._emulator.WriteMemory(ContextAddress + 0xBC, 0x0023u, 4);   // SegCs
-            Instance._emulator.WriteMemory(ContextAddress + 0xC0, 0x0202u, 4);   // EFlags
-            Instance._emulator.WriteMemory(ContextAddress + 0xC4, (uint)Esp, 4); // Esp
-            Instance._emulator.WriteMemory(ContextAddress + 0xC8, 0x002Bu, 4);   // SegSs
+            Instance._emulator.WriteMemory(ContextAddress + 0x00, CONTEXT_i386 | CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_SEGMENTS, 4);
+            Instance._emulator.WriteMemory(ContextAddress + 0x8C, 0x0000u, 4);
+            Instance._emulator.WriteMemory(ContextAddress + 0x90, 0x0053u, 4);
+            Instance._emulator.WriteMemory(ContextAddress + 0x94, 0x002Bu, 4);
+            Instance._emulator.WriteMemory(ContextAddress + 0x98, 0x002Bu, 4);
+            Instance._emulator.WriteMemory(ContextAddress + 0xA4, (uint)Ebx, 4);
+            Instance._emulator.WriteMemory(ContextAddress + 0xB0, (uint)Eax, 4);
+            Instance._emulator.WriteMemory(ContextAddress + 0xB8, (uint)Eip, 4);
+            Instance._emulator.WriteMemory(ContextAddress + 0xBC, 0x0023u, 4);
+            Instance._emulator.WriteMemory(ContextAddress + 0xC0, 0x0202u, 4);
+            Instance._emulator.WriteMemory(ContextAddress + 0xC4, (uint)Esp, 4);
+            Instance._emulator.WriteMemory(ContextAddress + 0xC8, 0x002Bu, 4);
             return ContextAddress;
         }
 

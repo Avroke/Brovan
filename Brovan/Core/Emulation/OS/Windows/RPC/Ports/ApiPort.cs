@@ -10,7 +10,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         private const int OffPmTotalLength = 0x02;
         private const int OffPmType = 0x04;
         private const int OffPmDataInfoOffset = 0x06;
-        private const int PmHeaderSize = 0x28; // x64 PORT_MESSAGE size
+        private const int PmHeaderSize = 0x28;
         private const ushort LPC_REPLY = 2;
 
         private const int OffCsrApiNumber = PmHeaderSize + 0x08;
@@ -58,15 +58,15 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
         private static readonly uint[] ActivationContextSectionIds =
         {
-            2u,  // ACTIVATION_CONTEXT_SECTION_DLL_REDIRECTION.
-            3u,  // ACTIVATION_CONTEXT_SECTION_WINDOW_CLASS_REDIRECTION.
-            4u,  // ACTIVATION_CONTEXT_SECTION_COM_SERVER_REDIRECTION.
-            5u,  // ACTIVATION_CONTEXT_SECTION_COM_INTERFACE_REDIRECTION.
-            6u,  // ACTIVATION_CONTEXT_SECTION_COM_TYPE_LIBRARY_REDIRECTION.
-            7u,  // ACTIVATION_CONTEXT_SECTION_COM_PROGID_REDIRECTION.
-            9u,  // ACTIVATION_CONTEXT_SECTION_CLR_SURROGATES.
-            10u, // ACTIVATION_CONTEXT_SECTION_APPLICATION_SETTINGS.
-            12u  // ACTIVATION_CONTEXT_SECTION_WINRT_ACTIVATABLE_CLASSES.
+            2u,
+            3u,
+            4u,
+            5u,
+            6u,
+            7u,
+            9u,
+            10u,
+            12u
         };
 
         private static ulong _fakeServerInfo = 0;
@@ -316,10 +316,10 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
             switch (ApiIndex)
             {
-                case 1: // CsrIdentifyAlertableThread-style notification.
+                case 1:
                     ZeroCsrData(Reply, 0x10);
                     break;
-                case 2: // CsrSetPriorityClass-style request.
+                case 2:
                 case 3:
                     break;
                 default:
@@ -333,29 +333,29 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
             switch (ApiIndex)
             {
-                case 2: // BaseSrvGetTempFile.
+                case 2:
                     WriteU32(Reply, OffCsrDataStart + 0x00, _tempFileCounter++);
                     break;
-                case 12: // BaseSrvSetProcessShutdownParam.
+                case 12:
                     StoreShutdownParameters(Reply, Instance);
                     break;
-                case 13: // BaseSrvGetProcessShutdownParam.
+                case 13:
                     WriteShutdownParameters(Reply, Instance);
                     break;
-                case 14: // BaseSrvNlsSetUserInfo.
-                case 15: // BaseSrvNlsSetMultipleUserInfo.
-                case 17: // BaseSrvSetVDMCurDirs.
-                case 18: // BaseSrvGetVDMCurDirs.
-                case 19: // BaseSrvBatNotification.
-                case 20: // BaseSrvRegisterWowExec.
-                case 21: // BaseSrvSoundSentryNotification.
-                case 22: // BaseSrvRefreshIniFileMapping.
-                case 24: // BaseSrvSetTermsrvAppInstallMode.
-                case 25: // BaseSrvNlsUpdateCacheCount.
-                case 26: // BaseSrvSetTermsrvClientTimeZone.
-                case 29: // BaseSrvRegisterThread.
+                case 14:
+                case 15:
+                case 17:
+                case 18:
+                case 19:
+                case 20:
+                case 21:
+                case 22:
+                case 24:
+                case 25:
+                case 26:
+                case 29:
                     break;
-                case 30: // BaseSrvCreateActivationContext.
+                case 30:
                     if (!HandleBaseSrvCreateActivationContext(Reply, Instance))
                         TryZeroCapturedBuffer(Reply, Instance, 0x00, 0x08);
                     break;
@@ -385,9 +385,9 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
             switch (ApiIndex)
             {
-                case 4: // SrvActivateDebugger.
-                case 5: // SrvGetThreadConsoleDesktop.
-                case 8: // SrvCreateSystemThreads.
+                case 4:
+                case 5:
+                case 8:
                     ZeroCsrData(Reply, 0x20);
                     break;
                 default:
@@ -573,8 +573,6 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         private static byte[] BuildEventLogOpenStub(BinaryEmulator Instance)
         {
             byte[] Stub = new byte[0x18];
-            // Deterministic RPC context handle: derive from the emulator's seeded RNG so the
-            // handle the guest receives is reproducible run-over-run (Guid.NewGuid() leaked host entropy).
             byte[] ContextIdBytes = new byte[16];
             Instance.SeededRandom.NextBytes(ContextIdBytes);
             Guid ContextId = new Guid(ContextIdBytes);
@@ -791,7 +789,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
             Instance.WinHelper.WriteZeroMemory(addr, (uint)Size);
 
-            Instance._emulator.WriteMemory(addr + 0x04, (uint)0x200, 4); // cHandleEntries, prevents divide-by-zero
+            Instance._emulator.WriteMemory(addr + 0x04, (uint)0x200, 4);
 
             _fakeServerInfo = addr;
             return addr;

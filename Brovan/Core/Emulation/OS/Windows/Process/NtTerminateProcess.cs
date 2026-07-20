@@ -6,11 +6,6 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            // Bitness-agnostic: GetArg64 reads the x86 stack under WOW64, and the NtCurrentProcess
-            // pseudo-handle arrives as 0xFFFFFFFF on x86 / 0xFFFFFFFFFFFFFFFF on x64 (a bare
-            // == ulong.MaxValue misses the WOW64 form, which is why the CRT's RtlExitUserProcess
-            // path never terminated cleanly on x86). Terminating a *different* process stays
-            // unimplemented, exactly as before.
             ulong ProcessHandle = Instance.WinHelper.GetArg64(0);
             ulong ExitCode = (uint)Instance.WinHelper.GetArg64(1);
 

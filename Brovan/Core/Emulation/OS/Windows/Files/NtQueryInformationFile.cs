@@ -22,14 +22,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            // Bitness-agnostic arg read: GetArg64 pulls syscall args from R10/RDX/R8/R9(+stack) on x64
-            // and from the x86 stack on WOW64. The FILE_*_INFORMATION output structs below are all fixed
-            // LARGE_INTEGER / ULONGLONG / ULONG fields — bitness-invariant — and IO_STATUS_BLOCK writes go
-            // through the bitness-aware WriteIoStatusBlock. Was gated to x64: std::filesystem::equivalent
-            // (MSVCP140!_Equivalent) opens both files then issues NtQueryInformationFile for the file id to
-            // compare identity; on WOW64 that got STATUS_NOT_SUPPORTED, so `equivalent()` returned an error
-            // and any caller doing `if (equivalent(a,b))` threw an uncaught std::filesystem_error and
-            // fast-failed (al-khaser's "is parent process explorer.exe" check).
             ulong FileHandle = Instance.WinHelper.GetArg64(0);
             ulong IoStatusBlock = Instance.WinHelper.GetArg64(1);
             ulong FileInformation = Instance.WinHelper.GetArg64(2);
@@ -39,7 +31,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (IoStatusBlock == 0 || FileInformation == 0)
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            // IO_STATUS_BLOCK is 8 bytes on x86 (Status 4 + Information 4), 16 on x64 (Pointer 8 + Information 8).
             ulong IoStatusBlockSize = (ulong)(Instance.GuestPointerSize * 2);
             if (!Instance.IsRegionMapped(IoStatusBlock, IoStatusBlockSize) || !Instance.IsRegionMapped(FileInformation, Length))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -147,11 +138,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
             }
 
-            // FILE_INTERNAL_INFORMATION.IndexNumber must be the file's stable unique id — the SAME value for
-            // every handle opened on the same path — so file-identity comparisons (std::filesystem::equivalent,
-            // GetFileInformationByHandle nFileIndex) see two opens of one file as equivalent. Keying it on the
-            // handle value made each open report a different index (never equivalent); key it on the path
-            // instead, matching FileIdInformation's FileId derivation.
             Instance._emulator.WriteMemory(FileInformation + 0x00, PathFileId(File?.Path), 8);
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FileInternalInformationSize);
             return NTSTATUS.STATUS_SUCCESS;

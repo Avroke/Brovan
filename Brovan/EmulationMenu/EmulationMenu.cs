@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using Brovan.Core;
 using static Brovan.Core.Helpers.Utils;
 using static Brovan.Core.Helpers.BinaryHelpers;
@@ -106,10 +106,6 @@ namespace Brovan.EmulationMenu
             return lookup;
         }
 
-        // Opt-in bound for the cooperative-scheduler livelock watchdog (see
-        // BinaryEmulatorSettings.LivelockEscapeSlices and docs/AL_KHASER_EMULATION.md F1).
-        // Off by default; set BROVAN_LIVELOCK_ESCAPE_SLICES=<n> to make the scheduler bail
-        // cleanly once a thread has spun <n> frozen slices with every peer blocked.
         private static uint ParseLivelockEscapeSlices()
         {
             string value = Environment.GetEnvironmentVariable("BROVAN_LIVELOCK_ESCAPE_SLICES");
@@ -2420,8 +2416,6 @@ namespace Brovan.EmulationMenu
                     NoHooks = NoHooks,
                     BackendKind = BackendKind,
                     LivelockEscapeSlices = ParseLivelockEscapeSlices(),
-                    // Explicit --screen argument wins; else the BROVAN_SCREEN_RESOLUTION env var
-                    // (kept as a convenience default source); else null -> the fixed 1920x1080 SSOT.
                     ScreenResolution = WinSysHelper.ResolveScreenResolution(
                         ScreenResolutionSpec ?? Environment.GetEnvironmentVariable("BROVAN_SCREEN_RESOLUTION"))
                 };
@@ -2477,8 +2471,6 @@ namespace Brovan.EmulationMenu
                     }
                     else if (Binary.FileFormat == BinaryFormat.PE)
                     {
-                        // Fallback: match the main image by its mapped base / preferred image base
-                        // rather than by host path (Module.Path is now a synthetic guest path).
                         WinModule MappedMod = Emulator.WinHelper?.WinModules.FirstOrDefault(b => b != null && b.MappedBase != 0 && b.OriginalBase == Binary.PE.ImageBase);
                         if (MappedMod != null)
                         {

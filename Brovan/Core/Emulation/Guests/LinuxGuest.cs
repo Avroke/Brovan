@@ -1065,7 +1065,6 @@ namespace Brovan.Core.Emulation.Guests
         /// </summary>
         public void RegisterSyscalls()
         {
-            // File syscalls
             RegisterSyscall("read", 0, 3, new Read());
             RegisterSyscall("write", 1, 4, new Write());
             RegisterSyscall("writev", 20, 146, new Writev());
@@ -1091,7 +1090,6 @@ namespace Brovan.Core.Emulation.Guests
             RegisterSyscall("statfs", 137, 99, new Statfs());
             RegisterSyscall("ioctl", 16, 54, new Ioctl());
 
-            // Process syscalls
             RegisterSyscall("exit", 60, 1, new Exit());
             RegisterSyscall("exit_group", 231, 252, new Exit_group());
             RegisterSyscall("mmap", 9, 90, new Mmap());
@@ -1118,7 +1116,6 @@ namespace Brovan.Core.Emulation.Guests
             RegisterSyscall("clone", 56, 120, new Clone());
             RegisterSyscall("prctl", 157, 172, new Prctl());
 
-            // Misc syscalls
             RegisterSyscall("close", 3, 6, new Close());
             RegisterSyscall("uname", 63, 122, new Uname());
             RegisterSyscall("clock_gettime", 228, 265, new Clock_gettime());
@@ -1148,7 +1145,6 @@ namespace Brovan.Core.Emulation.Guests
             RegisterSyscall("timerfd_settime64", -1, 411, new Timerfd_settime(true));
             RegisterSyscall("timerfd_gettime64", -1, 410, new Timerfd_gettime(true));
 
-            // Network syscalls
             RegisterSyscall("socket", 41, 359, new Socket());
             RegisterSyscall("connect", 42, 362, new Connect());
             RegisterSyscall("accept", 43, -1, new Accept());
@@ -1993,45 +1989,45 @@ namespace Brovan.Core.Emulation.Guests
             Entries.Add(0);
             Entries.AddRange(new ulong[]
             {
-                3, // AT_PHDR
+                3,
                 ProgramHeaderAddress,
-                4, // AT_PHENT
+                4,
                 ProgramHeaderEntrySize,
-                5, // AT_PHNUM
+                5,
                 ProgramHeaderCount,
-                6, // AT_PAGESZ
+                6,
                 0x1000,
-                7, // AT_BASE
+                7,
                 InterpreterBase,
-                9, // AT_ENTRY
+                9,
                 ProgramEntry,
-                11, // AT_UID
+                11,
                 1000,
-                12, // AT_EUID
+                12,
                 1000,
-                13, // AT_GID
+                13,
                 1000,
-                14, // AT_EGID
+                14,
                 1000,
-                15, // AT_PLATFORM
+                15,
                 PlatformAddress,
-                16, // AT_HWCAP
+                16,
                 2,
-                17, // AT_CLKTCK
+                17,
                 100,
-                23, // AT_SECURE
+                23,
                 0,
-                25, // AT_RANDOM
+                25,
                 RandomAddress,
-                26, // AT_HWCAP2
+                26,
                 0,
-                27, // AT_RSEQ_FEATURE_SIZE
+                27,
                 RseqMinimumFeatureSize,
-                28, // AT_RSEQ_ALIGN
+                28,
                 RseqAlignment,
-                31, // AT_EXECFN
+                31,
                 ExecFnAddress,
-                0, // AT_NULL
+                0,
                 0
             });
 
@@ -2102,33 +2098,33 @@ namespace Brovan.Core.Emulation.Guests
             Entries.Add(0);
             Entries.AddRange(new uint[]
             {
-                3, // AT_PHDR
+                3,
                 ProgramHeaderAddress,
-                4, // AT_PHENT
+                4,
                 ProgramHeaderEntrySize,
-                5, // AT_PHNUM
+                5,
                 ProgramHeaderCount,
-                6, // AT_PAGESZ
+                6,
                 0x1000,
-                7, // AT_BASE
+                7,
                 InterpreterBase,
-                9, // AT_ENTRY
+                9,
                 ProgramEntry,
-                11, // AT_UID
+                11,
                 1000,
-                12, // AT_EUID
+                12,
                 1000,
-                13, // AT_GID
+                13,
                 1000,
-                14, // AT_EGID
+                14,
                 1000,
-                23, // AT_SECURE
+                23,
                 0,
-                25, // AT_RANDOM
+                25,
                 RandomAddress,
-                31, // AT_EXECFN
+                31,
                 ExecFnAddress,
-                0, // AT_NULL
+                0,
                 0
             });
 

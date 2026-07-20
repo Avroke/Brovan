@@ -16,10 +16,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint BufferLength = (uint)Instance.WinHelper.GetArg64(4);
             ulong ReturnLengthPtr = Instance.WinHelper.GetArg64(5);
 
-            // TOKEN_SECURITY_ATTRIBUTES_INFORMATION = { USHORT Version; USHORT Reserved; ULONG AttributeCount;
-            // PTOKEN_SECURITY_ATTRIBUTE_V1 Attribute; }. Pointer size varies with bitness ⇒ 12 bytes on x86,
-            // 16 on x64. Real ntdll aligns AttributeCount and Attribute to their natural offsets, so the
-            // pointer sits at +0x8 on both.
             uint RequiredSize = Instance.GuestPointerSize == 8 ? 0x10u : 0xCu;
 
             long SignedTokenHandle = unchecked((long)TokenHandle);
@@ -49,10 +45,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.IsRegionMapped(Buffer, RequiredSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            Instance._emulator.WriteMemory(Buffer + 0x0, (ushort)0, 2); // Version
-            Instance._emulator.WriteMemory(Buffer + 0x2, (ushort)0, 2); // Reserved
-            Instance._emulator.WriteMemory(Buffer + 0x4, 0u, 4); // AttributeCount
-            if (!Instance.WritePointer(Buffer + 0x8, 0UL)) // Attribute pointer
+            Instance._emulator.WriteMemory(Buffer + 0x0, (ushort)0, 2);
+            Instance._emulator.WriteMemory(Buffer + 0x2, (ushort)0, 2);
+            Instance._emulator.WriteMemory(Buffer + 0x4, 0u, 4);
+            if (!Instance.WritePointer(Buffer + 0x8, 0UL))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             return NTSTATUS.STATUS_SUCCESS;

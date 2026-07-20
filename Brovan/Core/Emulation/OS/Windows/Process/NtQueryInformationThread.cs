@@ -18,16 +18,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint ThreadInformationLength = (uint)Instance.WinHelper.GetArg64(3);
             ulong ReturnLengthPtr = Instance.WinHelper.GetArg64(4);
 
-            // ThreadBasicInformation is the one class with an explicit bitness-aware layout below. Every OTHER
-            // class in the switch either writes a fixed-size scalar (DWORD/byte) that's bitness-invariant
-            // (ThreadIsIoPending / ThreadDynamicCodePolicyInfo / ThreadIsTerminated / ThreadPriorityBoost /
-            // ThreadHideFromDebugger / ThreadAmILastThread) or a Windows struct that's the same shape on both
-            // (ThreadIdealProcessorEx = PROCESSOR_NUMBER, 0x28 bytes). Only the three pointer-sized-buffer
-            // classes (ThreadQuerySetWin32StartAddress / ThreadAffinityMask / ThreadUmsInformation) still emit
-            // an 8-byte value that would overrun a 4-byte x86 caller buffer — those stay gated to x64. Note
-            // the previous blanket gate rejected class 42 (ThreadDynamicCodePolicyInfo) on x86, which combase's
-            // CoInitializeSecurity probes; the STATUS_NOT_SUPPORTED it received drove the "kernel too old"
-            // branch that left an internal singleton NULL.
             if (Wow64)
             {
                 switch ((THREADINFOCLASS)ThreadInformationClass)
@@ -79,8 +69,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 case THREADINFOCLASS.ThreadBasicInformation:
                     {
-                        // THREAD_BASIC_INFORMATION: 0x1C on x86 (TebBaseAddress + CLIENT_ID + AffinityMask are
-                        // pointer-sized), 0x30 on x64.
                         uint RequiredSize = Wow64 ? 0x1Cu : 0x30u;
                         NTSTATUS Status = ValidateOutputBuffer(RequiredSize);
                         if (Status != NTSTATUS.STATUS_SUCCESS)
@@ -210,14 +198,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 case THREADINFOCLASS.ThreadHideFromDebugger:
                     {
-                        // Ntoskrnl probes the output buffer with sizeof(ULONG) alignment BEFORE the
-                        // class-specific length check. Al-khaser deliberately probes with:
-                        //  - length=4, unaligned pointer  → expects DATATYPE_MISALIGNMENT (alignment probe fails)
-                        //  - length=4, aligned pointer    → expects INFO_LENGTH_MISMATCH (alignment ok, size wrong)
-                        //  - length=1, aligned pointer    → expects SUCCESS with the hidden flag byte
-                        // The size check for this class is STRICT (must equal sizeof(BOOLEAN)=1). See
-                        // al-khaser's NtSetInformationThread_ThreadHideFromDebugger.cpp for the exact
-                        // 8-shot unaligned batch + the strict-size verification.
                         if (ThreadInformation != 0 && ThreadInformationLength >= 4 && (ThreadInformation & 3) != 0)
                             return NTSTATUS.STATUS_DATATYPE_MISALIGNMENT;
 

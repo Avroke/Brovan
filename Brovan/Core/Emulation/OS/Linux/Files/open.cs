@@ -541,8 +541,6 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
                     break;
 
                 ulong RegionEnd = Region.BaseAddress + Region.Size;
-                // Read as much as fits in (a) the rest of this region and
-                // (b) the rest of our buffer.
                 ulong AvailInRegion = RegionEnd - Cursor;
                 int AvailInBuffer = PATH_MAX - Count;
                 int Want = (int)Math.Min(AvailInRegion, (ulong)AvailInBuffer);
@@ -553,7 +551,6 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
                 if (!Instance.ReadMemory(Cursor, Slice))
                     break;
 
-                // Scan the chunk for the null terminator.
                 int NullIdx = Slice.IndexOf((byte)0);
                 if (NullIdx >= 0)
                 {

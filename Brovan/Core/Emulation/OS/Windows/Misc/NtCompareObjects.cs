@@ -22,14 +22,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             Object = null;
 
-            // check if it is the current process
             if (Handle == HandleManager.CurrentProcess || Handle == uint.MaxValue)
             {
                 Object = Instance.WinHelper.WinProcesses.FirstOrDefault(Process => Process.PID == Instance.WinHelper.PID);
                 return Object != null ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_INVALID_HANDLE;
             }
 
-            // check if it is the current thread
             if (Handle == HandleManager.CurrentThread || Handle == 0xFFFFFFFEu)
             {
                 Object = Instance.CurrentThread;

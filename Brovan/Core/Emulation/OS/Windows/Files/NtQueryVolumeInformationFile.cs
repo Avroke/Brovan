@@ -4,7 +4,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal class NtQueryVolumeInformationFile : IWinSyscall
     {
-        // FS_INFORMATION_CLASS
         private const uint FileFsVolumeInformation = 1;
         private const uint FileFsSizeInformation = 3;
         private const uint FileFsDeviceInformation = 4;
@@ -133,9 +132,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static NTSTATUS QueryFullSizeInformation(BinaryEmulator Instance, ulong IoStatusBlockPtr, ulong FsInfoBuffer, uint Length, bool Is64Bit)
         {
-            // FILE_FS_FULL_SIZE_INFORMATION: total/caller-available/actual-available
-            // allocation units + geometry. Modern GetDiskFreeSpaceEx queries this class
-            // first; no per-user quota is modelled, so caller-available == actual-available.
             const uint RequiredSize = 32;
             if (Length < RequiredSize)
             {

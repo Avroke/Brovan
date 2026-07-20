@@ -55,7 +55,6 @@ namespace Brovan.Core.Emulation.OS
     {
         private const int MaxDepth = 4;
 
-        // Cached per-field metadata, built once, reused on every call.
         private sealed class FieldDesc
         {
             public readonly FieldInfo Field;
@@ -75,7 +74,6 @@ namespace Brovan.Core.Emulation.OS
             }
         }
 
-        // Cached per-type metadata (fields, layout, and pre-computed sizes for x86 + x64)
         private sealed class TypeDesc
         {
             public readonly FieldDesc[] Fields;
@@ -186,7 +184,6 @@ namespace Brovan.Core.Emulation.OS
             return Cache[T] = new TypeDesc(T);
         }
 
-        // --- Public API ---
 
         /// <summary>
         /// Get a struct size.
@@ -262,9 +259,6 @@ namespace Brovan.Core.Emulation.OS
             byte[] SlowBuf = ArrayPool<byte>.Shared.Rent(SlowSize);
             try
             {
-                // MemoryStream backed by the rented buffer: no internal growth,
-                // no ToArray() needed. publiclyVisible:false so GetBuffer() is
-                // not callable (we use AsSpan instead).
                 using MemoryStream Ms = new(SlowBuf, 0, SlowSize, writable: true, publiclyVisible: false);
                 using BinaryWriter Bw = new(Ms, Encoding.Unicode, leaveOpen: true);
 
@@ -359,7 +353,6 @@ namespace Brovan.Core.Emulation.OS
             return true;
         }
 
-        // --- Private workers ---
 
         [UnconditionalSuppressMessage("Trimming", "IL2026", Justification = "Non-blittable struct path -- hot-path structs are blittable and do not reach here.")]
         [UnconditionalSuppressMessage("AOT", "IL3050", Justification = "Non-blittable struct path -- hot-path structs are blittable and do not reach here.")]

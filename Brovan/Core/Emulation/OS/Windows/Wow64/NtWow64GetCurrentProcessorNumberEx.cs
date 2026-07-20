@@ -21,8 +21,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.IsRegionMapped(ProcessorNumberPtr, 4))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            // Group=0, Number=0, Reserved=0 — one scheduler group, one active core, matches the CPUID /
-            // GetLogicalProcessorInformation surface (any drift would let a sample cross-check them).
             Instance._emulator.WriteMemory(ProcessorNumberPtr, 0u, 4);
             return NTSTATUS.STATUS_SUCCESS;
         }

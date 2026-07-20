@@ -80,13 +80,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                             ulong ChangeStamp = 1;
                             Instance._emulator.WriteMemory(SystemInformationPtr + 0x00, ChangeStamp);
 
-                            // Configuration.FeatureId
                             Instance._emulator.WriteMemory(SystemInformationPtr + 0x08, FeatureId);
 
-                            // Configuration.Flags: leave 0 => Priority=0, EnabledState=Default (0), etc.
                             Instance._emulator.WriteMemory(SystemInformationPtr + 0x0C, 0u);
 
-                            // Configuration.VariantPayload
                             Instance._emulator.WriteMemory(SystemInformationPtr + 0x10, 0u);
 
                             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
@@ -97,8 +94,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     case SYSTEM_INFORMATION_CLASS.SystemFeatureConfigurationSectionInformation:
                         {
                             const uint SectionTypeCount = 3;
-                            const uint InputRequired = 8 * SectionTypeCount; // 0x18
-                            const uint OutputRequired = 0x50; // 8 + (3 * 0x18)
+                            const uint InputRequired = 8 * SectionTypeCount;
+                            const uint OutputRequired = 0x50;
 
                             if (InputBufferPtr == 0 || InputBufferLength < InputRequired)
                                 return NTSTATUS.STATUS_INVALID_PARAMETER;
@@ -118,17 +115,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                             ulong OverallChangeStamp = 1;
                             Instance._emulator.WriteMemory(SystemInformationPtr + 0x00, OverallChangeStamp);
 
-                            // Preserve nonzero previous change stamps for callers tracking section updates.
                             for (uint i = 0; i < SectionTypeCount; i++)
                             {
                                 ulong Prev = Instance.ReadMemoryULong(InputBufferPtr + (i * 8));
                                 ulong EntryBase = SystemInformationPtr + 0x08 + (i * 0x18);
 
-                                // ChangeStamp
                                 Instance._emulator.WriteMemory(EntryBase + 0x00, Prev == 0 ? OverallChangeStamp : Prev);
-                                // Section pointer = 0
                                 Instance._emulator.WriteMemory(EntryBase + 0x08, 0UL);
-                                // Size = 0
                                 Instance._emulator.WriteMemory(EntryBase + 0x10, 0UL);
                             }
 
@@ -262,7 +255,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                             if (Instance._binary.Architecture == BinaryArchitecture.x64)
                             {
-                                // Typical x64 kernel range start.
                                 ulong RangeStart = 0xFFFF800000000000UL;
                                 if (!Instance._emulator.WriteMemory(SystemInformationPtr, RangeStart, 8))
                                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -325,14 +317,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                         uint ClearSize = (uint)Math.Min(SystemInformationLength, HeaderSize + GroupAffinitySize);
                         Instance.WinHelper.WriteZeroMemory(SystemInformationPtr, ClearSize);
 
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 0x00, 0u); // HighestNodeNumber = 0
+                        Instance._emulator.WriteMemory(SystemInformationPtr + 0x00, 0u);
 
                         uint ReqSize = sizeof(uint);
 
                         if (SystemInformationLength >= HeaderSize + 8)
                         {
-                            ulong ActiveMask = 0xFFFUL; // Single-node active processor mask
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x08, ActiveMask); // Node0 Mask
+                            ulong ActiveMask = 0xFFFUL;
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x08, ActiveMask);
 
                             if (SystemInformationLength >= HeaderSize + 0x0A)
                                 Instance._emulator.WriteMemory(SystemInformationPtr + 0x10, (ushort)0);
@@ -396,9 +388,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 Instance._emulator.WriteMemory(SystemInformationPtr + 0x04, RequiredSize);
 
                                 ulong ProcessorBase = SystemInformationPtr + RootSize;
-                                Instance.WinHelper.WriteByte(ProcessorBase + 0x00, 0x01); // Flags: SMT-capable core.
-                                Instance.WinHelper.WriteByte(ProcessorBase + 0x01, 0x00); // EfficiencyClass.
-                                Instance._emulator.WriteMemory(ProcessorBase + 0x16, (ushort)1); // GroupCount.
+                                Instance.WinHelper.WriteByte(ProcessorBase + 0x00, 0x01);
+                                Instance.WinHelper.WriteByte(ProcessorBase + 0x01, 0x00);
+                                Instance._emulator.WriteMemory(ProcessorBase + 0x16, (ushort)1);
 
                                 ulong GroupAffinity = ProcessorBase + 0x18;
                                 Instance._emulator.WriteMemory(GroupAffinity + 0x00, ActiveMask);
@@ -487,8 +479,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
                             }
 
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 0, (byte)0); // KernelDebuggerEnabled
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 1, (byte)1); // KernelDebuggerNotPresent
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 0, (byte)0);
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 1, (byte)1);
 
                             NTSTATUS rl2 = WriteReturnLength(RequiredLength);
                             if (rl2 != NTSTATUS.STATUS_SUCCESS)
@@ -510,8 +502,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
                             }
 
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 0, (byte)1); // SecureBootEnabled
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 1, (byte)1); // SecureBootCapable
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 0, (byte)1);
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 1, (byte)1);
 
                             NTSTATUS rl2 = WriteReturnLength(RequiredLength);
                             if (rl2 != NTSTATUS.STATUS_SUCCESS)
@@ -664,9 +656,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                     case SYSTEM_INFORMATION_CLASS.SystemMemoryUsageInformation:
                         {
-                            // SYSTEM_MEMORY_USAGE_INFORMATION (0x38 bytes) — mirrors the plain
-                            // NtQuerySystemInformation path so RAM totals stay coherent across
-                            // both syscalls. All figures come from the RAM SSOT.
                             const uint RequiredLength = 0x38;
                             if (SystemInformationLength < RequiredLength)
                             {

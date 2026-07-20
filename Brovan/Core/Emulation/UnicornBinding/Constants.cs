@@ -34,7 +34,7 @@ namespace Brovan.Core.Emulation
         UC_ERR_RESOURCE,
         UC_ERR_EXCEPTION,
         UC_ERR_OVERFLOW,
-        UC_ERR_CFG // manually added (this is bad i know)
+        UC_ERR_CFG
     }
 
     /// <summary>
@@ -368,50 +368,23 @@ namespace Brovan.Core.Emulation
     /// </summary>
     public enum Hooks : uint
     {
-        // Hook all interrupt/syscall events
         UC_HOOK_INTR = 1 << 0,
-        // Hook a particular instruction - only a very small subset of instructions
-        // supported here
         UC_HOOK_INSN = 1 << 1,
-        // Hook a range of code
         UC_HOOK_CODE = 1 << 2,
-        // Hook basic blocks
         UC_HOOK_BLOCK = 1 << 3,
-        // Hook for memory read on unmapped memory
         UC_HOOK_MEM_READ_UNMAPPED = 1 << 4,
-        // Hook for invalid memory write events
         UC_HOOK_MEM_WRITE_UNMAPPED = 1 << 5,
-        // Hook for invalid memory fetch for execution events
         UC_HOOK_MEM_FETCH_UNMAPPED = 1 << 6,
-        // Hook for memory read on read-protected memory
         UC_HOOK_MEM_READ_PROT = 1 << 7,
-        // Hook for memory write on write-protected memory
         UC_HOOK_MEM_WRITE_PROT = 1 << 8,
-        // Hook for memory fetch on non-executable memory
         UC_HOOK_MEM_FETCH_PROT = 1 << 9,
-        // Hook memory read events.
         UC_HOOK_MEM_READ = 1 << 10,
-        // Hook memory write events.
         UC_HOOK_MEM_WRITE = 1 << 11,
-        // Hook memory fetch for execution events
         UC_HOOK_MEM_FETCH = 1 << 12,
-        // Hook memory read events, but only successful access.
-        // The callback will be triggered after successful read.
         UC_HOOK_MEM_READ_AFTER = 1 << 13,
-        // Hook invalid instructions exceptions.
         UC_HOOK_INSN_INVALID = 1 << 14,
-        // Hook on new edge generation. Could be useful in program analysis.
-        //
-        // NOTE: This is different from UC_HOOK_BLOCK in 2 ways:
-        //       1. The hook is called before executing code.
-        //       2. The hook is only called when generation is triggered.
         UC_HOOK_EDGE_GENERATED = 1 << 15,
-        // Hook on specific tcg op code. The usage of this hook is similar to
-        // UC_HOOK_INSN.
         UC_HOOK_TCG_OPCODE = 1 << 16,
-        // Hook on tlb fill requests.
-        // Register tlb fill request hook on the virtuall addresses.
-        // The callback will be triggert if the tlb cache don't contain an address.
         UC_HOOK_TLB_FILL = 1 << 17,
     }
 
@@ -436,16 +409,16 @@ namespace Brovan.Core.Emulation
     /// </summary>
     public enum MemoryType
     {
-        UC_MEM_READ = 16,      // Memory is read from
-        UC_MEM_WRITE,          // Memory is written to
-        UC_MEM_FETCH,          // Memory is fetched
-        UC_MEM_READ_UNMAPPED,  // Unmapped memory is read from
-        UC_MEM_WRITE_UNMAPPED, // Unmapped memory is written to
-        UC_MEM_FETCH_UNMAPPED, // Unmapped memory is fetched
-        UC_MEM_WRITE_PROT,     // Write to write protected, but mapped, memory
-        UC_MEM_READ_PROT,      // Read from read protected, but mapped, memory
-        UC_MEM_FETCH_PROT,     // Fetch from non-executable, but mapped, memory
-        UC_MEM_READ_AFTER,     // Memory is read from (successful access)
+        UC_MEM_READ = 16,
+        UC_MEM_WRITE,
+        UC_MEM_FETCH,
+        UC_MEM_READ_UNMAPPED,
+        UC_MEM_WRITE_UNMAPPED,
+        UC_MEM_FETCH_UNMAPPED,
+        UC_MEM_WRITE_PROT,
+        UC_MEM_READ_PROT,
+        UC_MEM_FETCH_PROT,
+        UC_MEM_READ_AFTER,
     }
 
     public enum UcTlbType : int

@@ -218,31 +218,23 @@ namespace Brovan
                 {
                     if (IsWow64 || Arch == BinaryArchitecture.x86)
                     {
-                        // x86 view on x64 OS
                         BasePath = Path.Combine(WindowsDir, "SysWOW64");
                     }
                     else
                     {
-                        // native x64
                         BasePath = Path.Combine(WindowsDir, "System32");
                     }
                 }
                 else
                 {
-                    // 32-bit OS
                     BasePath = Path.Combine(WindowsDir, "System32");
                 }
             }
             else
             {
-                // Linux / non-Windows: use shipped Windows DLLs. A 32-bit (WOW64) guest — either the
-                // caller asked for it explicitly, or the ambient WOW64 view is active — reads the 32-bit
-                // images from the SysWOW64 sub-view; everything else reads the flat (x64) WindowsLibs.
                 bool WantWow64 = IsWow64 || Arch == BinaryArchitecture.x86 || Wow64GuestView;
                 BasePath = WantWow64 ? Path.Combine(WindowsLibsPath, "SysWOW64") : WindowsLibsPath;
 
-                // Defensive fall-back: if the 32-bit view does not ship this particular file, use the flat
-                // view so a missing SysWOW64 leaf never hard-fails a resolution that the x64 view can satisfy.
                 if (WantWow64 && !File.Exists(Path.Combine(BasePath, Library)))
                     BasePath = WindowsLibsPath;
             }
@@ -931,10 +923,6 @@ namespace Brovan
         {
             private static readonly object WindowsLibsIndexLock = new();
             private static Dictionary<string, string> WindowsLibsFileIndex;
-            // Case-insensitive leaf index restricted to the SysWOW64 sub-view. The flat index above walks the
-            // whole tree "first hit wins", so a leaf that ships in both views (kernel32.dll / ntdll.dll / …)
-            // resolves to whichever the enumeration hit first — usually the flat 64-bit copy. A WOW64 guest that
-            // resolves such a leaf must get the 32-bit SysWOW64 image; this index is consulted first for that.
             private static Dictionary<string, string> WindowsLibsSysWow64FileIndex;
 
             private static readonly object DriveMapLock = new();
@@ -952,7 +940,6 @@ namespace Brovan
             /// </summary>
             static IO()
             {
-                // Keep the emulator sandboxed by default.
                 EnsureDriveMapping('C', Path.Combine(VirtualFileSystemRoot, "C"));
                 EnsureDriveMapping('E', Path.Combine(VirtualFileSystemRoot, "E"));
                 EnsureLinuxMountMapping("/", LinuxVirtualFileSystemRoot);
@@ -1157,12 +1144,8 @@ namespace Brovan
 
                 byte[] Stub = BuildMinimalWindowsPeStub();
 
-                // explorer.exe lives directly under C:\Windows and is what the synthetic parent
-                // process advertises as its image path.
                 WriteWindowsFileIfMissing(CRoot, "Windows\\explorer.exe", Stub);
 
-                // System32 executables a Windows 10 install always has running, mirroring the
-                // synthetic process table in WinSyscallsHelper so any advertised image is openable.
                 string[] System32Executables =
                 {
                     "smss.exe", "csrss.exe", "wininit.exe", "services.exe", "winlogon.exe",
@@ -1205,59 +1188,54 @@ namespace Brovan
                 byte[] Image = new byte[HeadersSize + 0x200];
                 Span<byte> Buffer = Image;
 
-                // DOS header.
                 Buffer[0] = (byte)'M';
                 Buffer[1] = (byte)'Z';
-                BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x3C), 0x40); // e_lfanew
+                BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x3C), 0x40);
 
                 int PeOff = 0x40;
                 Buffer[PeOff] = (byte)'P';
                 Buffer[PeOff + 1] = (byte)'E';
 
-                // COFF file header.
                 int CoffOff = PeOff + 4;
-                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(CoffOff + 0x00), 0x8664);  // Machine x64
-                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(CoffOff + 0x02), 1);       // NumberOfSections
-                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(CoffOff + 0x10), OptSize); // SizeOfOptionalHeader
-                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(CoffOff + 0x12), 0x22);    // EXECUTABLE_IMAGE | LARGE_ADDRESS_AWARE
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(CoffOff + 0x00), 0x8664);
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(CoffOff + 0x02), 1);
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(CoffOff + 0x10), OptSize);
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(CoffOff + 0x12), 0x22);
 
-                // Optional header (PE32+).
                 int OptOff = CoffOff + 0x14;
-                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(OptOff + 0x00), 0x20B);        // Magic PE32+
-                Buffer[OptOff + 0x02] = 14;                                                          // MajorLinkerVersion
-                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x04), 0x200);        // SizeOfCode
-                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x10), TextRva);      // AddressOfEntryPoint
-                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x14), TextRva);      // BaseOfCode
-                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(OptOff + 0x18), 0x140000000);  // ImageBase
-                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x20), 0x1000);       // SectionAlignment
-                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x24), 0x200);        // FileAlignment
-                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(OptOff + 0x28), 10);           // MajorOperatingSystemVersion
-                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(OptOff + 0x2C), 10);           // MajorImageVersion
-                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(OptOff + 0x30), 6);            // MajorSubsystemVersion
-                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x38), TextRva + 0x1000); // SizeOfImage
-                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x3C), HeadersSize);  // SizeOfHeaders
-                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(OptOff + 0x44), 2);            // Subsystem WINDOWS_GUI
-                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(OptOff + 0x46), 0x8160);       // DllCharacteristics
-                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(OptOff + 0x48), 0x100000);     // SizeOfStackReserve
-                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(OptOff + 0x50), 0x1000);       // SizeOfStackCommit
-                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(OptOff + 0x58), 0x100000);     // SizeOfHeapReserve
-                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(OptOff + 0x60), 0x1000);       // SizeOfHeapCommit
-                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x6C), 16);           // NumberOfRvaAndSizes
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(OptOff + 0x00), 0x20B);
+                Buffer[OptOff + 0x02] = 14;
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x04), 0x200);
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x10), TextRva);
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x14), TextRva);
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(OptOff + 0x18), 0x140000000);
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x20), 0x1000);
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x24), 0x200);
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(OptOff + 0x28), 10);
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(OptOff + 0x2C), 10);
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(OptOff + 0x30), 6);
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x38), TextRva + 0x1000);
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x3C), HeadersSize);
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(OptOff + 0x44), 2);
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(OptOff + 0x46), 0x8160);
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(OptOff + 0x48), 0x100000);
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(OptOff + 0x50), 0x1000);
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(OptOff + 0x58), 0x100000);
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(OptOff + 0x60), 0x1000);
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x6C), 16);
 
-                // Single .text section header.
                 int SecOff = OptOff + OptSize;
                 Buffer[SecOff + 0] = (byte)'.';
                 Buffer[SecOff + 1] = (byte)'t';
                 Buffer[SecOff + 2] = (byte)'e';
                 Buffer[SecOff + 3] = (byte)'x';
                 Buffer[SecOff + 4] = (byte)'t';
-                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(SecOff + 0x08), 0x200);        // VirtualSize
-                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(SecOff + 0x0C), TextRva);      // VirtualAddress
-                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(SecOff + 0x10), 0x200);        // SizeOfRawData
-                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(SecOff + 0x14), TextRaw);      // PointerToRawData
-                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(SecOff + 0x24), 0x60000020);   // CODE | EXECUTE | READ
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(SecOff + 0x08), 0x200);
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(SecOff + 0x0C), TextRva);
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(SecOff + 0x10), 0x200);
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(SecOff + 0x14), TextRaw);
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(SecOff + 0x24), 0x60000020);
 
-                // Entry code: xor eax,eax ; ret.
                 Image[TextRaw + 0] = 0x31;
                 Image[TextRaw + 1] = 0xC0;
                 Image[TextRaw + 2] = 0xC3;
@@ -1964,7 +1942,6 @@ namespace Brovan
                 if (Format == BinaryFormat.ELF)
                     return ResolveLinuxHostPath(Raw, CreateDirectories, PreserveFinalLink);
 
-                // Non-Windows binaries keep normal host semantics.
                 if (Format != BinaryFormat.PE)
                     return GetNativeFullPath(Raw, CreateDirectories);
 
@@ -2005,7 +1982,6 @@ namespace Brovan
                         return VirtualPath;
                 }
 
-                // this resolve function be called for writes, so i think this is secure when reading or checking files/directories.
                 if (IsWindows)
                     return GetNativeFullPath(WinPath, CreateDirectories);
 
@@ -2602,7 +2578,6 @@ namespace Brovan
                         return Root;
                 }
 
-                // Create a default mapping on demand.
                 string DefaultRoot = Path.Combine(VirtualFileSystemRoot, DriveLetter.ToString());
                 EnsureDriveMapping(DriveLetter, DefaultRoot);
                 return DefaultRoot;
@@ -2628,7 +2603,6 @@ namespace Brovan
                         }
                         catch
                         {
-                            // ignore
                         }
                     }
 
@@ -2643,7 +2617,6 @@ namespace Brovan
                         }
                         catch
                         {
-                            // ignore
                         }
                     }
 
@@ -2653,7 +2626,6 @@ namespace Brovan
                     }
                     catch
                     {
-                        // ignore
                     }
                 }
             }
@@ -2829,7 +2801,6 @@ namespace Brovan
                     }
                     catch
                     {
-                        // ignore
                     }
                 }
 
@@ -2953,7 +2924,6 @@ namespace Brovan
                 if (string.IsNullOrWhiteSpace(WinPath))
                     return null;
 
-                // Common shipped locations.
                 const string System32Prefix = "C:\\Windows\\System32\\";
                 const string SysWow64Prefix = "C:\\Windows\\SysWOW64\\";
 
@@ -2962,10 +2932,6 @@ namespace Brovan
                 if (Normalized.StartsWith(System32Prefix, StringComparison.OrdinalIgnoreCase))
                 {
                     string Rel = Normalized.Substring(System32Prefix.Length);
-                    // WOW64 file-system redirection: a 32-bit guest that opens C:\Windows\System32\<dll>
-                    // must transparently receive the 32-bit SysWOW64 image (that is what the real WOW64
-                    // redirector does). Only redirect module images, and fall back to the flat view when
-                    // SysWOW64 does not ship the file (non-redirected subdirs like \drivers, NLS data, etc.).
                     if (Wow64GuestView)
                     {
                         string Wow64Rel = TryResolveFromWindowsLibsRelative(Path.Combine(WindowsLibsPath, "SysWOW64"), Rel);
@@ -2981,28 +2947,15 @@ namespace Brovan
                     return TryResolveFromWindowsLibsRelative(Path.Combine(WindowsLibsPath, "SysWOW64"), Rel);
                 }
 
-                // Some callers pass "\\KnownDlls\\xxx.dll" or similar, which ultimately maps to System32.
                 if (Normalized.StartsWith("\\KnownDlls\\", StringComparison.OrdinalIgnoreCase) || Normalized.StartsWith("\\KnownDlls32\\", StringComparison.OrdinalIgnoreCase))
                 {
                     string Leaf = WindowsLeafName(Normalized);
                     return TryResolveFromWindowsLibsByLeaf(Leaf);
                 }
 
-                // NLS data outside System32: the linguistic sorting table lives at
-                // C:\Windows\Globalization\Sorting\SortDefault.nls. kernelbase's CompareString /
-                // LCMapString (reached by StrCmpNIW / StrCmpIW / lstrcmpi and the CRT collation)
-                // maps that file to build its comparison tables; if it cannot be opened the
-                // comparison returns an error, so case-insensitive equality silently fails (this
-                // was the al-khaser injected-DLL false-positive: every System32 module compared
-                // "not equal" to the System32 prefix). The .nls files are shipped flat in
-                // WindowsLibs, so resolve any C:\Windows\Globalization\... file by leaf.
                 const string GlobalizationPrefix = "C:\\Windows\\Globalization\\";
                 if (Normalized.StartsWith(GlobalizationPrefix, StringComparison.OrdinalIgnoreCase))
                 {
-                    // Extract the leaf with WindowsLeafName, NOT Path.GetFileName: the latter splits on
-                    // Path.DirectorySeparatorChar, which is '/' on Linux, so on a backslash Windows path it
-                    // returns the WHOLE string (no leaf) and the WindowsLibs lookup silently misses. That miss
-                    // is exactly why sortdefault.nls could not be opened, collapsing kernelbase's NLS sort init.
                     string Leaf = WindowsLeafName(Normalized);
                     return TryResolveFromWindowsLibsByLeaf(Leaf);
                 }
@@ -3029,8 +2982,6 @@ namespace Brovan
                 if (!string.IsNullOrEmpty(Full) && (File.Exists(Full) || Directory.Exists(Full)))
                     return Full;
 
-                // Fall back to a case-insensitive leaf search (WindowsLeafName, not Path.GetFileName,
-                // so a backslash relative path yields its leaf on Linux instead of the whole string).
                 string Leaf = WindowsLeafName(WindowsRelative);
                 return TryResolveFromWindowsLibsByLeaf(Leaf);
             }
@@ -3045,16 +2996,8 @@ namespace Brovan
                 if (string.IsNullOrWhiteSpace(Leaf))
                     return null;
 
-                // WOW64 view: prefer the 32-bit SysWOW64 image over the flat (x64) one when both ship the
-                // same leaf (ntdll.dll / kernel32.dll / … exist in both views). The flat leaf index is
-                // "first hit wins" over a recursive walk, so without this probe a 32-bit guest could bind
-                // the wrong bitness depending on enumeration order.
                 EnsureWindowsLibsIndex();
 
-                // WOW64 view: bind the 32-bit SysWOW64 image for any leaf that ships there, case-insensitively
-                // (the guest sends e.g. KERNEL32.DLL while the shipped file is kernel32.dll — a plain
-                // File.Exists on the case-preserving name misses on a case-sensitive host and would fall through
-                // to the flat 64-bit copy, which then loads as STATUS_INVALID_IMAGE_FORMAT into a 32-bit process).
                 if (Wow64GuestView)
                 {
                     lock (WindowsLibsIndexLock)
@@ -3100,7 +3043,6 @@ namespace Brovan
                             if (string.IsNullOrEmpty(Leaf))
                                 continue;
 
-                            // Keep first hit to avoid churn when duplicates exist.
                             if (!WindowsLibsFileIndex.ContainsKey(Leaf))
                             {
                                 string Full = GetSandboxedFullPath(FilePath, CreateDirectories: false);
@@ -3108,8 +3050,6 @@ namespace Brovan
                                     WindowsLibsFileIndex[Leaf] = Full;
                             }
 
-                            // Separately index the SysWOW64 sub-view so a WOW64 leaf resolves to the 32-bit image
-                            // regardless of case (the guest sends KERNEL32.DLL; the shipped file is kernel32.dll).
                             if (HasSysWow64 &&
                                 FilePath.StartsWith(SysWow64Dir + Path.DirectorySeparatorChar, StringComparison.Ordinal) &&
                                 !WindowsLibsSysWow64FileIndex.ContainsKey(Leaf))
@@ -3148,7 +3088,6 @@ namespace Brovan
 
             ApiSetOverrideMap ??= new Dictionary<ApiSetOverrideKey, string>();
 
-            // Aggregate everything per contract so offsets/counts are easy to compute later.
             Dictionary<string, ApiSetContractBuild> ContractTable = new(StringComparer.OrdinalIgnoreCase);
 
             foreach (KeyValuePair<string, string> Pair in ApiSetMap)
@@ -3183,7 +3122,6 @@ namespace Brovan
 
             int ContractCount = Contracts.Count;
 
-            // Values are stored in one packed array, so count them up front.
             int TotalValueCount = 0;
             for (int Index = 0; Index < ContractCount; Index++)
             {
@@ -3191,7 +3129,6 @@ namespace Brovan
                 TotalValueCount += ValueCount;
             }
 
-            // ApiSet schema v6 (header + entry table + hash table + value table + UTF-16 string pool)
             const int NamespaceSize = 28;
             const int NamespaceEntrySize = 24;
             const int HashEntrySize = 8;
@@ -3225,7 +3162,6 @@ namespace Brovan
                 return Result;
             }
 
-            // populate the pool first so all offsets are known before writing structs
             for (int Index = 0; Index < ContractCount; Index++)
             {
                 AddString(Contracts[Index].ContractName);
@@ -3242,7 +3178,6 @@ namespace Brovan
 
             const uint HashFactor = 0x1F;
 
-            // hash table is sorted by hash, each entry points back into the namespace entry array by index.
             List<ApiSetHashItem> HashItems = new(ContractCount);
             for (int Index = 0; Index < ContractCount; Index++)
             {

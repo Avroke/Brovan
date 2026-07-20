@@ -6,9 +6,6 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            // Bitness-agnostic: args via GetArg64 (delegates to the x86 stack in WOW64); the OUT KeyHandle is
-            // pointer-sized (WritePointer), and the registry-path resolver reads the correct OBJECT_ATTRIBUTES
-            // layout per bitness. al-khaser's anti-VM checks read the registry heavily, so this must work on x86.
             ulong HandlePtr = Instance.WinHelper.GetArg64(0);
             AccessMask DesiredAccess = (AccessMask)Instance.WinHelper.GetArg64(1);
             ulong ObjectAttributesPtr = Instance.WinHelper.GetArg64(2);

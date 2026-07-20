@@ -23,8 +23,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             const uint CONTEXT_CONTROL = 0x00000001;
             const uint CONTEXT_INTEGER = 0x00000002;
 
-            // 32-bit guest: the CONTEXT is the x86 layout (ContextFlags at +0x00, GPRs at +0x9C..+0xC8) and the
-            // register writes must target the 32-bit register IDs — writing the 64-bit IDs is a no-op in MODE_32.
             if (Instance.BackendMode == Mode.MODE_32)
                 return ContinueX86(Instance, ContextPtr, TestAlert);
 

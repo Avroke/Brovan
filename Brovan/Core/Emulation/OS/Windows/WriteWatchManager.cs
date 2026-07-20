@@ -29,10 +29,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private sealed class Watched
         {
-            public ulong Base;                 // page-aligned start
-            public ulong End;                  // page-aligned end (exclusive)
-            public IntPtr Hook;                // ranged write hook handle
-            public MemoryHookCallback Callback; // kept alive for the hook's lifetime
+            public ulong Base;
+            public ulong End;
+            public IntPtr Hook;
+            public MemoryHookCallback Callback;
             public readonly SortedSet<ulong> Dirty = new SortedSet<ulong>();
         }
 
@@ -55,8 +55,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (end <= start)
                 return;
 
-            // Re-registration of the same base (e.g. a MEM_COMMIT over an existing MEM_RESERVE
-            // write-watch region) is a no-op — the existing hook + dirty set stay live.
             if (FindByBase(start) != null)
                 return;
 
@@ -68,14 +66,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return true;
             };
 
-            // Ranged hook over [start, end-1] inclusive: near-zero cost when writes miss the range.
             w.Hook = _emu._emulator.AddMemoryHook(start, end - 1, BackendHookType.MemoryWrite, w.Callback);
 
-            // If the write hook could not be installed (e.g. NoHooks diagnostic mode, where
-            // UC_HOOK_MEM_WRITE is not whitelisted), do NOT register the region: a live region
-            // with no hook would never dirty a page, so GetWriteWatch would falsely report zero
-            // writes after a genuine store — a detectable tell. Leaving it unregistered makes a
-            // later query return STATUS_INVALID_PARAMETER instead (an honest "not tracked").
             if (w.Hook == IntPtr.Zero)
                 return;
 
@@ -111,8 +103,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
 
             ulong qStart = baseAddress & ~PageMask;
-            // Guard the range end against address-space wrap (baseAddress + size overflow),
-            // which would otherwise make the [qStart, qEnd) filter match nothing.
             ulong qEnd = baseAddress > ulong.MaxValue - size ? ulong.MaxValue : baseAddress + size;
             pages = new List<ulong>();
 
@@ -125,9 +115,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 pages.Add(page);
             }
 
-            // WRITE_WATCH_FLAG_RESET resets ONLY the pages actually returned (MSDN), so a
-            // subsequent GetWriteWatch with an ample buffer still retrieves any pages that were
-            // truncated by maxEntries this call.
             if (reset)
             {
                 foreach (ulong page in pages)

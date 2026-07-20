@@ -185,7 +185,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!TryWriteBasicAccounting(Instance, Job, Buffer.Slice(0x00, 0x30)))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            // IO_COUNTERS is intentionally zeroed for now.
             return Instance._emulator.WriteMemory(Address, Buffer) ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_ACCESS_VIOLATION;
         }
 
@@ -300,7 +299,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Span<byte> Buffer = stackalloc byte[0x90];
                 Buffer.Clear();
                 WriteBasicLimitInformationToSpan(Job, Buffer.Slice(0x00, 0x40));
-                // IO_COUNTERS block is intentionally zeroed.
                 BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x70, 8), Job.ProcessMemoryLimit);
                 BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x78, 8), Job.JobMemoryLimit);
                 BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x80, 8), Job.PeakProcessMemoryUsed);
@@ -311,7 +309,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             Span<byte> Buffer32 = stackalloc byte[0x6C];
             Buffer32.Clear();
             WriteBasicLimitInformationToSpan(Job, Buffer32.Slice(0x00, 0x2C));
-            // IO_COUNTERS block is intentionally zeroed.
             BinaryPrimitives.WriteUInt32LittleEndian(Buffer32.Slice(0x5C, 4), (uint)Job.ProcessMemoryLimit);
             BinaryPrimitives.WriteUInt32LittleEndian(Buffer32.Slice(0x60, 4), (uint)Job.JobMemoryLimit);
             BinaryPrimitives.WriteUInt32LittleEndian(Buffer32.Slice(0x64, 4), (uint)Job.PeakProcessMemoryUsed);

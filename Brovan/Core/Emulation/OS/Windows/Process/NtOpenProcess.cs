@@ -43,13 +43,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (Instance.WinHelper.IsProtectedStatus(TargetProcess.Status))
                 {
-                    // Protected system processes (csrss.exe, wininit.exe, services.exe, winlogon.exe,
-                    // MsMpEng.exe, ...) cannot be opened for any access from a non-elevated caller on
-                    // real Windows — even PROCESS_QUERY_LIMITED_INFORMATION returns ACCESS_DENIED.
-                    // Al-khaser's SeDebugPrivilege probe relies on this: it OpenProcess()es
-                    // csrss.exe with PROCESS_QUERY_LIMITED_INFORMATION and treats any non-NULL
-                    // handle as proof of elevated debug privilege. When the current caller isn't
-                    // elevated, deny unconditionally so the probe reports GOOD.
                     WinProcess Self = Instance.WinHelper.GetProcessList().FirstOrDefault(p => p.PID == Instance.WinHelper.PID);
                     bool CallerElevated = Self?.PrimaryToken?.IsElevated ?? false;
                     if (!CallerElevated)
@@ -118,13 +111,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (Instance.WinHelper.IsProtectedStatus(TargetProcess.Status))
                 {
-                    // Protected system processes (csrss.exe, wininit.exe, services.exe, winlogon.exe,
-                    // MsMpEng.exe, ...) cannot be opened for any access from a non-elevated caller on
-                    // real Windows — even PROCESS_QUERY_LIMITED_INFORMATION returns ACCESS_DENIED.
-                    // Al-khaser's SeDebugPrivilege probe relies on this: it OpenProcess()es
-                    // csrss.exe with PROCESS_QUERY_LIMITED_INFORMATION and treats any non-NULL
-                    // handle as proof of elevated debug privilege. When the current caller isn't
-                    // elevated, deny unconditionally so the probe reports GOOD.
                     WinProcess Self = Instance.WinHelper.GetProcessList().FirstOrDefault(p => p.PID == Instance.WinHelper.PID);
                     bool CallerElevated = Self?.PrimaryToken?.IsElevated ?? false;
                     if (!CallerElevated)

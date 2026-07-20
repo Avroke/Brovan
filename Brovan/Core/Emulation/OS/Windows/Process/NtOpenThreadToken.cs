@@ -49,9 +49,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (Token == null)
             {
-                // STATUS_NO_TOKEN is the honest "the thread simply has no impersonation token set" answer;
-                // kernelbase's OpenThreadToken translates it to ERROR_NO_TOKEN (0x3F0), which callers like
-                // combase treat as "fall back to the process token" — the normal case for a fresh thread.
                 if (OpenAsSelf == 0)
                     return NTSTATUS.STATUS_NO_TOKEN;
 
