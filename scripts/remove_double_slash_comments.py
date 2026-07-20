@@ -35,6 +35,9 @@ Options:
     --only-full-line  Remove only comments that occupy a whole line; keep
                       inline (trailing) comments that annotate code.
     -q, --quiet       Only print the final summary.
+
+Modified files are rewritten as UTF-8 without a BOM (any leading UTF-8 BOM is
+dropped), matching this repository's prevailing no-BOM convention.
 """
 
 import argparse
