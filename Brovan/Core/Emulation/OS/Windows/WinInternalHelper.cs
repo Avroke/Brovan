@@ -291,8 +291,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int OffsetNtMinorVersion = 0x270;
         private const int OffsetProcessorFeatures = 0x274;
         private const int OffsetXStateConfiguration = 0x3D8;
+        private const int OffsetQpcFrequency = 0x300;
+        private const int OffsetQpcData = 0x3C6;
         private const int OffsetSystemCallX86 = 0x300;
         private const int OffsetSystemCallX64 = 0x308;
+
+        internal const long QpcFrequency = 10_000_000;
         private const int OffsetTickCountQuad = 0x320;
         private const int OffsetCookie = 0x330;
 
@@ -300,7 +304,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private readonly BinaryEmulator Emulator;
         private MemoryHookCallback ReadHook;
-        private bool HookInstalled;
+        private bool Installed;
 
         private long LastUpdateTimestamp;
 
@@ -314,34 +318,35 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public void Initialize()
         {
-            if (HookInstalled)
+            if (Installed)
                 return;
 
-            if (!Emulator.IsRegionMapped(Emulator.KUSER_SHARED_DATA, PageSize))
+            byte[] Page = BuildInitialPage();
+            BaseInterruptTime = ReadKsystemTimeFromBuffer(Page, OffsetInterruptTime);
+            LastUpdateTimestamp = 0;
+
+            if (!Emulator._emulator.MapMmio(Emulator.KUSER_SHARED_DATA, PageSize, FillTimeFields, IgnoreWrite))
             {
-                if (Emulator.MapMemoryRegion(Emulator.KUSER_SHARED_DATA, PageSize, MemoryProtection.Read) == 0)
+                if (!Emulator.IsRegionMapped(Emulator.KUSER_SHARED_DATA, PageSize) &&
+                    Emulator.MapMemoryRegion(Emulator.KUSER_SHARED_DATA, PageSize, MemoryProtection.Read) == 0)
                 {
-                    Utils.LogError($"[KUSER_MANAGER] Failed to map KUSER_SHARED_DATA. Last Unicorn Error: {Emulator.GetLastError()}");
+                    Utils.LogError($"[KUSER_MANAGER] Failed to map KUSER_SHARED_DATA: {Emulator.GetLastError()}");
+                }
+
+                ReadHook = OnRead;
+                if (Emulator._emulator.AddMemoryHook(Emulator.KUSER_SHARED_DATA,
+                        Emulator.KUSER_SHARED_DATA + (PageSize - 1), BackendHookType.MemoryRead, ReadHook) == IntPtr.Zero)
+                {
+                    Utils.LogError($"[KUSER_MANAGER] No way to keep KUSER_SHARED_DATA current: {Emulator.GetLastError()}");
                 }
             }
 
-            byte[] Page = BuildInitialPage();
             if (!Emulator._emulator.WriteMemory(Emulator.KUSER_SHARED_DATA, Page))
             {
-                Utils.LogError($"[KUSER_MANAGER] Failed write the initial page data to KUSER_SHARED_DATA. Last Unicorn Error: {Emulator.GetLastError()}");
+                Utils.LogError($"[KUSER_MANAGER] Failed write the initial page data to KUSER_SHARED_DATA: {Emulator.GetLastError()}");
             }
 
-            BaseInterruptTime = ReadKsystemTimeFromBuffer(Page, OffsetInterruptTime);
-
-            LastUpdateTimestamp = 0;
-
-            ReadHook = OnRead;
-            if (Emulator._emulator.AddMemoryHook(Emulator.KUSER_SHARED_DATA, Emulator.KUSER_SHARED_DATA + (PageSize - 1), BackendHookType.MemoryRead, ReadHook) == IntPtr.Zero)
-            {
-                Utils.LogError($"[KUSER_MANAGER] Failed to add a hook for KUSER_SHARED_DATA. Error: {Emulator.GetLastError()}");
-            }
-
-            HookInstalled = true;
+            Installed = true;
 
             Emulator._emulator.WriteMemory(Emulator.KUSER_SHARED_DATA + (ulong)GetSystemCallOffset(), 0u, 4);
             UpdateDynamicFields(true);
@@ -353,6 +358,33 @@ namespace Brovan.Core.Emulation.OS.Windows
             return true;
         }
 
+        private void FillTimeFields(ulong Offset, Span<byte> Destination)
+        {
+            if (Offset != 0 || Destination.Length < OffsetTickCountQuad + 12)
+                return;
+
+            ComputeDynamicFields(out ulong SystemTime, out ulong InterruptTime, out ulong TickCountQuad);
+
+            WriteKsystemTimeToSpan(Destination, OffsetSystemTime, SystemTime);
+            WriteKsystemTimeToSpan(Destination, OffsetInterruptTime, InterruptTime);
+            WriteKsystemTimeToSpan(Destination, OffsetTickCountQuad, TickCountQuad);
+            BitConverter.TryWriteBytes(Destination.Slice(OffsetTickCountLowDeprecated, 4), (uint)TickCountQuad);
+        }
+
+        private void IgnoreWrite(ulong Offset, ReadOnlySpan<byte> Data)
+        {
+        }
+
+        private void ComputeDynamicFields(out ulong SystemTime, out ulong InterruptTime, out ulong TickCountQuad)
+        {
+            long Now = Emulator.EmulatedTickCount64;
+            ulong Elapsed100Ns = unchecked((ulong)Math.Max(0, Now)) * 10_000UL;
+
+            SystemTime = unchecked((ulong)Emulator.GetEmulatedSystemTimeFileTimeUtc());
+            InterruptTime = BaseInterruptTime + Elapsed100Ns;
+            TickCountQuad = InterruptTime / HundredNsPerDefaultTick;
+        }
+
         private void UpdateDynamicFields(bool Force)
         {
             long Now = Emulator.EmulatedTickCount64;
@@ -361,21 +393,24 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             LastUpdateTimestamp = Now;
 
-            ulong Elapsed100Ns = unchecked((ulong)Math.Max(0, Now)) * 10_000UL;
-
-            ulong SystemTime = unchecked((ulong)Emulator.GetEmulatedSystemTimeFileTimeUtc());
-            ulong InterruptTime = BaseInterruptTime + Elapsed100Ns;
+            ComputeDynamicFields(out ulong SystemTime, out ulong InterruptTime, out ulong TickCountQuad);
 
             WriteKsystemTimeToMemory(OffsetSystemTime, SystemTime);
             WriteKsystemTimeToMemory(OffsetInterruptTime, InterruptTime);
-
-            ulong TickCountQuad = InterruptTime / HundredNsPerDefaultTick;
             WriteKsystemTimeToMemory(OffsetTickCountQuad, TickCountQuad);
 
-            uint TickCountLow = (uint)TickCountQuad;
-            Emulator._emulator.WriteMemory(Emulator.KUSER_SHARED_DATA + OffsetTickCountLowDeprecated, TickCountLow, 4);
-
+            Emulator._emulator.WriteMemory(Emulator.KUSER_SHARED_DATA + OffsetTickCountLowDeprecated, (uint)TickCountQuad, 4);
             Emulator._emulator.WriteMemory(Emulator.KUSER_SHARED_DATA + (ulong)GetSystemCallOffset(), 0u, 4);
+        }
+
+        private static void WriteKsystemTimeToSpan(Span<byte> Page, int Offset, ulong Value)
+        {
+            uint Low = (uint)(Value & 0xFFFFFFFF);
+            uint High = (uint)(Value >> 32);
+
+            BitConverter.TryWriteBytes(Page.Slice(Offset, 4), Low);
+            BitConverter.TryWriteBytes(Page.Slice(Offset + 4, 4), High);
+            BitConverter.TryWriteBytes(Page.Slice(Offset + 8, 4), High);
         }
 
         private int GetSystemCallOffset()
@@ -405,6 +440,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 WriteUInt32(Page, OffsetNtMajorVersion, WindowsVersionInfo.MajorVersion);
                 WriteUInt32(Page, OffsetNtMinorVersion, WindowsVersionInfo.MinorVersion);
                 WriteUInt32(Page, OffsetCookie, (uint)Emulator.SeededRandom.Next(int.MaxValue));
+
+                Page[OffsetQpcData] = 0;
+                Page[OffsetQpcData + 1] = 0;
             }
             else
             {
@@ -448,6 +486,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 WriteInt64(OffsetSystemTime, Emulator.GetEmulatedSystemTimeFileTimeUtc());
 
+                if (Emulator._binary.Architecture != BinaryArchitecture.x86)
+                    WriteInt64(OffsetQpcFrequency, QpcFrequency);
+
+                // KdDebuggerEnabled
                 WriteByte(0x02D4, 0x00);
 
                 WriteByte(0x02EC, 0x00);
@@ -556,12 +598,13 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private bool PebHookInstalled;
         private bool BlockHookInstalled;
+        private bool PollDriven;
 
         private readonly HashSet<ulong> HookedLdrDataBases = new HashSet<ulong>();
 
         private volatile bool PendingRefreshHooks;
         private volatile bool PendingSync;
-        private int DelayBlocks;
+        private int DelayEdges;
 
         private long LastPumpTicks;
 
@@ -584,12 +627,42 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal void Install()
         {
-            InstallPebLdrPointerHook();
             InstallBlockHook();
+            PollDriven = !BlockHookInstalled;
 
+            if (!PollDriven)
+                InstallPebLdrPointerHook();
+
+            NotifyImageMapped();
+        }
+
+        internal void NotifyImageMapped()
+        {
             PendingRefreshHooks = true;
             PendingSync = true;
-            DelayBlocks = 2;
+            DelayEdges = 2;
+        }
+
+        internal void SyncFromSyscall()
+        {
+            if (!PollDriven)
+                return;
+
+            Drain();
+        }
+
+        private void Drain()
+        {
+            if (!PendingSync && !PendingRefreshHooks)
+                return;
+
+            if (DelayEdges > 0)
+            {
+                DelayEdges--;
+                return;
+            }
+
+            Pump();
         }
 
         private void InstallPebLdrPointerHook()
@@ -630,30 +703,18 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             PendingRefreshHooks = true;
             PendingSync = true;
-            DelayBlocks = 2;
+            DelayEdges = 2;
             return true;
         }
 
         private bool OnLdrDataWrite(BackendMemoryAccessType type, ulong address, uint size, ulong value)
         {
             PendingSync = true;
-            DelayBlocks = 2;
+            DelayEdges = 2;
             return true;
         }
 
-        private void OnBlock(ulong address, uint size)
-        {
-            if (!PendingSync && !PendingRefreshHooks)
-                return;
-
-            if (DelayBlocks > 0)
-            {
-                DelayBlocks--;
-                return;
-            }
-
-            Pump();
-        }
+        private void OnBlock(ulong address, uint size) => Drain();
 
         internal void Pump()
         {
@@ -676,7 +737,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!TrySnapshotAndApply())
             {
                 PendingSync = true;
-                DelayBlocks = 2;
+                DelayEdges = 2;
                 return;
             }
 
@@ -686,13 +747,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         private void RefreshLdrHooks()
         {
             ulong LdrData = SafeReadUlong(Emulator.PEB + (ulong)PebOffsetLdr);
-            if (LdrData == 0)
+
+            if (LdrData == 0 || !Emulator.IsRegionMapped(LdrData, (uint)PebLdrSize))
+            {
+                PendingRefreshHooks = true;
                 return;
+            }
 
             if (HookedLdrDataBases.Contains(LdrData))
-                return;
-
-            if (!Emulator.IsRegionMapped(LdrData, (uint)PebLdrSize))
                 return;
 
             ulong Begin = LdrData;

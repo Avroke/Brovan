@@ -70,22 +70,22 @@ namespace Brovan
             return VerifyRegDump(RegDir, false);
         }
 
-        private static bool ArgsSpecifyKvmBackend(string[] args)
+        private static bool ArgsSpecifyHardwareBackend(string[] args)
         {
             for (int i = 0; i < args.Length; i++)
             {
                 string arg = args[i];
+                string value = null;
                 if (arg.StartsWith("--backend=", StringComparison.OrdinalIgnoreCase))
-                {
-                    string value = arg.Substring("--backend=".Length).Trim().ToLowerInvariant();
-                    return value == "kvm";
-                }
+                    value = arg.Substring("--backend=".Length);
+                else if (arg == "--backend" && i + 1 < args.Length)
+                    value = args[i + 1];
 
-                if (arg == "--backend" && i + 1 < args.Length)
-                {
-                    string value = (args[i + 1] ?? string.Empty).Trim().ToLowerInvariant();
-                    return value == "kvm";
-                }
+                if (value == null)
+                    continue;
+
+                value = value.Trim().ToLowerInvariant();
+                return value == "kvm" || value == "whp";
             }
             return false;
         }
@@ -127,7 +127,7 @@ namespace Brovan
             Console.WriteLine("  --net=<mode>      Set host networking policy: none, loopback (default), full");
             Console.WriteLine("  --net-allow=<ip>  Allow a specific IPv4 or IPv6 address in addition to the selected policy.");
             Console.WriteLine("  --no-hooks        Run the emulator with no hooks. useful when you want maximum performance and want to see some program output.");
-            Console.WriteLine("  --backend=<name>  Choose the emulation backend: unicorn (default) or kvm.");
+            Console.WriteLine("  --backend=<name>  Choose the emulation backend: unicorn (default), kvm (Linux), or whp (Windows Hypervisor Platform).");
             Console.WriteLine("  --screen=<spec>   Guest screen resolution: <W>x<H> (e.g. 2560x1440), or 'host' to track the");
             Console.WriteLine("                    real host monitor. Default: a fixed, reproducible 1920x1080.");
             Console.WriteLine();
@@ -198,6 +198,9 @@ namespace Brovan
                 case "kvm":
                     Kind = EmulationBackendKind.Kvm;
                     return true;
+                case "whp":
+                    Kind = EmulationBackendKind.Whp;
+                    return true;
                 default:
                     Kind = EmulationBackendKind.Unicorn;
                     return false;
@@ -221,7 +224,7 @@ namespace Brovan
 
             SilentMode = HasSilentFlag(args);
 
-            bool KvmBackendRequested = ArgsSpecifyKvmBackend(args);
+            bool HardwareBackendRequested = ArgsSpecifyHardwareBackend(args);
 
             if (!IsWindows && !Directory.Exists(WindowsLibsPath))
             {
@@ -399,7 +402,7 @@ namespace Brovan
                     case "--backend":
                         if (i + 1 >= args.Length || !TryParseBackendKind(args[i + 1], out EmulationBackendKind ArgumentBackendKind))
                         {
-                            PrintHighlight("[-] Invalid backend. expected: unicorn, kvm.", true);
+                            PrintHighlight("[-] Invalid backend. expected: unicorn, kvm, whp.", true);
                             return;
                         }
 
@@ -408,7 +411,7 @@ namespace Brovan
                         continue;
                 }
 
-                if (IsWindows && BackendKind == EmulationBackendKind.Unicorn && Unicorn.IsCFGEnabled())
+                if (IsWindows && BackendKind == EmulationBackendKind.Unicorn && !HardwareBackendRequested && Unicorn.IsCFGEnabled())
                 {
                     if (Environment.GetEnvironmentVariable("BROVAN_CFG_DISABLED") != "1")
                     {

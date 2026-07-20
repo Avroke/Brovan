@@ -8,7 +8,8 @@ namespace Brovan.Core.Emulation.OS.Windows
     internal class NtConnectPort : IWinSyscall
     {
         [StructLayout(LayoutKind.Sequential)]
-        private struct PORT_VIEW64
+        [GenerateStructSerializer]
+        internal struct PORT_VIEW64
         {
             public uint Length;
             public uint Padding0;
@@ -20,8 +21,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             public ulong ViewRemoteBase;
         }
 
+        [GenerateStructSerializer]
         [StructLayout(LayoutKind.Sequential)]
-        private struct REMOTE_PORT_VIEW64
+        internal struct REMOTE_PORT_VIEW64
         {
             public uint Length;
             public uint Padding0;

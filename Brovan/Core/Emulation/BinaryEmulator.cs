@@ -440,10 +440,23 @@ namespace Brovan.Core.Emulation
             EmulatedSystemTimeBaseFileTimeUtc = WindowStart + (long)(Seed % (ulong)WindowSpan);
         }
 
+        private readonly System.Diagnostics.Stopwatch _wallClock = System.Diagnostics.Stopwatch.StartNew();
+        private long _emulatedTimeSkewMilliseconds;
+
         /// <summary>
-        /// Current deterministic guest tick count in milliseconds.
+        /// Current guest tick count in milliseconds.
         /// </summary>
-        internal long EmulatedTickCount64 { get; private set; }
+        internal long EmulatedTickCount64
+        {
+            get
+            {
+                long elapsed = _wallClock.ElapsedMilliseconds;
+                long skew = Volatile.Read(ref _emulatedTimeSkewMilliseconds);
+                if (elapsed > long.MaxValue - skew)
+                    return long.MaxValue;
+                return elapsed + skew;
+            }
+        }
 
         /// <summary>
         /// Returns the current deterministic guest system time as a Windows file time.
@@ -534,26 +547,21 @@ namespace Brovan.Core.Emulation
         }
 
         /// <summary>
-        /// Advances deterministic guest time without depending on host execution speed.
+        /// Advances guest time for a wait that was not served in real time.
         /// </summary>
         internal void AdvanceEmulatedTimeMilliseconds(long Milliseconds, bool AdvanceTimestampCounter = false)
         {
             if (Milliseconds <= 0)
                 return;
 
-            long AppliedMilliseconds;
-            if (EmulatedTickCount64 > long.MaxValue - Milliseconds)
-            {
-                AppliedMilliseconds = long.MaxValue - EmulatedTickCount64;
-                EmulatedTickCount64 = long.MaxValue;
-            }
-            else
-            {
-                AppliedMilliseconds = Milliseconds;
-                EmulatedTickCount64 += Milliseconds;
-            }
+            long Skew = Volatile.Read(ref _emulatedTimeSkewMilliseconds);
+            long AppliedMilliseconds = Skew > long.MaxValue - Milliseconds ? long.MaxValue - Skew : Milliseconds;
+            if (AppliedMilliseconds <= 0)
+                return;
 
-            if (AdvanceTimestampCounter && AppliedMilliseconds > 0)
+            Interlocked.Add(ref _emulatedTimeSkewMilliseconds, AppliedMilliseconds);
+
+            if (AdvanceTimestampCounter)
             {
                 ulong Ticks = (ulong)AppliedMilliseconds;
                 if (Ticks > (ulong.MaxValue - _timestampCounter) / TscCyclesPerMillisecond)
@@ -1404,6 +1412,11 @@ namespace Brovan.Core.Emulation
         public bool IsRegionMapped(ulong Address, ulong Size)
         {
             return TryFindOverlappingMemoryRegion(Address, Size, out _);
+        }
+
+        public IntPtr GetHostPointer(ulong Address, ulong Size)
+        {
+            return _emulator.GetHostPointer(Address, Size);
         }
 
         /// <summary>
@@ -2707,6 +2720,8 @@ namespace Brovan.Core.Emulation
                     if (Debug)
                         if (Debug)
                             TriggerDebugMessage($"scheduler: slice exception tid={ImmaBeEmulatedOOO.ThreadId} {ex.GetType().Name}: {ex.Message}");
+
+                    Utils.LogError($"[Scheduler] Thread {ImmaBeEmulatedOOO.ThreadId} terminated by an unhandled {ex.GetType().Name}: {ex.Message}");
 
                     if (ImmaBeEmulatedOOO.State != EmulatedThreadState.Terminated)
                         ImmaBeEmulatedOOO.ExitCode = unchecked((int)(uint)ImmaBeEmulatedOOO.Context.RAX);

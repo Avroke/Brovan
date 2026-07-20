@@ -4,6 +4,7 @@ using Brovan.Core.Emulation.OS.Linux.Files;
 
 namespace Brovan.Core.Emulation.OS.Linux
 {
+    [GenerateStructSerializer]
     public struct Utsname
     {
         [EmulatedInline(65, Ascii = true)]
@@ -26,6 +27,7 @@ namespace Brovan.Core.Emulation.OS.Linux
     }
 
 
+    [GenerateStructSerializer]
     [StructLayout(LayoutKind.Explicit)]
     public struct LinuxStat32
     {
@@ -90,6 +92,7 @@ namespace Brovan.Core.Emulation.OS.Linux
         public uint __unused5;
     }
 
+    [GenerateStructSerializer]
     [StructLayout(LayoutKind.Explicit)]
     public struct LinuxStatCompat64
     {
@@ -162,6 +165,7 @@ namespace Brovan.Core.Emulation.OS.Linux
         public long tv_nsec;
     }
 
+    [GenerateStructSerializer]
     [StructLayout(LayoutKind.Explicit)]
     public struct LinuxStat64
     {

@@ -59,7 +59,7 @@ namespace Brovan.Core.Emulation
         public const uint KvmIoSetMsrs = 0x4008AE89;
         public const uint KvmIoGetFpu = 0x81A0AE8C;
         public const uint KvmIoSetFpu = 0x41A0AE8D;
-        public const uint KvmIoGetCpuid2 = 0x90B0AE91;
+        public const uint KvmIoGetCpuid2 = 0xC008AE91;
         public const uint KvmIoSetCpuid2 = 0x4008AE90;
         public const uint KvmIoGetXsave = 0x9000AEA4;
         public const uint KvmIoSetXsave = 0x5000AEA5;

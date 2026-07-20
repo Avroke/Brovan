@@ -1071,6 +1071,19 @@ namespace Brovan.Core.Emulation.OS.Windows
         public List<WinModule> MappedImageViews = new List<WinModule>();
         private readonly Dictionary<string, int> ImageViewCountsByPath = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         internal KuserSharedDataManager KuserSharedData;
+
+        /// <summary>
+        /// Current performance counter, in the units <see cref="KuserSharedDataManager.QpcFrequency"/> claims.
+        /// </summary>
+        internal static ulong QueryPerformanceCounterValue()
+        {
+            long Ticks = System.Diagnostics.Stopwatch.GetTimestamp();
+            long HostFrequency = System.Diagnostics.Stopwatch.Frequency;
+            if (HostFrequency == KuserSharedDataManager.QpcFrequency)
+                return (ulong)Ticks;
+
+            return (ulong)((decimal)Ticks * KuserSharedDataManager.QpcFrequency / HostFrequency);
+        }
         internal HandleManager HandleManager = new HandleManager();
         private static string WinRegPath = Path.Combine(AppContext.BaseDirectory, "WinReg");
         public RegistryManager RegManager = new RegistryManager(WinRegPath);
@@ -1126,11 +1139,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Vals[3] = Emulator._emulator.ReadRegister(Registers.UC_X86_REG_R9);
                 Vals[4] = Emulator._emulator.ReadRegister(Registers.UC_X86_REG_RSP);
             }
-            _argCacheR10  = Vals[0];
-            _argCacheRDX  = Vals[1];
-            _argCacheR8   = Vals[2];
-            _argCacheR9   = Vals[3];
-            _argCacheRSP  = Vals[4];
+            _argCacheR10 = Vals[0];
+            _argCacheRDX = Vals[1];
+            _argCacheR8 = Vals[2];
+            _argCacheR9 = Vals[3];
+            _argCacheRSP = Vals[4];
             _argCacheValid = true;
         }
 
@@ -2401,6 +2414,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         public void AddModule(WinModule Module, bool TriggerMessage)
         {
             bool Finished = false;
+
+            LdrTracker?.NotifyImageMapped();
+
             try
             {
                 Finished = true;

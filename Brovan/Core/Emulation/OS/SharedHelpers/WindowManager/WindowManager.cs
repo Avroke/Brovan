@@ -1,9 +1,48 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 
 namespace Brovan.Core.Emulation.OS.SharedHelpers
 {
+    internal static class HostEventQueue
+    {
+        private static int _pendingRepaint;
+        private static readonly ConcurrentQueue<(uint Message, ulong WParam, ulong LParam)> PendingInput = new();
+
+        public static void MarkRepaint()
+        {
+            Interlocked.Exchange(ref _pendingRepaint, 1);
+        }
+
+        public static bool ConsumeRepaint()
+        {
+            return Interlocked.Exchange(ref _pendingRepaint, 0) != 0;
+        }
+
+        public static void Enqueue(uint message, ulong wParam, ulong lParam)
+        {
+            PendingInput.Enqueue((message, wParam, lParam));
+        }
+
+        public static bool TryDequeue(out uint message, out ulong wParam, out ulong lParam)
+        {
+            if (PendingInput.TryDequeue(out var item))
+            {
+                message = item.Message;
+                wParam = item.WParam;
+                lParam = item.LParam;
+                return true;
+            }
+
+            message = 0;
+            wParam = 0;
+            lParam = 0;
+            return false;
+        }
+    }
+
     public enum LinuxDisplayBackend
     {
         None,

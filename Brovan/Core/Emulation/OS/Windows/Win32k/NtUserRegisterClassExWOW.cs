@@ -177,7 +177,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         }
 
         [StructLayout(LayoutKind.Explicit, Size = 80)]
-        private struct WNDCLASSEXW64
+        [GenerateStructSerializer]
+        internal struct WNDCLASSEXW64
         {
             [FieldOffset(0)] public uint cbSize;
             [FieldOffset(4)] public uint style;
@@ -193,8 +194,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             [FieldOffset(72)] public ulong hIconSm;
         }
 
+        [GenerateStructSerializer]
         [StructLayout(LayoutKind.Explicit, Size = 24)]
-        private struct CLSMENUNAME64
+        internal struct CLSMENUNAME64
         {
             [FieldOffset(0)] public ulong pszClientAnsiMenuName;
             [FieldOffset(8)] public ulong pwszClientUnicodeMenuName;

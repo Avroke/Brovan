@@ -855,6 +855,8 @@ namespace Brovan
             Output.Write(Escaped, 0, Escaped.Length);
         }
 
+        private static Stream Stdout = null;
+
         /// <summary>
         /// Writes guest-controlled console output to the host console using the selected safety policy.
         /// </summary>
@@ -905,7 +907,10 @@ namespace Brovan
             if (Data == null)
                 return;
 
-            ConsoleWrite(Data.AsSpan(), Console.OpenStandardOutput(), Mode);
+            if (Stdout == null)
+                Stdout = Console.OpenStandardOutput();
+
+            ConsoleWrite(Data.AsSpan(), Stdout, Mode);
         }
 
         /// <summary>
@@ -913,7 +918,10 @@ namespace Brovan
         /// </summary>
         public static void ConsoleWrite(ReadOnlySpan<byte> Data, GuestConsoleOutputMode Mode)
         {
-            ConsoleWrite(Data, Console.OpenStandardOutput(), Mode);
+            if (Stdout == null)
+                Stdout = Console.OpenStandardOutput();
+
+            ConsoleWrite(Data, Stdout, Mode);
         }
 
         /// <summary>

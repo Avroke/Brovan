@@ -550,6 +550,8 @@ namespace Brovan.Core.Emulation.Guests
 
         public bool TryHandleSyscall(BinaryEmulator Instance)
         {
+            WinHelper?.LdrTracker?.SyncFromSyscall();
+
             try
             {
                 uint Syscall = Instance._binary.Architecture == BinaryArchitecture.x64

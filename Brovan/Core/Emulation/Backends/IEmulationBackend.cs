@@ -6,6 +6,7 @@ namespace Brovan.Core.Emulation
     {
         Unicorn = 0,
         Kvm = 1,
+        Whp = 2,
     }
 
     public enum BackendError
@@ -73,6 +74,8 @@ namespace Brovan.Core.Emulation
     }
 
     public delegate bool MemoryHookCallback(BackendMemoryAccessType type, ulong address, uint size, ulong value);
+    public delegate void MmioReadCallback(ulong offset, Span<byte> destination);
+    public delegate void MmioWriteCallback(ulong offset, ReadOnlySpan<byte> data);
     public delegate void CodeHookCallback(ulong address, uint size);
     public delegate void InterruptHookCallback(uint interruptNumber);
     public delegate void InstructionHookCallback();
@@ -91,6 +94,9 @@ namespace Brovan.Core.Emulation
         bool UnmapMemory(ulong address, ulong size);
         bool SetMemoryProtection(ulong address, ulong size, MemoryProtection protection);
 
+        bool MapMmio(ulong address, ulong size, MmioReadCallback read, MmioWriteCallback write) => false;
+
+        IntPtr GetHostPointer(ulong address, ulong size) => IntPtr.Zero;
         bool WriteMemory(ulong address, byte[] value, uint length = 0);
         bool WriteMemory(ulong address, byte[] value, int offset, int length);
         bool WriteMemory(ulong address, ReadOnlySpan<byte> value, uint length = 0);
