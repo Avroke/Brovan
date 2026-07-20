@@ -7,13 +7,9 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            // Bitness-agnostic: GetArg64 reads the x86 stack under WOW64 and the IO_STATUS_BLOCK is
-            // pointer-sized-pair (8 bytes on x86, 16 on x64); WriteIoStatusBlock sizes the write itself.
             ulong FileHandle = Instance.WinHelper.GetArg64(0);
             ulong EventHandle = Instance.WinHelper.GetArg64(1);
 
-            // ulong ApcRoutine = Instance.WinHelper.GetArg64(2); // not used for now
-            // ulong ApcContext = Instance.WinHelper.GetArg64(3); // not used for now
             ulong IoStatusBlockPtr = Instance.WinHelper.GetArg64(4);
             uint IoControlCode = (uint)Instance.WinHelper.GetArg64(5, true);
             ulong InputBufferPtr = Instance.WinHelper.GetArg64(6);

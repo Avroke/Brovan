@@ -1232,7 +1232,6 @@ namespace Brovan.Core.Helpers
 
         public void Dispose()
         {
-            // If we're backed by a managed array, nothing to release.
             if (ManagedData != null)
             {
                 ManagedData = null;

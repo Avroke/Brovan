@@ -34,10 +34,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             Instance._emulator.WriteMemory(Descriptor + 0x0, 0UL, 8);
             Instance._emulator.WriteMemory(Descriptor + 0x8, BaseStaticServerData, 8);
 
-            // Zero a reasonable chunk so uninitialized padding doesn't leak random values.
             Instance.WinHelper.WriteZeroMemory(BaseStaticServerData, 0xC00);
 
-            // Shared string heap inside the shared section.
             ulong HeapCursor = Base + 0x2000;
 
             ulong WriteSharedString(string Value)
@@ -69,7 +67,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance._emulator.WriteMemory(UnicodeStringAddress + 0x8, Buffer, 8);
             }
 
-            // Fill BASE_STATIC_SERVER_DATA fields referenced during early init.
             WriteUnicodeStringAbsolute(BaseStaticServerData + 0x000, "C:\\Windows");
             WriteUnicodeStringAbsolute(BaseStaticServerData + 0x010, "C:\\Windows\\System32");
             WriteUnicodeStringAbsolute(BaseStaticServerData + 0x020, "\\Sessions\\1\\BaseNamedObjects");
@@ -85,18 +82,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             WindowsDirectoryBytes[WindowsDirectoryByteCount - 1] = 0;
             Instance._emulator.WriteMemory(ReadOnlyStaticServerData + 0x1E, WindowsDirectoryBytes.Slice(0, WindowsDirectoryByteCount));
 
-            // CSDNumber / RCNumber.
             Instance._emulator.WriteMemory(BaseStaticServerData + 0x036, (ushort)0, 2);
             Instance._emulator.WriteMemory(BaseStaticServerData + 0x038, (ushort)0, 2);
 
-            // DefaultSeparateVDM / IsWowTaskReady.
             Instance._emulator.WriteMemory(BaseStaticServerData + 0x958, (byte)0, 1);
             Instance._emulator.WriteMemory(BaseStaticServerData + 0x959, (byte)1, 1);
 
-            // SysWOW64 directory
             WriteUnicodeStringAbsolute(BaseStaticServerData + 0x960, "C:\\Windows\\SysWOW64");
 
-            // AppContainer and user objects directories
             WriteUnicodeStringAbsolute(BaseStaticServerData + 0xB40, "\\AppContainerNamedObjects");
             WriteUnicodeStringAbsolute(BaseStaticServerData + 0xB58, "\\Sessions\\1\\Windows\\WindowStations");
             Instance._emulator.WriteMemory(BaseStaticServerData + 0x9E8, BaseStaticServerData, 8);
@@ -105,8 +98,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            // Bitness-agnostic: args via GetArg64; BaseAddress (PVOID*) and ViewSize (PSIZE_T) are pointer-sized.
-            // SectionOffset is a LARGE_INTEGER (8 bytes on both). Needed for the WOW64 loader to map DLL views.
             if (Instance._binary.Architecture != BinaryArchitecture.x64 && Instance._binary.Architecture != BinaryArchitecture.x86)
                 return Instance.WinUnimplemented;
 
@@ -138,7 +129,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (IsSharedSection)
             {
-                //Instance.StopReturn = true;
                 ulong Base = Section.BackingAddress;
                 ulong Size = Section.Size;
 
@@ -148,11 +138,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Section.Initialized = true;
                 }
 
-                // These four fields are the x64 PEB CSR/shared-section offsets, written pointer-wide (8).
-                // On WOW64 Instance.PEB is the 32-bit PEB (different offsets, 4-byte pointers) and its CSR
-                // fields are already published at bootstrap by WindowsGuest.SetupCsrReadOnlySharedSection32
-                // (PEB+0x4C/0x54/0x248) — writing the x64 offsets here would land on unrelated 32-bit fields
-                // and clobber 4 bytes past each. Restrict to the x64 PEB.
                 if (Instance._binary.Architecture == BinaryArchitecture.x64)
                 {
                     Instance._emulator.WriteMemory(Instance.PEB + 0x88, Base, 8);

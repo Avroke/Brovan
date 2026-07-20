@@ -268,12 +268,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                         if (CurrentProcess)
                         {
-                            // NT device form of the guest image path (\Device\HarddiskVolume1\...),
-                            // NOT the raw host location. WinModules[0] is the main image (same
-                            // convention ProcessImageFileNameWin32 uses); its Path is the synthetic
-                            // guest DOS path. A sample that normalises this against QueryDosDevice
-                            // ("C:") -> \Device\HarddiskVolume1 (e.g. al-khaser's injected-DLL check)
-                            // needs both to agree, so we route through DosPathToNtDevicePath.
                             string GuestDos = Instance.WinHelper.WinModules.Count > 0 && !string.IsNullOrEmpty(Instance.WinHelper.WinModules[0].Path)
                                 ? Instance.WinHelper.WinModules[0].Path
                                 : Instance._binary.Location;
@@ -349,9 +343,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                             if (Instance.ProcessCookie == 0)
                             {
-                                // Deterministic per emulation: the process cookie feeds the guest CRT's
-                                // stack-cookie derivation, so a host-random value perturbs every downstream
-                                // GS canary run-over-run. Route through the emulator's seeded RNG.
                                 Instance.ProcessCookie = (uint)Instance.SeededRandom.Next(1, int.MaxValue);
                             }
 
@@ -430,11 +421,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                         return QueryProcessImageFileNameWin32(Instance, ProcessHandle, OutBufferPtr, OutBufferLength, SetReturnLength);
                     case PROCESSINFOCLASS.ProcessDefaultHardErrorMode:
                         {
-                            // Default hard-error mode: the process-wide SEM_* flags controlling
-                            // whether critical errors pop a system-error dialog. Real Windows
-                            // reports 0 for a normal process (SEM_FAILCRITICALERRORS not set,
-                            // default critical-error handling). Called by ntdll's process-init
-                            // code path; returning SUCCESS+0 matches, silences the init noise.
                             if (OutBufferLength < 4)
                             {
                                 SetReturnLength(4);
@@ -449,12 +435,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                         }
                     case PROCESSINFOCLASS.ProcessDebugFlags:
                         {
-                            // NoDebugInherit flag (DWORD): 1 = normal (no debugger), 0 = debugger
-                            // is attached with inherit-debug. Al-khaser's ProcessDebugFlags probe
-                            // treats (STATUS_SUCCESS && buffer==0) as detected — so returning
-                            // SUCCESS+1 is both the honest "no debugger" answer and the value
-                            // al-khaser expects to see GOOD. The old NOT_SUPPORTED response
-                            // worked only by accident (probe treated a failed call as GOOD too).
                             if (OutBufferLength < 4)
                             {
                                 SetReturnLength(4);
@@ -686,14 +666,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                             return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
                         }
                     case PROCESSINFOCLASS.ProcessDebugObjectHandle:
-                        // WOW64: the debug-object HANDLE is pointer-sized (4 bytes on x86). A process that is
-                        // not being debugged has no debug object, so ntdll writes a NULL handle and returns
-                        // STATUS_PORT_NOT_SET (mirrors the x64 branch above). al-khaser's ProcessDebugObjectHandle
-                        // probe reads (SUCCESS && handle!=0) as "debugger present"; more importantly
-                        // kernel32!UnhandledExceptionFilter queries this class to decide whether a debugger is
-                        // attached — leaving it unimplemented made UEF believe a debugger was present, skip the
-                        // SetUnhandledExceptionFilter-registered filter, and let the UnhandledExcepFilterTest
-                        // exception go unhandled → process terminated with STATUS_FLOAT_DIVIDE_BY_ZERO.
                         if (OutBufferLength < 4)
                         {
                             SetReturnLength(4);
@@ -715,9 +687,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                             Instance.TriggerEventMessage($"[!] NtQueryInformationProcess (x86): Queried debug object handle.", LogFlags.Syscall);
                         return NTSTATUS.STATUS_PORT_NOT_SET;
                     case PROCESSINFOCLASS.ProcessDebugFlags:
-                        // NoDebugInherit flag (DWORD): 1 = normal (no debugger), 0 = debugger with inherit set.
-                        // al-khaser treats (SUCCESS && value==0) as detected, so SUCCESS+1 is the honest answer
-                        // and matches the x64 branch.
                         if (OutBufferLength < 4)
                         {
                             SetReturnLength(4);
@@ -772,8 +741,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                         }
                     case PROCESSINFOCLASS.ProcessCookie:
                         {
-                            // 4-byte DWORD on both bitnesses. The loader queries it early to seed
-                            // RtlEncodePointer; without it LdrpInitialize fails and raises a hard error.
                             if (OutBufferLength < 4)
                                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
                             if (!Instance.IsRegionMapped(OutBufferPtr, 4))
@@ -787,7 +754,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                         }
                     case PROCESSINFOCLASS.ProcessDefaultHardErrorMode:
                         {
-                            // ULONG on both bitnesses. Default hard-error mode = 1 (SEM enabled).
                             if (OutBufferLength < 4)
                                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
                             if (!Instance.IsRegionMapped(OutBufferPtr, 4))
@@ -799,9 +765,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                         }
                     case PROCESSINFOCLASS.ProcessExecuteFlags:
                         {
-                            // ULONG MEM_EXECUTE_OPTION flags. The loader (LdrpInitializeExecutionOptions)
-                            // queries this to decide NX policy. 0 = no special flags (DEP default), which keeps
-                            // the loader on its normal path.
                             if (OutBufferLength < 4)
                                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
                             if (!Instance.IsRegionMapped(OutBufferPtr, 4))
@@ -813,9 +776,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                         }
                     case PROCESSINFOCLASS.ProcessImageInformation:
                         {
-                            // x86 SECTION_IMAGE_INFORMATION — 0x30 bytes (the three pointer fields
-                            // TransferAddress / MaximumStackSize / CommittedStackSize are 4 wide). The loader
-                            // queries it to validate the main image; a failure here NULL-derefs LdrpInitialize.
                             const uint StructSize = 0x30;
                             if (OutBufferLength < StructSize)
                                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
@@ -850,12 +810,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                         }
                     case (PROCESSINFOCLASS)52:
                         {
-                            // ProcessMitigationPolicy — PROCESS_MITIGATION_POLICY_INFORMATION is
-                            // { PROCESS_MITIGATION_POLICY Policy; <policy union> }, 8 bytes on x86 (the WOW64
-                            // loader / GetProcessMitigationPolicy pass len=0x8 with the policy id in the first
-                            // DWORD). The kernel fills the union with the process's current policy word. Report
-                            // the sandbox's realistic state: DEP permanently enabled (policy 0), every other
-                            // mitigation at its default (0) — mirrors the x64 class-52 handler above.
                             const uint StructSize = 8;
                             if (OutBufferLength < StructSize)
                             {
@@ -883,19 +837,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                         }
 
                     case PROCESSINFOCLASS.ProcessImageFileNameWin32:
-                        // Bitness-aware helper: writes an 8-byte UNICODE_STRING (Buffer @ +4) on x86 and a
-                        // 16-byte one (Buffer @ +8) on x64. Same output shape and semantics as the x64 branch.
                         return QueryProcessImageFileNameWin32(Instance, ProcessHandle, OutBufferPtr, OutBufferLength, SetReturnLength);
 
                     case PROCESSINFOCLASS.ProcessQuotaLimits:
                         {
-                            // QUOTA_LIMITS on x86: 5 * SIZE_T (4) + LARGE_INTEGER (8) = 28 bytes (0x1C).
-                            // Fields: PagedPoolLimit / NonPagedPoolLimit / MinimumWorkingSetSize /
-                            // MaximumWorkingSetSize / PagefileLimit / TimeLimit. A real Win10 desktop
-                            // process reports "unlimited" pool/pagefile limits (SIZE_T max value),
-                            // 200-page min working set, ~1345-page max, TimeLimit=0. al-khaser's
-                            // Generic-Sandbox/VM check looks for anomalies — returning honest
-                            // "unlimited/default" values keeps it on the not-detected path.
                             const uint StructSize = 0x1C;
                             if (OutBufferLength < StructSize)
                             {
@@ -915,7 +860,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                             WriteUInt32(Buffer, 0x08, MinWs);   // MinimumWorkingSetSize
                             WriteUInt32(Buffer, 0x0C, MaxWs);   // MaximumWorkingSetSize
                             WriteUInt32(Buffer, 0x10, SizeMax); // PagefileLimit
-                            // TimeLimit (LARGE_INTEGER at +0x14): left zero — "no CPU time limit".
                             if (!Instance.WriteMemory(OutBufferPtr, Buffer))
                                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
                             SetReturnLength(StructSize);
@@ -924,10 +868,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                     case PROCESSINFOCLASS.ProcessImageFileName:
                         {
-                            // 32-bit UNICODE_STRING is 8 bytes (Length 2, Max 2, Buffer 4). Callers query with
-                            // OutBufferPtr=NULL first to get the required length, so a null buffer + non-zero
-                            // length is legitimate. Mirrors the x64 branch above but uses UNICODE_STRING32 and
-                            // a pointer-sized Buffer.
                             const uint HeaderSize = 8;
                             if (OutBufferLength < HeaderSize)
                             {
@@ -962,10 +902,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                             if (OutBufferPtr == 0 || !Instance.IsRegionMapped(OutBufferPtr, TotalSize))
                                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                            // Convention on WOW64: the caller passes a single flat buffer; the kernel puts the
-                            // UNICODE_STRING at buffer[0..8) with Buffer pointing at buffer+8 where the string
-                            // bytes live. Mirrors what NtQueryInformationProcess/ProcessImageFileNameWin32 does
-                            // for a query-into-user-buffer.
                             ulong StringBufferAddr = OutBufferPtr + HeaderSize;
                             Instance._emulator.WriteMemory(OutBufferPtr + 0, (ushort)PathByteCount, 2);
                             Instance._emulator.WriteMemory(OutBufferPtr + 2, (ushort)PathByteCount, 2);
@@ -981,13 +917,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                     case PROCESSINFOCLASS.ProcessEnclaveInformation:
                         {
-                            // A PROCESS_ENCLAVE_INFORMATION struct is 0x28 bytes on x86 and describes the
-                            // enclave a process runs in (SGX / VBS). A non-enclave process — Brovan's default —
-                            // returns STATUS_NOT_FOUND with the caller's buffer left zero-initialised. combase's
-                            // CoInitializeSecurity probes this class during its VBS-security path and treats
-                            // STATUS_NOT_SUPPORTED as "kernel too old, bail" (leaves an internal singleton NULL
-                            // and later NULL-derefs); STATUS_NOT_FOUND is "kernel understood the query, the
-                            // process just isn't in an enclave" and takes the normal (non-enclave) path.
                             const uint StructSize = 0x28;
                             if (OutBufferLength < StructSize)
                             {
@@ -1021,15 +950,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(FullPath))
                 FullPath = Process.Path ?? string.Empty;
 
-            // UNICODE_STRING header size is pointer-width-dependent: 8 bytes on x86
-            // (Length 2 / MaxLength 2 / Buffer 4 @ +4) vs 16 on x64 (Length 2 / MaxLength 2 /
-            // pad 4 / Buffer 8 @ +8). `UNICODE_STRING64` is a fixed 16-byte blittable struct
-            // (its `ulong Buffer` is 8 bytes on BOTH bitnesses — StructSerializer.GetStructSize
-            // is NOT pointer-aware for a plain `ulong`), so writing it to a WOW64 caller put the
-            // Buffer pointer at +8, which the 32-bit caller reads at +4 (the pad word) as NULL —
-            // then kernelbase!QueryFullProcessImageNameW memcpy's the name from NULL and faults
-            // (the al-khaser parent-process "is explorer.exe" check). Size the header + the OUT
-            // Buffer pointer to the guest bitness.
             bool Is64 = Instance._binary.Architecture == BinaryArchitecture.x64;
             uint StructSize = Is64 ? 16u : 8u;
             ulong BufferFieldOffset = Is64 ? 8ul : 4ul;
@@ -1058,8 +978,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance._emulator.WriteMemory(BufferPtr, PathBytes.Slice(0, PathByteCount)))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            // Zero the whole header first so the x64 pad word (+4..+8, between MaxLength and the
-            // 8-byte Buffer) is clean; then lay down Length / MaxLength / the bitness-sized Buffer.
             Instance.WinHelper.WriteZeroMemory(OutBufferPtr, StructSize);
             Instance._emulator.WriteMemory(OutBufferPtr + 0, Length, 2);
             Instance._emulator.WriteMemory(OutBufferPtr + 2, MaximumLength, 2);

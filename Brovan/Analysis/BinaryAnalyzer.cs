@@ -578,19 +578,16 @@ namespace Brovan.Analysis
 
             ulong TargetAddress = GetAddressFromOperand(Instruction, Binary);
 
-            // Try to resolve the function name
             if (TargetAddress != 0)
             {
                 Dictionary<ulong, string> FunctionMap = Binary.GetFunctionsMap(true, true, true);
                 if (FunctionMap != null)
                 {
-                    // Try with current address
                     if (FunctionMap.TryGetValue(TargetAddress, out string FunctionName))
                     {
                         return FunctionName;
                     }
 
-                    // Try without ImageBase for PE files
                     if (Binary.FileFormat == BinaryFormat.PE)
                     {
                         uint AddressWithoutBase = (uint)(TargetAddress - Binary.PE.ImageBase);

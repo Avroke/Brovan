@@ -7,8 +7,6 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            // Bitness-agnostic (GetArg64 delegates to the x86 stack in WOW64); OUT KeyHandle is pointer-sized and
-            // the optional Class UNICODE_STRING is 8 bytes on x86 / 16 on x64.
             ulong HandlePtr = Instance.WinHelper.GetArg64(0);
             AccessMask DesiredAccess = (AccessMask)Instance.WinHelper.GetArg64(1);
             ulong ObjectAttributesPtr = Instance.WinHelper.GetArg64(2);

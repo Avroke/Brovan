@@ -46,12 +46,7 @@ namespace Brovan.Core.Emulation
         {
             public ulong Address;
             public ulong Size;
-            // Host address backing this (sub-)region, i.e. AllocBase + (Address - the region base at
-            // allocation time). Zero when the region was mapped without a host buffer (uc_mem_map).
             public IntPtr Ptr;
-            // The original NativeMemory.AlignedAlloc base to hand back to AlignedFree. A region created
-            // by splitting a larger mapping shares its parent's AllocBase, so the buffer is only freed
-            // once the last sub-region referencing it is unmapped. Zero mirrors Ptr for buffer-less maps.
             public IntPtr AllocBase;
         }
 
@@ -116,8 +111,6 @@ namespace Brovan.Core.Emulation
         {
             _error = uc_open(arch, mode, out _uc);
 
-            // some heavily  samples can generate an unusually large number of translation blocks and stress Unicorn's TCG code buffer
-            // causing a crash. this is a hack to mitigate it.
             SetTcgBufferSize(uint.MaxValue);
 
             if (_error != UCErrors.UC_ERR_OK)
@@ -247,7 +240,6 @@ namespace Brovan.Core.Emulation
                 ulong rStart = r.Address;
                 ulong rEnd = r.Address + r.Size;
 
-                // No overlap with the unmapped range -> untouched.
                 if (rEnd <= uStart || rStart >= uEnd)
                     continue;
 
@@ -257,7 +249,6 @@ namespace Brovan.Core.Emulation
                 _mappedRegions.RemoveAt(i);
                 _regionIndexDirty = true;
 
-                // Left survivor [rStart, overlapStart): base address unchanged, so Ptr is unchanged.
                 if (overlapStart > rStart)
                 {
                     _mappedRegions.Add(new MappedRegion
@@ -269,7 +260,6 @@ namespace Brovan.Core.Emulation
                     });
                 }
 
-                // Right survivor [overlapEnd, rEnd): Ptr shifts by the same delta as the base address.
                 if (overlapEnd < rEnd)
                 {
                     IntPtr rightPtr = r.Ptr == IntPtr.Zero
@@ -288,9 +278,6 @@ namespace Brovan.Core.Emulation
                     (candidateBases ??= new List<IntPtr>()).Add(r.AllocBase);
             }
 
-            // Defer-free every AllocBase no surviving region references any longer. Deferral (rather than
-            // an immediate AlignedFree) preserves the existing safety contract: the buffer may still be
-            // read/written by the in-flight Unicorn operation until the emulation step returns.
             if (candidateBases != null)
             {
                 foreach (IntPtr allocBase in candidateBases)
@@ -823,8 +810,6 @@ namespace Brovan.Core.Emulation
             if (DisposedCheck())
                 return false;
 
-            // struct uc_x86_mmr { uint16_t selector; uint64_t base; uint32_t limit; uint32_t flags; }
-            // Natural alignment ⇒ base at offset 8, limit at offset 16 (24 bytes total).
             byte[] Mmr = new byte[24];
             BitConverter.GetBytes(Base).CopyTo(Mmr, 8);
             BitConverter.GetBytes(Limit).CopyTo(Mmr, 16);
@@ -1408,6 +1393,13 @@ namespace Brovan.Core.Emulation
             return true;
         }
 
+        public unsafe IntPtr GetHostPointer(ulong address, ulong size)
+        {
+            if (size == 0 || size > int.MaxValue) return IntPtr.Zero;
+            if (!TryGetHostPointer(address, (int)size, out byte* ptr, out long offset)) return IntPtr.Zero;
+            return (IntPtr)(ptr + offset);
+        }
+
         private unsafe bool TryGetHostPointer(ulong address, int accessSize, out byte* ptr, out long offset)
         {
             if (!TryFindMappedRegion(address, out MappedRegion found))
@@ -1559,11 +1551,6 @@ namespace Brovan.Core.Emulation
                         {
                             unsafe
                             {
-                                // Free each distinct AllocBase exactly once. A region produced by a
-                                // partial-unmap split shares its parent's AllocBase while its own Ptr is
-                                // an interior offset (AllocBase + delta); freeing per-region Ptr would be
-                                // an invalid free, and two survivors sharing a base would double-free.
-                                // Mirror the ReconcileUnmap ownership model instead.
                                 var freed = new HashSet<IntPtr>();
                                 foreach (var region in _mappedRegions)
                                 {

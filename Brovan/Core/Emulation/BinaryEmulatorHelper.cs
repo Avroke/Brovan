@@ -676,11 +676,6 @@ namespace Brovan.Core.Emulation
             ["api-ms-win-core-heap-l1-1-0.dll"] = "KERNELBASE.dll",
             ["api-ms-win-core-heap-l1-2-0.dll"] = "KERNELBASE.dll",
             ["api-ms-win-core-heap-l2-1-0.dll"] = "KERNELBASE.dll",
-            // The obsolete Global*/Local* heap functions (GlobalSize/GlobalUnlock/
-            // GlobalLock/GlobalReAlloc/GlobalHandle/GlobalFlags/LocalSize/...) live
-            // ONLY in kernel32 - kernelbase exports just GlobalAlloc/Free + a subset
-            // of Local*. Mapping this contract to kernelbase makes gdi32full/user32
-            // fail to bind GlobalSize/GlobalUnlock (STATUS_ENTRYPOINT_NOT_FOUND).
             ["api-ms-win-core-heap-obsolete-l1-1-0.dll"] = "kernel32.dll",
             ["api-ms-win-core-interlocked-l1-1-1.dll"] = "KERNELBASE.dll",
             ["api-ms-win-core-interlocked-l1-2-0.dll"] = "KERNELBASE.dll",
@@ -1470,15 +1465,6 @@ namespace Brovan.Core.Emulation
             [new ApiSetOverrideKey("api-ms-win-core-processsecurity-l1-1-0.dll", "kernel32.dll")] = "KERNELBASE.dll",
             [new ApiSetOverrideKey("api-ms-win-core-processthreads-l1-1-8.dll", "kernel32.dll")] = "KERNELBASE.dll",
             [new ApiSetOverrideKey("api-ms-win-core-util-l1-1-1.dll", "kernel32.dll")] = "KERNELBASE.dll",
-            // NOTE: there used to be an override mapping the *error-handling* contract
-            // ext-ms-win-kernel32-errorhandling-l1-1-0 -> faultrep.dll. That was wrong:
-            // this contract hosts the error-handling family (RaiseException / SetErrorMode /
-            // UnhandledExceptionFilter, all KERNELBASE exports), NOT the fault-*reporting*
-            // family (ReportFault / BasepReportFault, which live in faultrep). kernelbase
-            // statically imports this contract, so the bogus override dragged faultrep.dll
-            // (and its static import dbghelp.dll) into EVERY emulated process at load time —
-            // an al-khaser "loaded modules contains dbghelp.dll" tell. The contract now
-            // resolves to KERNELBASE (see ApiSetMap), matching real Windows.
         };
 
         private static IReadOnlyDictionary<uint, WinSyscallEntry> CachedSyscallDictionary = null;
@@ -1633,10 +1619,6 @@ namespace Brovan.Core.Emulation
             }
             else
             {
-                // A 32-bit (WOW64) guest must source its system-call numbers from the 32-bit ntdll in the
-                // SysWOW64 view — its Nt* stubs carry the WOW64 SSNs (which happen to match the native x64
-                // numbers on current builds, but reading the correct image keeps this robust across builds
-                // and win32u, whose numbering can differ per bitness). x64 keeps the flat view.
                 string NtdllDir = BinaryArch == BinaryArchitecture.x86
                     ? Path.Combine(GeneralHelper.WindowsLibsPath, "SysWOW64")
                     : GeneralHelper.WindowsLibsPath;
@@ -1664,12 +1646,6 @@ namespace Brovan.Core.Emulation
                 if (Win32u != null)
                     AddSyscallsFromExports(Win32u.ExportFunctions, Win32uData, SupportedFunctionsWin32k, true);
 
-                // user32.dll's DllMain (_UserClientDllInitialize) issues the win32k client-connect through its
-                // OWN internal syscall stub, not win32u's exported NtUserProcessConnect (SSN 0x10e9) — the two
-                // are different entry points, and user32's early-init stub carries SSN 0x2000 on the 19041 WOW64
-                // build. The win32u export scan above therefore never binds 0x2000, so user32's connect returns
-                // STATUS_NOT_SUPPORTED and its DllMain fails with STATUS_DLL_INIT_FAILED. Bind that observed SSN
-                // to the same connect handler so user32 init completes. See Win32k/NtUserProcessConnect.
                 const uint User32ClientConnectSyscallX86 = 0x2000;
                 if (BinaryArch == BinaryArchitecture.x86 && !SyscallDictionary.ContainsKey(User32ClientConnectSyscallX86))
                     RegisterSyscall(User32ClientConnectSyscallX86, "NtUserProcessConnect", true);

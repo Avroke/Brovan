@@ -10,9 +10,6 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            // Bitness-agnostic: args via GetArg64 (delegates to GetArg32 in WOW64). The OUT LinkTarget is a
-            // UNICODE_STRING — 16 bytes with Buffer at +0x8 on x64, 8 bytes with Buffer at +0x4 on x86; the
-            // Length field is at +0 on both. Read MaximumLength / Buffer at the bitness-correct offsets.
             bool Is64 = Instance._binary.Architecture == BinaryArchitecture.x64;
 
             ulong LinkHandle = Instance.WinHelper.GetArg64(0);
@@ -40,7 +37,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Target == null)
                 return NTSTATUS.STATUS_NOT_SUPPORTED;
 
-            // Length@+0 and MaximumLength@+2 pack into the first dword; take MaximumLength as its high 16 bits.
             ushort MaximumLength = (ushort)(Instance.ReadMemoryUInt(LinkTargetPtr) >> 16);
             ulong Buffer = Is64 ? Instance.ReadMemoryULong(LinkTargetPtr + 0x8) : Instance.ReadMemoryUInt(LinkTargetPtr + 0x4);
 

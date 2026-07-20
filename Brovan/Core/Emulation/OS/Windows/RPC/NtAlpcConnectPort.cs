@@ -35,7 +35,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(PortName))
                 return NTSTATUS.STATUS_OBJECT_NAME_INVALID;
 
-            // Find existing port or create a new one with the CSRSS handler.
             WinPort Port = Instance.WinHelper.WinPorts
                 .FirstOrDefault(p => string.Equals(p.Name, PortName,
                     StringComparison.OrdinalIgnoreCase));
@@ -57,8 +56,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance._emulator.WriteMemory(PortHandlePtr, (ulong)Handle.Handle))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            // Ensure the SharedSection is initialised so callers that read
-            // PEB->ReadOnlySharedMemoryBase immediately after connecting succeed.
             foreach (WinSection Sec in Instance.WinHelper.WinSections)
             {
                 if (Sec == null || Sec.Initialized) continue;

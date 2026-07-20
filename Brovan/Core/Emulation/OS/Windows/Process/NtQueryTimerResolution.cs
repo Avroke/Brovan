@@ -11,9 +11,6 @@ namespace Brovan.Core.Emulation.OS.Windows
     /// </summary>
     internal class NtQueryTimerResolution : IWinSyscall
     {
-        // 100-ns units. 156250 = 15.625 ms (the default idle period, matching the
-        // TimeIncrement returned by NtQuerySystemInformation); 5000 = 0.5 ms is the finest
-        // period a caller can request. Idle Windows sits at the coarsest, so Current == Minimum.
         private const uint MinimumResolution = 156250;
         private const uint MaximumResolution = 5000;
         private const uint CurrentResolution = 156250;

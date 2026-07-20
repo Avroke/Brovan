@@ -23,8 +23,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             const uint CONTEXT_CONTROL = 0x00000001;
             const uint CONTEXT_INTEGER = 0x00000002;
 
-            // x86 (WOW64 / native-32): the EXCEPTION_RECORD (0x50) and CONTEXT (0x2CC) use the 32-bit layout
-            // and the CONTEXT is applied through the 32-bit register IDs (64-bit writes are no-ops in MODE_32).
             uint ExceptionCode;
             ulong[] Parameters;
             if (Instance._binary.Architecture != BinaryArchitecture.x64)
@@ -166,14 +164,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             WinEmulatedThread.GetState(CurrentThread).ExceptionInformation = Info;
             CurrentThread.ExitCode = unchecked((int)ExceptionCode);
 
-            // WOW64: this handler runs inside the sysenter INSN hook, so after we return Unicorn advances
-            // EIP by the 2-byte syscall instruction. The exception dispatcher then reads that post-advance
-            // EIP as both the ExceptionAddress and the CONTINUE_EXECUTION resume target — landing 2 bytes
-            // into the caller's next instruction (e.g. kernelbase!RaiseException's `mov ecx,[esp+0x54]`
-            // GS-cookie reload), which corrupts the cookie check and fail-fasts with 0xC0000409. Pre-subtract
-            // the syscall length so the net dispatched EIP is exactly the CONTEXT.Eip the guest asked to
-            // resume at — the same +2 that LoadContext's -2 counteracts for NtContinue's normal resume.
-            // x64's direct-syscall exception path is already correct, so this is scoped to WOW64/native-32.
             if (Instance.BackendMode == Mode.MODE_32)
                 Instance.WriteRegister32(Registers.UC_X86_REG_EIP, (uint)Instance.ReadRegister(Registers.UC_X86_REG_EIP) - 2);
 

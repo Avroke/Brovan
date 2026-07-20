@@ -16,7 +16,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            // PAINTSTRUCT.hdc is the first field — pointer-sized (4 on x86, 8 on x64).
             if (PaintStructPtr != 0 && Instance.IsRegionMapped(PaintStructPtr, (ulong)Instance.GuestPointerSize))
             {
                 ulong Hdc = Instance.ReadPointer(PaintStructPtr);

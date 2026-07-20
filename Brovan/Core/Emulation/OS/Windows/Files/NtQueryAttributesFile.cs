@@ -7,13 +7,10 @@ namespace Brovan.Core.Emulation.OS.Windows
     internal class NtQueryAttributesFile : IWinSyscall
     {
 
-        // FILE_BASIC_INFORMATION is 0x28 on x64 (40 bytes).
         private const uint FileBasicInformationSize = 0x28;
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            // Bitness-agnostic: args via GetArg64 (delegates to GetArg32 in WOW64); FILE_BASIC_INFORMATION is
-            // 0x28 on both bitnesses. OBJECT_ATTRIBUTES has 4-byte fields on x86 / 8-byte on x64 — read branches.
             ulong ObjectAttributesPtr = Instance.WinHelper.GetArg64(0);
             ulong FileInformationPtr = Instance.WinHelper.GetArg64(1);
 

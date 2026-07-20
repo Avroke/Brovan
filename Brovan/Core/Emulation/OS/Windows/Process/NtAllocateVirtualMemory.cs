@@ -92,7 +92,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong Candidate = IsX64 ? 0x0000000100000000UL : 0x00100000UL;
             Candidate = BinaryEmulator.AlignUp(Candidate, AllocationGranularity);
 
-            // Prevent infinite loops on bad states.
             for (int Index = 0; Index < 0x200000; Index++)
             {
                 if (!Instance.IsRegionInUse(Candidate, AlignedSize))
@@ -201,8 +200,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                         return NTSTATUS.STATUS_NO_MEMORY;
                 }
 
-                // MEM_WRITE_WATCH: start recording guest writes to this region so a later
-                // NtGetWriteWatch reports the dirtied pages (opt-in — see WriteWatchManager).
                 if ((AllocationTypeValue & MemWriteWatch) != 0)
                 {
                     Instance.WriteWatch ??= new WriteWatchManager(Instance);

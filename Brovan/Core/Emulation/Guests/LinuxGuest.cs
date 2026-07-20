@@ -1065,7 +1065,6 @@ namespace Brovan.Core.Emulation.Guests
         /// </summary>
         public void RegisterSyscalls()
         {
-            // File syscalls
             RegisterSyscall("read", 0, 3, new Read());
             RegisterSyscall("write", 1, 4, new Write());
             RegisterSyscall("writev", 20, 146, new Writev());
@@ -1091,7 +1090,6 @@ namespace Brovan.Core.Emulation.Guests
             RegisterSyscall("statfs", 137, 99, new Statfs());
             RegisterSyscall("ioctl", 16, 54, new Ioctl());
 
-            // Process syscalls
             RegisterSyscall("exit", 60, 1, new Exit());
             RegisterSyscall("exit_group", 231, 252, new Exit_group());
             RegisterSyscall("mmap", 9, 90, new Mmap());
@@ -1118,7 +1116,6 @@ namespace Brovan.Core.Emulation.Guests
             RegisterSyscall("clone", 56, 120, new Clone());
             RegisterSyscall("prctl", 157, 172, new Prctl());
 
-            // Misc syscalls
             RegisterSyscall("close", 3, 6, new Close());
             RegisterSyscall("uname", 63, 122, new Uname());
             RegisterSyscall("clock_gettime", 228, 265, new Clock_gettime());
@@ -1148,7 +1145,6 @@ namespace Brovan.Core.Emulation.Guests
             RegisterSyscall("timerfd_settime64", -1, 411, new Timerfd_settime(true));
             RegisterSyscall("timerfd_gettime64", -1, 410, new Timerfd_gettime(true));
 
-            // Network syscalls
             RegisterSyscall("socket", 41, 359, new Socket());
             RegisterSyscall("connect", 42, 362, new Connect());
             RegisterSyscall("accept", 43, -1, new Accept());

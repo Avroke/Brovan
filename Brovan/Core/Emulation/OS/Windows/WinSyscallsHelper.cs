@@ -748,10 +748,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return true;
             }
 
-            // DOS-devices object directory, opened by QueryDosDevice / GetLogicalDriveStrings /
-            // GetVolumePathName to resolve drive-letter symbolic links (\??\C: -> \Device\...).
-            // The per-session (\??), global (\GLOBAL??), legacy (\DosDevices) and explicit
-            // session (\Sessions\0\DosDevices) aliases all name the same directory.
             if (Normalized.Equals("\\??", StringComparison.OrdinalIgnoreCase) ||
                 Normalized.Equals("\\GLOBAL??", StringComparison.OrdinalIgnoreCase) ||
                 Normalized.Equals("\\DosDevices", StringComparison.OrdinalIgnoreCase) ||
@@ -767,7 +763,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// <summary>
         /// Resolves a 64-bit registry OBJECT_ATTRIBUTES value to a full NT registry path.
         /// </summary>
-        // Back-compat forwarder for the original x64-only name.
         public bool TryResolveRegistryObjectPath64(ulong ObjectAttributesPtr, NTSTATUS MemoryFailureStatus, NTSTATUS EmptyPathStatus, NTSTATUS InvalidRootStatus, out string KeyPath, out NTSTATUS Status)
             => TryResolveRegistryObjectPath(ObjectAttributesPtr, MemoryFailureStatus, EmptyPathStatus, InvalidRootStatus, out KeyPath, out Status);
 
@@ -812,7 +807,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
             else
             {
-                // x86 OBJECT_ATTRIBUTES is 0x18 bytes: Length@0, RootDirectory@0x04, ObjectName@0x08, ...
                 const uint ObjectAttributes32Size = 0x18;
                 if (!Emulator.IsRegionMapped(ObjectAttributesPtr, ObjectAttributes32Size))
                 {
@@ -950,10 +944,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// <returns></returns>
         public ulong GetArg64(int Index, bool UInt = false)
         {
-            // 32-bit (WOW64) guest: every syscall argument is a 32-bit value on the stack (there is no
-            // register fast-path). Delegating here means the ~130 handlers that read args through GetArg64
-            // without an explicit x86 branch get correct 32-bit arguments for free. Handlers still owe the
-            // caller bitness-correct OUT-pointer WRITES (4 bytes on x86) — that is a per-handler concern.
             if (Emulator._binary.Architecture != BinaryArchitecture.x64)
                 return GetArg32(Index);
 
@@ -970,7 +960,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return UInt ? Emulator._emulator.ReadMemoryUInt(StackArgAddress) : Emulator._emulator.ReadMemoryULong(StackArgAddress);
             }
 
-            // Fallback (no cache)
             if (Index == 0) return Emulator._emulator.ReadRegister(Registers.UC_X86_REG_R10);
             if (Index == 1) return Emulator._emulator.ReadRegister(Registers.UC_X86_REG_RDX);
             if (Index == 2) return Emulator._emulator.ReadRegister(Registers.UC_X86_REG_R8);
@@ -1065,7 +1054,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Milliseconds * 10000;
         }
 
-        // Current Process
         public uint PID = 0;
         public uint PPID = 0;
         public WinHandle STD_OUT;
@@ -1075,7 +1063,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         public User CurrentUser = User.Standard;
         public string CurrentUserSid = "S-1-5-21-1000-1000-1000-1001";
 
-        // Other
         public List<WinHandle> WinHandles = new List<WinHandle>();
         public List<WinProcess> WinProcesses = new List<WinProcess>();
         public List<WinFile> WinFiles = new List<WinFile>();
@@ -1084,6 +1071,19 @@ namespace Brovan.Core.Emulation.OS.Windows
         public List<WinModule> MappedImageViews = new List<WinModule>();
         private readonly Dictionary<string, int> ImageViewCountsByPath = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         internal KuserSharedDataManager KuserSharedData;
+
+        /// <summary>
+        /// Current performance counter, in the units <see cref="KuserSharedDataManager.QpcFrequency"/> claims.
+        /// </summary>
+        internal static ulong QueryPerformanceCounterValue()
+        {
+            long Ticks = System.Diagnostics.Stopwatch.GetTimestamp();
+            long HostFrequency = System.Diagnostics.Stopwatch.Frequency;
+            if (HostFrequency == KuserSharedDataManager.QpcFrequency)
+                return (ulong)Ticks;
+
+            return (ulong)((decimal)Ticks * KuserSharedDataManager.QpcFrequency / HostFrequency);
+        }
         internal HandleManager HandleManager = new HandleManager();
         private static string WinRegPath = Path.Combine(AppContext.BaseDirectory, "WinReg");
         public RegistryManager RegManager = new RegistryManager(WinRegPath);
@@ -1107,7 +1107,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         private ulong _argCacheR9;
         private ulong _argCacheRSP;
 
-        // Batch register array for GetArg64
         private static readonly int[] WinX64SyscallArgRegs = new int[]
         {
             (int)Registers.UC_X86_REG_R10,
@@ -1134,18 +1133,17 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong[] Vals = _winX64SyscallArgValues;
             if (!Emulator._emulator.ReadRegisterBatch(WinX64SyscallArgRegs, Vals, 5))
             {
-                // Fallback: individual reads
                 Vals[0] = Emulator._emulator.ReadRegister(Registers.UC_X86_REG_R10);
                 Vals[1] = Emulator._emulator.ReadRegister(Registers.UC_X86_REG_RDX);
                 Vals[2] = Emulator._emulator.ReadRegister(Registers.UC_X86_REG_R8);
                 Vals[3] = Emulator._emulator.ReadRegister(Registers.UC_X86_REG_R9);
                 Vals[4] = Emulator._emulator.ReadRegister(Registers.UC_X86_REG_RSP);
             }
-            _argCacheR10  = Vals[0];
-            _argCacheRDX  = Vals[1];
-            _argCacheR8   = Vals[2];
-            _argCacheR9   = Vals[3];
-            _argCacheRSP  = Vals[4];
+            _argCacheR10 = Vals[0];
+            _argCacheRDX = Vals[1];
+            _argCacheR8 = Vals[2];
+            _argCacheR9 = Vals[3];
+            _argCacheRSP = Vals[4];
             _argCacheValid = true;
         }
 
@@ -1193,13 +1191,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const ulong UserDesktopInfoSize = 0x48;
         private const ulong UserPrimaryMonitorSize = 0x1000;
         private const ulong Win32ClientInfoX64Base = 0x800;
-        // The 32-bit (WOW64) TEB's Win32ClientInfo base for the loaded SysWOW64 user32 build: user32's
-        // client-side stubs read pDeskInfo at TEB+0x820 and the paired field at TEB+0x828 (confirmed by
-        // disassembling GetShellWindow, RVA 0x42BB0: `mov ecx,[eax+0x820]; mov eax,[eax+0x828]`). With the
-        // slot model (pDeskInfo = slot 2, Desktop = slot 4, 4-byte slots) that pins the base to 0x818
-        // (0x818 + 2*4 = 0x820, 0x818 + 4*4 = 0x828). The old 0x6CC was an earlier-build offset that no
-        // loaded user32 export actually reads, so writes there were inert and GetShellWindow NULL-derefed
-        // pDeskInfo. Nothing in the emulator reads this base — it exists only for the guest user32 to read.
         private const ulong Win32ClientInfoX86Base = 0x818;
         private const int Win32ClientInfoPDeskInfoSlot = 2;
         private const int Win32ClientInfoDesktopSlot = 4;
@@ -1239,11 +1230,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             Shared = new WindowsSharedBuffer();
             this.Emulator = Emulator;
 
-            // Draw all synthetic identity (volume GUID, PIDs, ...) from the emulator's single
-            // deterministic RNG stream (seeded per sample from the guest image), so an analysis is
-            // reproducible and none of these values is a per-run tell. Previously RandomGen was
-            // time-seeded and the volume GUID was Guid.NewGuid(), so two runs of the same sample
-            // produced different guest identities and diverged.
             RandomGen = Emulator.SeededRandom;
 
             byte[] VolumeGuidBytes = new byte[16];
@@ -1283,7 +1269,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 STD_IN = HandleManager.AddHandle(new WinFile(), AccessMask.None);
                 STD_OUT = HandleManager.AddHandle(new WinFile(), AccessMask.FileWriteData);
             }
-            // Generate some processes for the emulated program to work with
             uint WininitPID = GenerateRandomPID();
             uint ServicesPID = GenerateRandomPID();
             uint WinlogonPID = GenerateRandomPID();
@@ -1310,14 +1295,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                 new WinProcess{ PID = GenerateRandomPID(), PPID = ServicesPID, Name = "MpDefenderCoreService.exe", Path = $"C:\\ProgramData\\Microsoft\\Windows Defender\\Platform\\4.18.{MsMpRand.ToString()}\\MpDefenderCoreService.exe", Status = ProtectionStatus.LightAM, RunningUser = User.System, Critical = true, Arch = BinaryArchitecture.x64 },
             };
 
-            // Generate several random svchost.exe processes
             int RandomSvchostNumber = RandomGen.Next(10, 17);
             for (int i = 0; i < RandomSvchostNumber; i++)
             {
                 WinProcesses.Add(new WinProcess { PID = GenerateRandomPID(), PPID = ServicesPID, Name = "svchost.exe", Path = "C:\\Windows\\System32\\svchost.exe", Status = ProtectionStatus.None, RunningUser = GenerateRandomSvchostUser(), Critical = true, Arch = BinaryArchitecture.x64 });
             }
 
-            // Generate several firefox child processes
             int RandomFirefoxNumber = RandomGen.Next(5, 10);
             for (int i = 0; i < RandomFirefoxNumber; i++)
             {
@@ -1332,7 +1315,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                     InitializeProcessTimes(Process, RandomGen.Next(60 * 1000, 2 * 60 * 60 * 1000), true);
             }
 
-            // Prepare Devices
             WinFile hConsoleHandle = new WinFile();
             hConsoleHandle.Device = true;
             hConsoleHandle.Path = "\\Device\\ConDrv";
@@ -1590,11 +1572,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong ExceptionRecordAddress = NewEsp + PointersSize;
             ulong ContextAddress = ExceptionRecordAddress + ExceptionRecordSize;
 
-            // Stack pointers the dispatcher reads.
             Emulator._emulator.WriteMemory(NewEsp + 0, (uint)ExceptionRecordAddress, 4);
             Emulator._emulator.WriteMemory(NewEsp + 4, (uint)ContextAddress, 4);
 
-            // EXCEPTION_RECORD (x86).
             Span<byte> Record = Shared.GetSpan(ExceptionRecordSize);
             Record.Clear();
             WriteUInt32(Record, 0x00, (uint)Exception);      // ExceptionCode
@@ -1608,7 +1588,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 WriteUInt32(Record, 0x14 + (i * 4), (uint)Parameters[i]);
             Emulator.WriteMemory(ExceptionRecordAddress, Record);
 
-            // CONTEXT (x86).
             Span<byte> Context = Shared.GetSpan(ContextSize);
             Context.Clear();
             WriteUInt32(Context, 0x00, CONTEXT_i386 | CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_SEGMENTS | CONTEXT_DEBUG_REGISTERS);
@@ -1689,7 +1668,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 for (int i = 0; i + 8 <= Code.Length; i++)
                 {
-                    // lea rcx, [rsp + imm32]
                     if (Code[i] == 0x48 && Code[i + 1] == 0x8D && Code[i + 2] == 0x8C && Code[i + 3] == 0x24)
                     {
                         uint Disp = BinaryPrimitives.ReadUInt32LittleEndian(Code.Slice(i + 4, 4));
@@ -1697,7 +1675,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                         if (Disp >= 0x400 && Disp <= 0x600 && (Disp % 0x10) == 0)
                             return Disp;
                     }
-                    // add rcx, imm32 (typically have the size according to ntdll analysis in IDA to multiple versions)
                     else if (Code[i] == 0x48 && Code[i + 1] == 0x81 && Code[i + 2] == 0xC1)
                     {
                         uint Disp = BinaryPrimitives.ReadUInt32LittleEndian(Code.Slice(i + 3, 4));
@@ -1709,7 +1686,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
             catch
             {
-                // Ignore and fall back to a default.
             }
 
             return 0;
@@ -1734,7 +1710,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             ulong NewRsp = AlignDown(InitialRsp - AllocationSize, 0x100);
 
-            // Validate that the exception frame stays within the mapped stack.
             EmulatedThread Thread = Emulator.CurrentThread;
             if (Thread != null)
             {
@@ -1751,7 +1726,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (!Emulator.IsRegionMapped(NewRsp, AllocationSize))
             {
-                // Commit stack pages in the current thread's stack reserve for the exception frame.
                 if (Thread != null)
                 {
                     ulong StackLow = Thread.StackAddress;
@@ -1803,7 +1777,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             const uint CONTEXT_SEGMENTS = 0x00000004;
             const uint CONTEXT_DEBUG_REGISTERS = 0x00000010;
 
-            // Only advertise what we actually populate.
             uint Flags = CONTEXT_AMD64 | CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_SEGMENTS | CONTEXT_DEBUG_REGISTERS;
             WriteUInt32(Context, 0x30, Flags);
 
@@ -1844,7 +1817,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Emulator.WriteMemory(ContextAddress, Context);
 
-            // Build EXCEPTION_RECORD.
             Span<byte> Record = Shared.GetSpan(ExceptionRecordSize);
             Record.Clear();
             WriteUInt32(Record, 0x00, (uint)Exception);
@@ -1852,7 +1824,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             WriteUInt64(Record, 0x08, 0UL);  // ExceptionRecord (chained)
             WriteUInt64(Record, 0x10, InitialRip); // ExceptionAddress
 
-            // Generic ExceptionInformation vector (0..15 QWORDs)
             ulong[] Parameters = ExceptionInformation?.Parameters ?? Array.Empty<ulong>();
             int Count = Parameters.Length;
             if (Count > 15)
@@ -1866,7 +1837,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Emulator.WriteMemory(ExceptionRecordAddress, Record);
 
-            // Build MACHINE_FRAME (as the kernel would).
             Span<byte> Frame = Shared.GetSpan(MachineFrameSize);
             Frame.Clear();
             WriteUInt64(Frame, 0x00, InitialRip);
@@ -1877,7 +1847,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Emulator.WriteMemory(MachineFrameAddress, Frame);
 
-            // Enter KiUserExceptionDispatcher exactly like the kernel does: RSP points at CONTEXT, RIP = dispatcher.
             Emulator.WriteRegister(Registers.UC_X86_REG_RSP, ContextAddress);
             Emulator.WriteRegister(Registers.UC_X86_REG_RIP, DispatcherAddress);
             EmulatedThread EmuThread = Emulator.CurrentThread;
@@ -2171,11 +2140,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Value.StartsWith("\\??\\", StringComparison.OrdinalIgnoreCase))
                 Value = Value.Substring(4);
 
-            // The emulated guest is single-volume: C: is the only drive and it resolves to
-            // HarddiskVolume1 everywhere in the tree (NtOpenSymbolicLinkObject, NtCreateFile,
-            // the storage-device model, ...). Any other drive letter therefore maps to the same
-            // volume — correct for the single-volume model, and unreachable today since no other
-            // drive exists. Revisit if a multi-volume guest is ever modelled.
             if (Value.Length >= 2 && char.IsLetter(Value[0]) && Value[1] == ':')
                 return "\\Device\\HarddiskVolume1" + Value.Substring(2);
 
@@ -2450,6 +2414,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         public void AddModule(WinModule Module, bool TriggerMessage)
         {
             bool Finished = false;
+
+            LdrTracker?.NotifyImageMapped();
+
             try
             {
                 Finished = true;
@@ -3401,11 +3368,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// <summary>The fixed default virtual-display resolution when none is configured.</summary>
         public static readonly (int Width, int Height) DefaultScreenResolution = (1920, 1080);
 
-        // Effective guest screen resolution — the single SSOT read by every screen-space surface
-        // (primary-monitor MONITORINFO here, GetCursorPos bounds in NtUserCallTwoParam,
-        // GetDeviceCaps HORZRES) so they can never disagree. Sourced from the per-emulation
-        // config (BinaryEmulatorSettings.ScreenResolution, set via the emulator constructor /
-        // the console --screen argument); null there means the fixed default.
         public (int Width, int Height) ScreenResolution()
         {
             return Emulator.Settings.ScreenResolution ?? DefaultScreenResolution;
@@ -4437,15 +4399,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             AddSyntheticRegistryKeyTrusted("\\Registry\\User\\.DEFAULT", KeyCache, DefaultHive);
             AddSyntheticRegistryKeyTrusted(UserRoot + "\\" + CurrentUserSid, KeyCache, DefaultHive);
             AddSyntheticRegistryKeyTrusted(ExplorerRoot + "\\SessionInfo\\0", KeyCache, DefaultHive);
-            // HKCU\Software\Classes\Local Settings — exists on every fresh Windows install; combase's
-            // CoInitializeSecurity singleton-init helper (sub_10B0C8C9 -> sub_B) opens this key via
-            // RegOpenCurrentUser + RegOpenKeyExW and stores the returned HKEY in its class-factory-table
-            // singleton (combase RVA 0x2420D8). Without this key the RegOpenKeyExW call returns
-            // NAME_NOT_FOUND, the OUT PHKEY stays NULL, sub_10B119C0 short-circuits past the interlocked-
-            // init at sub_10AA0528, and a later __thiscall through the still-NULL singleton NULL-derefs
-            // during CoInitializeSecurity — al-khaser_x86's Generic-Sandbox/VM-Detection frontier before
-            // this fix. Adding the key is a real realism improvement (matches every real Win10 system),
-            // not a per-sample workaround.
             AddSyntheticRegistryKeyTrusted(UserRoot + "\\Software\\Classes\\Local Settings", KeyCache, DefaultHive);
             SetSyntheticRegistryStringTrusted(UserRoot + "\\Volatile Environment", "USERPROFILE", 2, UserProfile, KeyCache, DefaultHive);
             SetSyntheticRegistryStringTrusted(UserRoot + "\\Volatile Environment", "HOMEDRIVE", 1, "C:", KeyCache, DefaultHive);
@@ -5254,9 +5207,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             foreach (WinRegistryNotification Notification in Completed)
             {
-                // IO_STATUS_BLOCK is guest-bitness-sized (8 bytes on x86 / 16 on x64). Requiring the x64 size
-                // would skip an otherwise-valid 8-byte IOSB that sits within 8 bytes of a page end on WOW64,
-                // leaving the guest's NtNotifyChangeKey wait forever incomplete.
                 if (Notification.IoStatusBlock != 0 && Emulator.IsRegionMapped(Notification.IoStatusBlock, (ulong)(Emulator.GuestPointerSize * 2)))
                     WriteIoStatusBlock(Emulator, Notification.IoStatusBlock, NTSTATUS.STATUS_SUCCESS, 0);
 

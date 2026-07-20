@@ -573,8 +573,6 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         private static byte[] BuildEventLogOpenStub(BinaryEmulator Instance)
         {
             byte[] Stub = new byte[0x18];
-            // Deterministic RPC context handle: derive from the emulator's seeded RNG so the
-            // handle the guest receives is reproducible run-over-run (Guid.NewGuid() leaked host entropy).
             byte[] ContextIdBytes = new byte[16];
             Instance.SeededRandom.NextBytes(ContextIdBytes);
             Guid ContextId = new Guid(ContextIdBytes);

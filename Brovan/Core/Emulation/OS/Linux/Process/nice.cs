@@ -17,7 +17,6 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
             int OldNice = CurrentThread.NiceValue;
             int NewNice = OldNice + inc;
 
-            // Linux nice values are clamped to the range [-20, 19].
             if (NewNice < -20)
                 NewNice = -20;
             else if (NewNice > 19)

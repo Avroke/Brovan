@@ -19,8 +19,6 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            // Args intentionally not decoded — the answer is the same for every class from
-            // an unprivileged user token; touching them would only add TOCTOU noise.
             return NTSTATUS.STATUS_PRIVILEGE_NOT_HELD;
         }
     }

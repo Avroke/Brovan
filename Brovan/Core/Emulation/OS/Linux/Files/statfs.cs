@@ -1,13 +1,11 @@
-﻿using System.Buffers.Binary;
+using System.Buffers.Binary;
 
 namespace Brovan.Core.Emulation.OS.Linux.Files
 {
     internal class Statfs : ILinuxSyscall
     {
-        // EXT4 superblock magic.
         private const long EXT4_MAGIC = 0xEF53;
 
-        // 4 KiB blocks — standard ext4 default.
         private const long BLOCK_SIZE = 4096;
 
         private const long TOTAL_BLOCKS = 0x1000000L;
@@ -15,11 +13,8 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
         private const long AVAIL_BLOCKS = 0x0800000L;
         private const long TOTAL_INODES = 0x0400000L;
         private const long FREE_INODES = 0x0200000L;
-        // Maximum filename length on ext4.
         private const long NAME_MAX = 255;
-        // Fragment size equals block size on ext4.
         private const long FRAG_SIZE = BLOCK_SIZE;
-        // ST_NOSUID flag.
         private const long FLAGS = 2L;
 
         private const int SIZE_64 = 120;

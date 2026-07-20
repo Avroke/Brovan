@@ -92,12 +92,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             const uint ProcessTlsReplaceVector = 1;
             const uint ThreadTlsInformationFlagsAssigned = 2;
 
-            // PROCESS_TLS_INFORMATION is a four-ULONG header (0x10, identical on both bitnesses) followed by a
-            // THREAD_TLS_INFORMATION[] whose element width tracks the guest pointer size. x64:
-            // Flags(4)+pad(4)+TlsData(8)+ThreadId(8) = 0x18; WOW64 x86: Flags(4)+TlsData(4)+ThreadId(4) = 0xC —
-            // ntdll's LdrpQueueDeferredTlsData pushes ProcessInformationLength = 0x10 + count*0xC for a 32-bit
-            // process, so the previous hardcoded x64 0x18 element size rejected every WOW64 call with
-            // STATUS_INFO_LENGTH_MISMATCH (len 0x1C < 0x10+0x18). The TLS vector slots are likewise pointer-sized.
             int Ptr = Instance.GuestPointerSize;
             const uint HeaderSize = 0x10;
             uint EntryTlsDataOffset = (uint)Ptr;                        // 4-byte Flags, then the pointer (aligned)
@@ -258,7 +252,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Instance.WritePointer(EntryAddress + ThreadIdOffset, ThreadId);
         }
 
-        // TEB.ThreadLocalStoragePointer: 0x2C in the 32-bit (WOW64) TEB, 0x58 in the 64-bit TEB.
         private static ulong TebThreadLocalStoragePointerOffset(BinaryEmulator Instance) => Instance.GuestPointerSize == 4 ? 0x2CUL : 0x58UL;
 
         private ulong GetThreadTlsVector(BinaryEmulator Instance, EmulatedThread Thread)

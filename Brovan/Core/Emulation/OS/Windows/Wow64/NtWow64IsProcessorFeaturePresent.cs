@@ -18,8 +18,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             uint Feature = (uint)Instance.WinHelper.GetArg64(0);
 
-            // Read ProcessorFeatures[Feature] (one BOOLEAN byte) from the shared-data page. Indices past the
-            // array report absent, matching a real KUSER read. ReadMemoryUInt's low byte is the feature byte.
             bool Present = Feature < ProcessorFeatureMax
                 && (Instance.ReadMemoryUInt(Instance.KUSER_SHARED_DATA + ProcessorFeaturesOffset + Feature) & 0xFF) != 0;
 

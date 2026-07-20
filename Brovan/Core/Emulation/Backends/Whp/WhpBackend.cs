@@ -1,17 +1,15 @@
 using System;
-using System.Collections.Generic;
-using System.Runtime.InteropServices;
 using System.Text;
 
 namespace Brovan.Core.Emulation
 {
-    public sealed class KvmBackend : IEmulationBackend
+    public sealed class WhpBackend : IEmulationBackend
     {
-        public Kvm Inner { get; }
+        public Whp Inner { get; }
 
-        public KvmBackend(Arch arch, Mode mode)
+        public WhpBackend(Arch arch, Mode mode)
         {
-            Inner = new Kvm(arch, mode);
+            Inner = new Whp(arch, mode);
             Arch = arch;
             Mode = mode;
         }
@@ -31,9 +29,6 @@ namespace Brovan.Core.Emulation
 
         public bool SetMemoryProtection(ulong address, ulong size, MemoryProtection protection)
             => Inner.SetMemoryProtection(address, size, protection);
-
-        public bool MapMmio(ulong address, ulong size, MmioReadCallback read, MmioWriteCallback write)
-            => Inner.MapMmio(address, size, read, write);
 
         public bool WriteMemory(ulong address, byte[] value, uint length = 0)
             => Inner.WriteMemory(address, value, length);
@@ -74,8 +69,6 @@ namespace Brovan.Core.Emulation
         public string ReadMemoryString(ulong address, int length, Encoding encoding)
             => Inner.ReadMemoryString(address, length, encoding);
 
-        public bool WriteGdtr(ulong Base, uint Limit)
-            => Inner.WriteGdtr(Base, Limit);
         public bool WriteRegister(Registers register, ulong value)
             => Inner.WriteRegister(register, value);
         public bool WriteRegister(int register, ulong value)
@@ -90,6 +83,8 @@ namespace Brovan.Core.Emulation
             => Inner.WriteRegisterByte(register, value);
         public bool WriteRegisterByte(Registers register, byte[] value)
             => Inner.WriteRegisterByte(register, value);
+        public bool WriteGdtr(ulong Base, uint Limit)
+            => Inner.WriteGdtr(Base, Limit);
 
         public ulong ReadRegister(Registers register)
             => Inner.ReadRegister(register);
@@ -143,23 +138,23 @@ namespace Brovan.Core.Emulation
             Inner?.Dispose();
         }
 
-        private static BackendError TranslateError(KvmErrors e) => e switch
+        private static BackendError TranslateError(WhpErrors e) => e switch
         {
-            KvmErrors.Ok => BackendError.None,
-            KvmErrors.NoMemory => BackendError.OutOfMemory,
-            KvmErrors.InvalidArchitecture => BackendError.InvalidArchitecture,
-            KvmErrors.InvalidMode => BackendError.InvalidMode,
-            KvmErrors.InvalidArgument => BackendError.InvalidArgument,
-            KvmErrors.MemoryReadUnmapped => BackendError.MemoryReadUnmapped,
-            KvmErrors.MemoryWriteUnmapped => BackendError.MemoryWriteUnmapped,
-            KvmErrors.MemoryFetchUnmapped => BackendError.MemoryFetchUnmapped,
-            KvmErrors.MemoryReadProtected => BackendError.MemoryReadProtected,
-            KvmErrors.MemoryWriteProtected => BackendError.MemoryWriteProtected,
-            KvmErrors.MemoryFetchProtected => BackendError.MemoryFetchProtected,
-            KvmErrors.InvalidInstruction => BackendError.InvalidInstruction,
-            KvmErrors.HookError => BackendError.HookError,
-            KvmErrors.ResourceError => BackendError.ResourceError,
-            KvmErrors.Exception => BackendError.Exception,
+            WhpErrors.Ok => BackendError.None,
+            WhpErrors.NoMemory => BackendError.OutOfMemory,
+            WhpErrors.InvalidArchitecture => BackendError.InvalidArchitecture,
+            WhpErrors.InvalidMode => BackendError.InvalidMode,
+            WhpErrors.InvalidArgument => BackendError.InvalidArgument,
+            WhpErrors.MemoryReadUnmapped => BackendError.MemoryReadUnmapped,
+            WhpErrors.MemoryWriteUnmapped => BackendError.MemoryWriteUnmapped,
+            WhpErrors.MemoryFetchUnmapped => BackendError.MemoryFetchUnmapped,
+            WhpErrors.MemoryReadProtected => BackendError.MemoryReadProtected,
+            WhpErrors.MemoryWriteProtected => BackendError.MemoryWriteProtected,
+            WhpErrors.MemoryFetchProtected => BackendError.MemoryFetchProtected,
+            WhpErrors.InvalidInstruction => BackendError.InvalidInstruction,
+            WhpErrors.HookError => BackendError.HookError,
+            WhpErrors.ResourceError => BackendError.ResourceError,
+            WhpErrors.Exception => BackendError.Exception,
             _ => BackendError.InternalError,
         };
     }

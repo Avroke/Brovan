@@ -1,4 +1,4 @@
-﻿using System.Buffers.Binary;
+using System.Buffers.Binary;
 using Brovan.Core.Emulation.Guests;
 
 namespace Brovan.Core.Emulation.OS.Linux.Process
@@ -14,10 +14,8 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
         private const ulong PR_GET_TID_ADDRESS = 40;
         private const ulong PR_GET_AUXV = 0x41555856;
 
-        // TASK_COMM_LEN — length of the buffer passed to PR_GET_NAME.
         private const int TASK_COMM_LEN = 16;
 
-        // Default timer slack value in nanoseconds (50 microseconds, same as kernel default).
         private const long DEFAULT_TIMERSLACK_NS = 50000L;
 
         public void Handle(BinaryEmulator Instance, LinuxSyscallsHelper Helper, LinuxSyscallContext Context)
@@ -29,7 +27,6 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
             switch (option)
             {
                 case PR_GET_DUMPABLE:
-                    // 1 = SUID_DUMP_USER
                     Helper.SetReturnValue(Instance, Context, 1L);
                     return;
 
@@ -63,12 +60,10 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
                     return;
 
                 case PR_CAPBSET_READ:
-                    // pretend every capability is in the bounding set
                     Helper.SetReturnValue(Instance, Context, 1L);
                     return;
 
                 case PR_GET_CHILD_SUBREAPER:
-                    // write 0 (not a subreaper) to the caller's int pointer
                     if (arg2 == 0 || !Instance.IsRegionMapped(arg2, 4))
                     {
                         Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
@@ -86,7 +81,6 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
 
                 case PR_GET_TID_ADDRESS:
                     {
-                        // return the clear_child_tid address tracked by set_tid_address()/clone()
                         int PointerSize = Context.Abi == SyscallAbi.X64 ? 8 : 4;
                         if (arg2 == 0 || !Instance.IsRegionMapped(arg2, (ulong)PointerSize))
                         {
@@ -107,7 +101,6 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
                     }
 
                 case PR_GET_TSC:
-                    // PR_TSC_ENABLE = 1
                     if (arg2 == 0 || !Instance.IsRegionMapped(arg2, 4))
                     {
                         Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);

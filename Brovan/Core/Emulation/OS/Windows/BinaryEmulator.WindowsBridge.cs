@@ -109,7 +109,6 @@ namespace Brovan.Core.Emulation
         public string LastFunc = string.Empty;
         public ulong Instruction = 0;
 
-        // Direct-mapped memo for the per-instruction IRETQ (48 CF) probe. See InstructionHandler.
         private const int IretqMemoMask = (1 << 14) - 1;
         private readonly ulong[] _iretqMemoAddr = CreateIretqMemo();
         private readonly bool[] _iretqMemoResult = new bool[IretqMemoMask + 1];
@@ -1589,9 +1588,6 @@ namespace Brovan.Core.Emulation
             MemoryProtection NewProt = WinHelper.ConvertWinProtectToInternal(Protect);
             SpecialProtections Special = (Protect & 0x100) != 0 ? SpecialProtections.Guard : SpecialProtections.None;
 
-            // Reclaim any pages the fault-driven rescue path had transparently re-mapped so the
-            // upcoming MapMemory doesn't hit UC_ERR_MAP; then re-map cleanly. See DecommittedPages
-            // field doc for the surrounding design.
             ReclaimRescuedPages(BaseAddress, Size);
 
             if (!_emulator.MapMemory(BaseAddress, Size, GetGuardedHostProtection(NewProt, Special)))
@@ -1727,8 +1723,6 @@ namespace Brovan.Core.Emulation
 
                 if (MidSize > 0)
                 {
-                    // Capture the live bytes BEFORE unmapping so a subsequent rescue can restore
-                    // the real content instead of zeroing the page (see DecommittedContent doc).
                     Dictionary<ulong, byte[]> SavedPages = null;
                     if (Region.IsCommitted && IsRegionMapped(OverlapStart, 1))
                     {
@@ -1744,12 +1738,6 @@ namespace Brovan.Core.Emulation
                             return false;
                     }
 
-                    // Track the mid-piece as decommitted-but-rescuable: on a subsequent read
-                    // fault (see TryRescueDecommittedRead) the pages come back with their
-                    // original protection AND content so the guest read succeeds. See the field
-                    // docs above for the rationale; this closes the walker/heap-decommit race
-                    // without diverging from Windows on any observable path (VirtualQuery still
-                    // says MEM_RESERVE for these ranges).
                     if (Region.IsCommitted)
                     {
                         MemoryProtection PrevProt = Region.Protections != MemoryProtection.None
@@ -1757,8 +1745,6 @@ namespace Brovan.Core.Emulation
                             : Region.InitialProtections;
                         for (ulong PageAddr = OverlapStart; PageAddr < OverlapEnd; PageAddr += 0x1000)
                         {
-                            // Just unmapped above -> back to rescue-pending; a page can't be both
-                            // rescued (mapped) and decommitted (unmapped) at once.
                             RescuedPages.Remove(PageAddr);
                             DecommittedPages.Add(PageAddr);
                             DecommittedProtection[PageAddr] = PrevProt;
@@ -1845,10 +1831,6 @@ namespace Brovan.Core.Emulation
             ulong Start = BaseAddress & ~0xFFFUL;
             ulong End = AlignUp(BaseAddress + Size, 0x1000);
 
-            // RescuedPages are LIVE backend mappings Brovan's region map no longer tracks; they
-            // MUST be unmapped or the caller's fresh MapMemory at the reused base hits UC_ERR_MAP.
-            // DecommittedPages are already unmapped (rescue-pending) — unmapping again is a harmless
-            // no-op, but clearing them keeps the rescue set honest for the reused range.
             System.Collections.Generic.List<ulong> ToRemove = null;
             foreach (ulong Page in RescuedPages)
             {
@@ -1877,8 +1859,6 @@ namespace Brovan.Core.Emulation
 
             foreach (ulong Page in ToRemove)
             {
-                // Rescue-pending (already unmapped): drop the tracking so the reused range starts
-                // clean. Unmap defensively in case a backend mapping lingers; ignore failure.
                 _emulator.UnmapMemory(Page, 0x1000);
                 DecommittedPages.Remove(Page);
                 DecommittedProtection.Remove(Page);
@@ -1906,21 +1886,12 @@ namespace Brovan.Core.Emulation
             if (!_emulator.MapMemory(Page, 0x1000, Prot))
                 return false;
 
-            // Restore the bytes captured at decommit time so the guest reads its real data, not
-            // zero (see DecommittedContent doc). The backend write bypasses guest protection, so a
-            // read-only rescued page still gets its content back. If nothing was captured the page
-            // stays zero-filled (matches the prior behaviour for genuinely-fresh backing).
             if (DecommittedContent.TryGetValue(Page, out byte[] Content))
             {
                 WriteMemory(Page, Content);
                 DecommittedContent.Remove(Page);
             }
 
-            // The page is now a live backend mapping. Move it out of the rescue-eligible set
-            // and into RescuedPages so it is never re-mapped again (that would UC_ERR_MAP) but
-            // is still unmapped by ReclaimRescuedPages when its address is reused. Dropping it
-            // from all tracking here orphaned the mapping and later broke commits with
-            // UC_ERR_MAP -> STATUS_NO_MEMORY.
             DecommittedPages.Remove(Page);
             DecommittedProtection.Remove(Page);
             RescuedPages.Add(Page);
@@ -1943,8 +1914,6 @@ namespace Brovan.Core.Emulation
 
             ulong End = Regions.Max(R => R.BaseAddress + R.Size);
 
-            // Drop rescued-page tracking for the whole reservation before we unmap; releases
-            // "truly free" the address range and any subsequent access there should fault.
             ReclaimRescuedPages(Start, End - Start);
 
             foreach (var Region in Regions)
@@ -2175,16 +2144,6 @@ namespace Brovan.Core.Emulation
         private void InstructionHandler(ulong Address, uint Size)
         {
             Instruction++;
-            // 64-bit IRETQ (48 CF) is emulated here because Unicorn's own IRETQ diverges
-            // in the flat long-mode setup (proven: with this path disabled al-khaser bails
-            // 14M instructions early). Only a 2-byte instruction can be `48 CF`, and it is
-            // rare, yet this fires on every 2-byte instruction — a uc_mem_read per hit was a
-            // measurable ~11% of run time. Memoize the probe in a direct-mapped table keyed
-            // by code address: mapped code bytes are immutable for the life of a mapping, so
-            // a hit reuses the prior result and a miss (slot address mismatch, incl. eviction
-            // by collision) always re-reads and stays correct. The only unmodelled case is
-            // self-modifying code that rewrites an already-cached address into or out of the
-            // `48 CF` pattern, which no real code produces.
             if (Size == 2)
             {
                 int Slot = (int)((Address ^ (Address >> 14)) & (IretqMemoMask));

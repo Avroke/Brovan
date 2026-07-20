@@ -13,7 +13,6 @@ namespace Brovan.Core.Emulation.OS.Linux.Misc
             GRND_RANDOM = 0x0002,
         }
 
-        // linux man page documents a 512-byte maximum per call when using the random source
         private const ulong GRND_RANDOM_MAX = 512;
 
         private const ulong GRND_URANDOM_MAX = 0x01FFFFFF;

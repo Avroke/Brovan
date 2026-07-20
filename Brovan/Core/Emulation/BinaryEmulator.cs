@@ -381,9 +381,6 @@ namespace Brovan.Core.Emulation
         }
 
         private const int GprBatchCount = 18;
-        // 32-bit (MODE_32) GPR batch: the 8 GPRs + EIP + EFLAGS. Unicorn treats the 64-bit register IDs
-        // (RAX/RSP/RIP/…) as no-ops in MODE_32 — writing them silently does nothing and reading returns 0 —
-        // so a 32-bit thread context must be transferred through the 32-bit IDs (EAX/ESP/EIP/…) instead.
         private const int GprBatchCount32 = 10;
         private int[] _gprBatchRegs;
         private int[] _gprBatchRegs32;
@@ -429,13 +426,6 @@ namespace Brovan.Core.Emulation
         private const ulong TscCyclesPerMillisecond = 3_000_000UL;
         private const ulong RdtscReadCycles = 60;
         private const ulong RdtscpReadCycles = 90;
-        // Deterministic guest system-time base. Was DateTime.UtcNow, which broke the
-        // "deterministic guest system time" contract below (GetEmulatedSystemTimeFileTimeUtc):
-        // the absolute base drifted run-to-run, so two runs of the same sample diverged and
-        // the reported "now" was a per-run value. Default is a fixed plausible timestamp;
-        // SeedEmulatedClockBase re-seeds it deterministically per sample so different samples
-        // still get different (but reproducible) clocks. The tick DELTA already advances purely
-        // by instruction count, so only the base needed pinning.
         private long EmulatedSystemTimeBaseFileTimeUtc = new DateTime(2024, 1, 1, 9, 30, 0, DateTimeKind.Utc).ToFileTimeUtc();
 
         /// <summary>
@@ -450,10 +440,23 @@ namespace Brovan.Core.Emulation
             EmulatedSystemTimeBaseFileTimeUtc = WindowStart + (long)(Seed % (ulong)WindowSpan);
         }
 
+        private readonly System.Diagnostics.Stopwatch _wallClock = System.Diagnostics.Stopwatch.StartNew();
+        private long _emulatedTimeSkewMilliseconds;
+
         /// <summary>
-        /// Current deterministic guest tick count in milliseconds.
+        /// Current guest tick count in milliseconds.
         /// </summary>
-        internal long EmulatedTickCount64 { get; private set; }
+        internal long EmulatedTickCount64
+        {
+            get
+            {
+                long elapsed = _wallClock.ElapsedMilliseconds;
+                long skew = Volatile.Read(ref _emulatedTimeSkewMilliseconds);
+                if (elapsed > long.MaxValue - skew)
+                    return long.MaxValue;
+                return elapsed + skew;
+            }
+        }
 
         /// <summary>
         /// Returns the current deterministic guest system time as a Windows file time.
@@ -469,7 +472,6 @@ namespace Brovan.Core.Emulation
         /// <summary>Frequency reported by QueryPerformanceFrequency (10 MHz), matching QueryPerformanceCounter below.</summary>
         internal const ulong EmulatedQpcFrequency = 10_000_000UL;
 
-        // TSC advances at TscCyclesPerMillisecond (3 GHz) per emulated ms; QPC runs at 10 MHz.
         private const ulong TscCyclesPerQpcTick = TscCyclesPerMillisecond / (EmulatedQpcFrequency / 1000); // 300
 
         /// <summary>
@@ -492,8 +494,6 @@ namespace Brovan.Core.Emulation
         /// <summary>Single deterministic RNG stream seeded from <see cref="DeterministicSeed"/>. Shared by all non-crypto synthetic-value sites so their draws are reproducible.</summary>
         internal Random SeededRandom { get; private set; } = new Random(0);
 
-        // FNV-1a over the guest image bytes (path-independent: the same sample seeds identically
-        // wherever it lives), size folded in; falls back to the image path, then a fixed constant.
         private static ulong ComputeDeterministicSeed(BinaryFile Binary)
         {
             const ulong FnvOffset = 1469598103934665603UL;
@@ -547,26 +547,21 @@ namespace Brovan.Core.Emulation
         }
 
         /// <summary>
-        /// Advances deterministic guest time without depending on host execution speed.
+        /// Advances guest time for a wait that was not served in real time.
         /// </summary>
         internal void AdvanceEmulatedTimeMilliseconds(long Milliseconds, bool AdvanceTimestampCounter = false)
         {
             if (Milliseconds <= 0)
                 return;
 
-            long AppliedMilliseconds;
-            if (EmulatedTickCount64 > long.MaxValue - Milliseconds)
-            {
-                AppliedMilliseconds = long.MaxValue - EmulatedTickCount64;
-                EmulatedTickCount64 = long.MaxValue;
-            }
-            else
-            {
-                AppliedMilliseconds = Milliseconds;
-                EmulatedTickCount64 += Milliseconds;
-            }
+            long Skew = Volatile.Read(ref _emulatedTimeSkewMilliseconds);
+            long AppliedMilliseconds = Skew > long.MaxValue - Milliseconds ? long.MaxValue - Skew : Milliseconds;
+            if (AppliedMilliseconds <= 0)
+                return;
 
-            if (AdvanceTimestampCounter && AppliedMilliseconds > 0)
+            Interlocked.Add(ref _emulatedTimeSkewMilliseconds, AppliedMilliseconds);
+
+            if (AdvanceTimestampCounter)
             {
                 ulong Ticks = (ulong)AppliedMilliseconds;
                 if (Ticks > (ulong.MaxValue - _timestampCounter) / TscCyclesPerMillisecond)
@@ -1419,6 +1414,11 @@ namespace Brovan.Core.Emulation
             return TryFindOverlappingMemoryRegion(Address, Size, out _);
         }
 
+        public IntPtr GetHostPointer(ulong Address, ulong Size)
+        {
+            return _emulator.GetHostPointer(Address, Size);
+        }
+
         /// <summary>
         /// Checks if the specified memory region is freed.
         /// </summary>
@@ -2147,7 +2147,6 @@ namespace Brovan.Core.Emulation
 
             Priority = ClampInt(Priority, 0, 31);
 
-            // Level 0 is highest priority, Level (Levels - 1) is lowest priority.
             int Level = ((31 - Priority) * Levels) / 32;
 
             if (Level < 0) return 0;
@@ -2155,24 +2154,13 @@ namespace Brovan.Core.Emulation
             return Level;
         }
 
-        // Tight guest spin-waits need a near-immediate handoff to another runnable thread.
-        // Four instructions covers common load/compare/branch loops without shrinking normal thread quanta.
         private const uint SpinWaitQuantumInstructions = 4;
         private const int SpinWaitScoreThreshold = 1;
         private const int SpinWaitScoreMaximum = 4;
         private const ulong SpinWaitRipWindow = 0x80;
 
-        // Livelock watchdog (frontier F1). A thread that completes a *full* quantum yet
-        // ends within this window of where it started ran a tight userland loop without
-        // yielding — real forward progress either moves the RIP far across a full quantum
-        // or issues a syscall (which truncates the slice). Kept tighter than
-        // SpinWaitRipWindow so only genuinely-pinned spins qualify.
         private const ulong LivelockSpinRipWindow = 0x40;
 
-        // Consecutive frozen-spin slices before the watchdog runs a safe recovery pass
-        // (wakeup re-scan + virtual-time advance) and emits one diagnostic. A false
-        // positive here (a bounded tight loop) is harmless: the recovery cannot perturb
-        // a thread that needs no peer to progress. Only the opt-in escape terminates.
         private const long LivelockNudgeSlices = 256;
 
         private static void BuildMlfqQuanta(uint BaseQuantumInstructions, int Levels, uint[] Quanta)
@@ -2458,10 +2446,6 @@ namespace Brovan.Core.Emulation
             return false;
         }
 
-        // True when a thread other than <paramref name="Except"/> is parked in a wait.
-        // Combined with "the current thread is the only runnable one and spinning", a
-        // blocked peer is the livelock signature (a lock holder that never wakes) as
-        // opposed to a single-threaded program legitimately busy in a hot loop.
         private bool HasBlockedWaitingThread(EmulatedThread Except)
         {
             for (int i = 0; i < ThreadOrder.Count; i++)
@@ -2477,11 +2461,6 @@ namespace Brovan.Core.Emulation
             return false;
         }
 
-        // Emits a single, actionable diagnostic when the livelock watchdog trips: the
-        // spinning thread (module!offset if resolvable) plus every blocked peer with its
-        // resume RIP and the handles it is parked on. This is the exact chokepoint the
-        // next investigation pass would otherwise have to re-instrument by hand (see the
-        // F1 recommended approach in docs/AL_KHASER_EMULATION.md).
         private void ReportSchedulerLivelock(EmulatedThread Spinner, ulong Rip)
         {
             if ((Settings.Flags & LogFlags.General) == 0 || Spinner == null)
@@ -2547,7 +2526,6 @@ namespace Brovan.Core.Emulation
                 if (!IsMlfqRunnableThread(t))
                     continue;
 
-                // if a thread hasn't run for a while, gently boost it upward.
                 if (AgingThresholdBudget > 0 && SchedulerWorkTick - t.LastRunTick >= AgingThresholdBudget)
                     t.DynamicBoost = ClampInt(t.DynamicBoost + AgingBoost, -16, 16);
 
@@ -2597,19 +2575,11 @@ namespace Brovan.Core.Emulation
             int KnownThreadOrderCount = ThreadOrder.Count;
             bool WakeupScanRequired = true;
 
-            // Livelock-watchdog episode state (frontier F1). Tracks a single thread that
-            // keeps completing full quanta at a pinned RIP while all peers are blocked.
             int LivelockThreadId = -1;
             ulong LivelockRip = 0;
             long LivelockSpinSlices = 0;
             bool LivelockReported = false;
 
-            // Idle-GetMessage-pump watchdog (frontier F2). Counts consecutive scheduler iterations that
-            // fall into the GetMessage-park poll with NOTHING runnable and NO timed wakeup pending — i.e.
-            // an idle message pump whose wait cannot be satisfied (no timer will fire, no runnable thread
-            // can PostMessage). Reset to 0 the instant any thread actually runs, so a real pump fed by a
-            // periodically-runnable worker never accumulates. After the bound, terminate cleanly instead
-            // of polling to the wall-clock budget. Shared x64/x86 (both al-khaser binaries park here).
             long GetMessageParkFutilePolls = 0;
             const long GetMessageParkFutilePollLimit = 256;
 
@@ -2689,12 +2659,6 @@ namespace Brovan.Core.Emulation
 
                         if (HasActiveGetMessageWait())
                         {
-                            // No runnable thread + no timed wakeup (TryGetNextWaitSleepMs returned false
-                            // above) + an active GetMessage wait ⇒ nothing can ever queue a message or
-                            // fire a timer to wake it. Poll a bounded number of times (a productive pump
-                            // whose worker is runnable never reaches here — it would be dequeued and reset
-                            // the counter), then terminate cleanly as an idle-pump deadlock rather than
-                            // spinning to the wall-clock timeout.
                             if (++GetMessageParkFutilePolls > GetMessageParkFutilePollLimit)
                             {
                                 if (Debug)
@@ -2727,7 +2691,6 @@ namespace Brovan.Core.Emulation
                             TriggerDebugMessage($"scheduler: switch {CurrentThreadId} -> {ImmaBeEmulatedOOO.ThreadId} queue={SelectedLevel} state={ImmaBeEmulatedOOO.State} rip=0x{ImmaBeEmulatedOOO.Context?.RIP ?? 0:X}");
                 }
 
-                // A thread is about to run — real progress — so the idle-pump watchdog resets.
                 GetMessageParkFutilePolls = 0;
 
                 SwitchToThread((int)ImmaBeEmulatedOOO.ThreadId);
@@ -2757,6 +2720,8 @@ namespace Brovan.Core.Emulation
                     if (Debug)
                         if (Debug)
                             TriggerDebugMessage($"scheduler: slice exception tid={ImmaBeEmulatedOOO.ThreadId} {ex.GetType().Name}: {ex.Message}");
+
+                    Utils.LogError($"[Scheduler] Thread {ImmaBeEmulatedOOO.ThreadId} terminated by an unhandled {ex.GetType().Name}: {ex.Message}");
 
                     if (ImmaBeEmulatedOOO.State != EmulatedThreadState.Terminated)
                         ImmaBeEmulatedOOO.ExitCode = unchecked((int)(uint)ImmaBeEmulatedOOO.Context.RAX);
@@ -2842,7 +2807,6 @@ namespace Brovan.Core.Emulation
                     ImmaBeEmulatedOOO.State = EmulatedThreadState.Ready;
                 }
 
-                // Feedback: threads that block quickly get boosted, CPU-bound threads get demoted.
                 if (ImmaBeEmulatedOOO.State == EmulatedThreadState.Waiting)
                     ImmaBeEmulatedOOO.DynamicBoost = ClampInt(ImmaBeEmulatedOOO.DynamicBoost + 2, -16, 16);
                 else if (ImmaBeEmulatedOOO.State == EmulatedThreadState.Exception)
@@ -2860,12 +2824,6 @@ namespace Brovan.Core.Emulation
 
                 WakeupScanRequired = SliceRequestedRefresh || AdvancedEmulatedTime || ThreadOrder.Count != KnownThreadOrderCount || ImmaBeEmulatedOOO.State == EmulatedThreadState.Waiting;
 
-                // Livelock watchdog (frontier F1). A full quantum that ends within a tight
-                // window of where it started, while this thread is the only runnable one
-                // and at least one peer is parked, is the RtlpBackoff / SRW-contention
-                // livelock shape. Forward-progressing code breaks this every slice (its RIP
-                // moves, or it yields via a syscall and never completes a full quantum in
-                // place), so the counter only climbs for a genuine userland spin.
                 bool FrozenSpinSlice = CompletedFullQuantum
                     && !HasOtherRunnableThread
                     && ImmaBeEmulatedOOO.State != EmulatedThreadState.Terminated
@@ -2902,12 +2860,6 @@ namespace Brovan.Core.Emulation
                         LivelockReported = true;
                     }
 
-                    // Safe recovery: re-scan every waiter (recovers a missed or late
-                    // wakeup — the doc's primary F1 hypothesis) and advance virtual time to
-                    // the nearest finite deadline. Neither perturbs a thread that needs no
-                    // peer to make progress, so a false-positive spin classification is
-                    // harmless; a woken peer flips HasOtherRunnableThread next slice and the
-                    // episode self-clears.
                     UpdateMlfqWakeups(ReadyQueues, InQueue, Levels, SchedulerTick);
                     KnownThreadOrderCount = ThreadOrder.Count;
                     if (TryGetNextWaitSleepMs(out int LivelockSleepMs, int.MaxValue))
@@ -2981,12 +2933,6 @@ namespace Brovan.Core.Emulation
                 return false;
             }
 
-            // Windows-guest specific: reads into a decommitted heap arena page (dropped by the
-            // real ntdll segment heap under memory pressure) transparently come back to their
-            // original protection so the guest access succeeds. This closes the walker/heap-
-            // decommit timing race that terminates al-khaser's hidden-modules probe at
-            // 0xC0000005 — see BinaryEmulator.WindowsBridge.cs :: DecommittedPages for the full
-            // rationale. Returning true here tells Unicorn to retry the access.
             if (Guest.TryRescueDecommittedMemory(this, Type, Address))
                 return true;
 
@@ -3028,12 +2974,6 @@ namespace Brovan.Core.Emulation
                 if (_emulator.AddInstructionHook(BackendInstructionHook.Syscall, Syscall) == IntPtr.Zero)
                     Utils.LogError($"Couldn't add the syscall hook: {_emulator.GetLastError()}.");
 
-                // A 32-bit (WOW64) guest never executes the native `syscall` instruction: its ntdll routes
-                // syscalls through the WOW64 transition, which Brovan models with a `sysenter` trampoline
-                // (see WindowsGuest.SetupWow64SyscallTransition). Hook SYSENTER to the same dispatcher so the
-                // trampoline reaches TryHandleSyscall. `syscall` (0F 05) is invalid in 32-bit mode, so the
-                // native hook above is inert here; registering both is harmless and keeps a direct-syscall
-                // anti-emulation probe dispatched either way.
                 if (BackendMode == Mode.MODE_32)
                 {
                     if (_emulator.AddInstructionHook(BackendInstructionHook.Sysenter, Syscall) == IntPtr.Zero)
@@ -3540,7 +3480,6 @@ namespace Brovan.Core.Emulation
             if (Disposed)
                 return false;
 
-            // Find the function in the binary
             BinaryFunction Function = Array.Find(_binary.Functions, f => f.FunctionName == FunctionName);
             if (Function.FunctionName == null)
             {
@@ -3548,24 +3487,20 @@ namespace Brovan.Core.Emulation
                 return false;
             }
 
-            // Set up function arguments according to calling convention
             if (Arguments != null && Arguments.Length > 0)
             {
                 if (_binary.Architecture == BinaryArchitecture.x64)
                 {
                     if (_binary.FileFormat == BinaryFormat.PE)
                     {
-                        // Windows x64 calling convention
                         if (Arguments.Length > 0) _emulator.WriteRegister(Registers.UC_X86_REG_RCX, Arguments[0]);
                         if (Arguments.Length > 1) _emulator.WriteRegister(Registers.UC_X86_REG_RDX, Arguments[1]);
                         if (Arguments.Length > 2) _emulator.WriteRegister(Registers.UC_X86_REG_R8, Arguments[2]);
                         if (Arguments.Length > 3) _emulator.WriteRegister(Registers.UC_X86_REG_R9, Arguments[3]);
 
-                        // Reserve 32 bytes shadow space on stack before pushing additional args
                         ulong RSP = _emulator.ReadRegister(Registers.UC_X86_REG_RSP);
                         RSP -= 32;
 
-                        // Push remaining args left to right
                         for (int i = 4; i < Arguments.Length; i++)
                         {
                             RSP -= 8;
@@ -3577,7 +3512,6 @@ namespace Brovan.Core.Emulation
                     }
                     else if (_binary.FileFormat == BinaryFormat.ELF)
                     {
-                        // System V AMD64 calling convention (Unix/Linux)
                         if (Arguments.Length > 0) _emulator.WriteRegister(Registers.UC_X86_REG_RDI, Arguments[0]);
                         if (Arguments.Length > 1) _emulator.WriteRegister(Registers.UC_X86_REG_RSI, Arguments[1]);
                         if (Arguments.Length > 2) _emulator.WriteRegister(Registers.UC_X86_REG_RDX, Arguments[2]);
@@ -3587,7 +3521,6 @@ namespace Brovan.Core.Emulation
 
                         ulong RSP = _emulator.ReadRegister(Registers.UC_X86_REG_RSP);
 
-                        // Push remaining args left to right
                         for (int i = 4; i < Arguments.Length; i++)
                         {
                             RSP -= 8;
@@ -3599,7 +3532,6 @@ namespace Brovan.Core.Emulation
                 }
                 else
                 {
-                    // Cdecl calling convention (args pushed on stack in reverse order)
                     ulong ESP = _emulator.ReadRegister(Registers.UC_X86_REG_ESP);
                     for (int i = Arguments.Length - 1; i >= 0; i--)
                     {
@@ -3637,24 +3569,20 @@ namespace Brovan.Core.Emulation
             if (Disposed)
                 return false;
 
-            // Set up function arguments according to calling convention
             if (Arguments != null && Arguments.Length > 0)
             {
                 if (_binary.Architecture == BinaryArchitecture.x64)
                 {
                     if (_binary.FileFormat == BinaryFormat.PE)
                     {
-                        // Windows x64 calling convention
                         if (Arguments.Length > 0) _emulator.WriteRegister(Registers.UC_X86_REG_RCX, Arguments[0]);
                         if (Arguments.Length > 1) _emulator.WriteRegister(Registers.UC_X86_REG_RDX, Arguments[1]);
                         if (Arguments.Length > 2) _emulator.WriteRegister(Registers.UC_X86_REG_R8, Arguments[2]);
                         if (Arguments.Length > 3) _emulator.WriteRegister(Registers.UC_X86_REG_R9, Arguments[3]);
 
-                        // Reserve 32 bytes shadow space on stack before pushing additional args
                         ulong RSP = _emulator.ReadRegister(Registers.UC_X86_REG_RSP);
                         RSP -= 32;
 
-                        // Push remaining args left to right
                         for (int i = 4; i < Arguments.Length; i++)
                         {
                             RSP -= 8;
@@ -3666,7 +3594,6 @@ namespace Brovan.Core.Emulation
                     }
                     else if (_binary.FileFormat == BinaryFormat.ELF)
                     {
-                        // System V AMD64 calling convention (Unix/Linux)
                         if (Arguments.Length > 0) _emulator.WriteRegister(Registers.UC_X86_REG_RDI, Arguments[0]);
                         if (Arguments.Length > 1) _emulator.WriteRegister(Registers.UC_X86_REG_RSI, Arguments[1]);
                         if (Arguments.Length > 2) _emulator.WriteRegister(Registers.UC_X86_REG_RDX, Arguments[2]);
@@ -3676,7 +3603,6 @@ namespace Brovan.Core.Emulation
 
                         ulong RSP = _emulator.ReadRegister(Registers.UC_X86_REG_RSP);
 
-                        // Push remaining args left to right
                         for (int i = 4; i < Arguments.Length; i++)
                         {
                             RSP -= 8;
@@ -3688,7 +3614,6 @@ namespace Brovan.Core.Emulation
                 }
                 else
                 {
-                    // Cdecl calling convention (args pushed on stack in reverse order)
                     ulong ESP = _emulator.ReadRegister(Registers.UC_X86_REG_ESP);
                     for (int i = Arguments.Length - 1; i >= 0; i--)
                     {
@@ -3730,7 +3655,6 @@ namespace Brovan.Core.Emulation
             if (Code == null || Code.Length == 0)
                 throw new NullReferenceException(nameof(Code));
 
-            // Reserve a reusable 2 MB code region for injected test snippets.
             ulong Size = 2 * 1024 * 1024;
             if (CodeAddress == 0)
                 CodeAddress = MapUniqueAddress(Size, MemoryProtection.All);
@@ -3743,12 +3667,10 @@ namespace Brovan.Core.Emulation
             }
             else
             {
-                // Append a RET instruction so execution returns to the saved instruction pointer.
                 byte[] NewCode = new byte[Code.Length + 1];
                 Buffer.BlockCopy(Code, 0, NewCode, 0, Code.Length);
                 NewCode[NewCode.Length - 1] = 0xC3;
 
-                // Push the current instruction pointer as the return address.
                 if (_binary.Architecture == BinaryArchitecture.x64)
                 {
                     ulong RSP = ReadRegister(Registers.UC_X86_REG_RSP);
@@ -3767,11 +3689,9 @@ namespace Brovan.Core.Emulation
                 if (!Status)
                     return false;
 
-                // Write the generated code into the reusable code region.
                 if (!WriteMemory(CodeAddress, NewCode))
                     return false;
 
-                // Transfer execution to the generated code.
                 Status = _binary.Architecture == BinaryArchitecture.x64 ? WriteRegister(Registers.UC_X86_REG_RIP, CodeAddress) : WriteRegister(Registers.UC_X86_REG_EIP, CodeAddress);
             }
             return Status;
@@ -3803,6 +3723,5 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        //~BinaryEmulator() => Dispose();
     }
 }

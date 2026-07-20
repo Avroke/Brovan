@@ -70,7 +70,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (StartRoutine == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            // Only current-process thread creation is modeled.
             if (ProcessHandle != ulong.MaxValue)
             {
                 if (!Instance.WinHelper.ValidProcessHandle(ProcessHandle))
@@ -101,7 +100,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             WriteThreadCreationAttributes(Instance, NewThread, AttributeList);
 
-            // THREAD_CREATE_FLAGS_CREATE_SUSPENDED
             if ((CreateFlags & 0x1UL) != 0)
             {
                 NewThread.SuspendCount = 1;

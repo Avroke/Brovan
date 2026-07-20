@@ -9,8 +9,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            // Bitness-agnostic: args via GetArg64; the OUT section HANDLE is pointer-sized; MaximumSize is a
-            // LARGE_INTEGER (8 bytes on both). Needed for the WOW64 loader to map the SysWOW64 DLL images.
             if (Instance._binary.Architecture != BinaryArchitecture.x64 && Instance._binary.Architecture != BinaryArchitecture.x86)
                 return Instance.WinUnimplemented;
 

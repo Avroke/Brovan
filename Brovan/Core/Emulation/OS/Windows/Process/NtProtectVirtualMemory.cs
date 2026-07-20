@@ -11,8 +11,6 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            // Works for both bitnesses: arguments come through GetArg64 (bitness-aware), and the IN/OUT
-            // BaseAddress / RegionSize slots are pointer-sized (4 bytes on x86, 8 on x64) via ReadPointer.
             if (Instance._binary.Architecture == BinaryArchitecture.x64 || Instance._binary.Architecture == BinaryArchitecture.x86)
             {
                 int PtrSize = Instance.GuestPointerSize;
@@ -22,7 +20,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 ulong NewProtection = (uint)Instance.WinHelper.GetArg64(3);
                 ulong OldProtectionPtr = Instance.WinHelper.GetArg64(4);
 
-                // current process
                 if (Instance.WinHelper.IsCurrentProcessPseudoHandle(ProcessHandle))
                 {
                     if (BaseAddressPtr == 0)
@@ -46,7 +43,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (Instance.IsRegionFreed(BaseAddress, true))
                         return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
 
-                    // align requested range to page granularity
                     if (RegionSize == 0)
                         return NTSTATUS.STATUS_INVALID_PARAMETER;
 
@@ -58,7 +54,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (!Instance.IsMemoryRangeMapped(AlignedBase, AlignedSize))
                         return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
 
-                    // old protection is the protection of the first page of the range
                     if (!Instance.TryFindMemoryRegion(BaseAddress, out MemoryRegion OldRegion))
                         return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
 
@@ -81,21 +76,18 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (!Instance._emulator.SetMemoryProtection(AlignedBase, AlignedSize, HostProt))
                         return NTSTATUS.STATUS_INVALID_PAGE_PROTECTION;
 
-                    // rebuild memory region list with splits for the protected range
                     List<MemoryRegion> newRegions = new List<MemoryRegion>();
                     foreach (var r in Instance.EnumerateMemoryRegionsByBase())
                     {
                         ulong rStart = r.BaseAddress;
                         ulong rEnd = r.BaseAddress + r.Size;
 
-                        // no overlap
                         if (rEnd <= AlignedBase || rStart >= AlignedEnd)
                         {
                             newRegions.Add(r);
                             continue;
                         }
 
-                        // left part
                         if (rStart < AlignedBase)
                         {
                             MemoryRegion left = r;
@@ -105,7 +97,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                             newRegions.Add(left);
                         }
 
-                        // middle part (intersection)
                         ulong midStart = Math.Max(rStart, AlignedBase);
                         ulong midEnd = Math.Min(rEnd, AlignedEnd);
                         MemoryRegion middle = r;
@@ -117,7 +108,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                         middle.SpecialProtections = NewSpecial;
                         newRegions.Add(middle);
 
-                        // right part
                         if (rEnd > AlignedEnd)
                         {
                             MemoryRegion right = r;
@@ -128,7 +118,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                         }
                     }
 
-                    // merge adjacent regions with identical properties
                     List<MemoryRegion> merged = new List<MemoryRegion>();
                     foreach (var r in newRegions.OrderBy(x => x.BaseAddress))
                     {
@@ -168,7 +157,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                         if ((OldRegion.SpecialProtections & SpecialProtections.Guard) != 0)
                             OldWinProt |= 0x100;
 
-                        // lpflOldProtect is a PULONG (DWORD) on both bitnesses — always a 4-byte write.
                         if (!Instance._emulator.WriteMemory(OldProtectionPtr, (uint)OldWinProt, 4))
                             return NTSTATUS.STATUS_ACCESS_VIOLATION;
                     }

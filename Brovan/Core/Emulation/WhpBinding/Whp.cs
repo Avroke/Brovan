@@ -1,48 +1,36 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Buffers;
-using Brovan.Core.Emulation;
 
 namespace Brovan.Core.Emulation
 {
-    public class KvmException : SystemException
+    public class WhpException : SystemException
     {
         public int LastError { get; }
 
-        public KvmException(string message) : base(message) { }
+        public WhpException(string message) : base(message) { }
 
-        public KvmException(string message, int errno) : base($"{message}: errno={errno}")
+        public WhpException(string message, int hr) : base($"{message}: hr=0x{hr:X8}")
         {
-            LastError = errno;
+            LastError = hr;
         }
 
-        public KvmException() : base("KVM backend exception occurred.") { }
+        public WhpException() : base("WHP backend exception occurred.") { }
     }
 
-    public sealed class Kvm : IDisposable
+    public sealed class Whp : IDisposable
     {
-
-        private int _systemFd = -1;
-        private int _partitionFd = -1;
-        private int _vcpuFd = -1;
-        private IntPtr _runMmapPtr = IntPtr.Zero;
-        private int _runMmapSize;
-
-        private const int DefaultMemslotCount = 32;
-        private int _maxMemslots;
-        private bool _supportsXsave;
-        private int _nextSlotId;
-        private readonly List<int> _freeSlotIds = new();
-        private readonly Dictionary<ulong, InstalledSlot> _activeSlots = new();
+        private IntPtr _partition = IntPtr.Zero;
+        private const uint VpIndex = 0;
+        private IntPtr _exitContextPtr = IntPtr.Zero;
 
         private readonly Dictionary<ulong, MappedPage> _mappedPages = new();
         private readonly Dictionary<IntPtr, BackingAllocation> _backingAllocations = new();
-        private readonly HashSet<ulong> _trappedPages = new();
+        private readonly Dictionary<ulong, bool> _trappedPages = new();
         private readonly Dictionary<ulong, IntPtr> _pageTableViews = new();
 
         private ulong[] _sortedPageKeys = Array.Empty<ulong>();
@@ -50,15 +38,17 @@ namespace Brovan.Core.Emulation
         private bool _mappingsDirty;
         private ulong _lastLookupPageBase = ulong.MaxValue;
         private MappedPage _lastLookupPage;
-        private readonly Dictionary<ulong, InstalledSlot> _desiredSlots = new();
-        private readonly List<ulong> _staleSlotKeys = new();
+
+        private readonly Dictionary<ulong, InstalledMap> _activeMaps = new();
+        private readonly Dictionary<ulong, InstalledMap> _desiredMaps = new();
+        private readonly List<ulong> _staleMapKeys = new();
+
         private ulong _pml4Gpa;
-        private ulong _nextInternalGpa = KvmConstants.InternalPageTableBase;
+        private ulong _nextInternalGpa = WhpConstants.InternalPageTableBase;
 
         private IntPtr _internalPoolPtr = IntPtr.Zero;
         private const ulong InternalPoolSize = 16 * 1024 * 1024;
         private ulong _internalPoolOffset;
-
         private readonly List<(IntPtr Ptr, ulong Size)> _internalPoolFallbacks = new();
 
         private ulong _syscallTrapPageGpa;
@@ -70,28 +60,21 @@ namespace Brovan.Core.Emulation
 
         private readonly object _vcpuLock = new();
 
-        private LinuxKvmRegisters _regsCache;
-        private LinuxKvmSpecialRegisters _sregsCache;
+        private WhpRegisters _regsCache;
         private bool _regsValid;
         private bool _regsDirty;
-        private bool _sregsValid;
-        private bool _sregsDirty;
 
         private readonly List<MemoryHookEntry> _memoryHooks = new();
-        private readonly List<MmioRegion> _mmioRegions = new();
         private InstructionHookEntry _syscallHook;
         private readonly List<InstructionHookEntry> _instructionHooks = new();
         private readonly List<InterruptHookEntry> _interruptHooks = new();
         private readonly List<IntPtr> _liveHookHandles = new();
 
-        private bool _hasCpuIdHook;
-        private bool _hasRdtscHook;
-        private bool _hasRdtscpHook;
-        private bool _hasInvalidHook;
-        private bool _scanPreRunInstructions;
-
-        private static readonly long MmioRefreshIntervalTicks = Stopwatch.Frequency / 4000;
-        private long _lastMmioRefreshTimestamp;
+        private bool _completionActive;
+        private ulong _completionPageGpa;
+        private ulong _completionAccessGpa;
+        private uint _completionLen;
+        private bool _completionIsWrite;
 
         private int _disposed;
         private int _disposing;
@@ -101,17 +84,15 @@ namespace Brovan.Core.Emulation
         public bool NoHooks;
         public static bool ThrowDisposed = true;
         public bool Disposed => Volatile.Read(ref _disposed) == 1;
-
-        public bool SupportsXsave => _supportsXsave;
         private bool Disposing => Volatile.Read(ref _disposing) == 1;
 
-        private KvmErrors _error;
+        private WhpErrors _error;
 
         private sealed class MappedPage
         {
             public IntPtr HostPage;
             public IntPtr OwnedBacking;
-            public KvmMemoryPermission Permissions;
+            public WhpMemoryPermission Permissions;
         }
 
         private sealed class BackingAllocation
@@ -120,12 +101,11 @@ namespace Brovan.Core.Emulation
             public int LivePages;
         }
 
-        private struct InstalledSlot
+        private struct InstalledMap
         {
-            public int Id;
             public ulong Size;
             public IntPtr Host;
-            public uint Flags;
+            public WhvMapGpaRangeFlags Flags;
         }
 
         private sealed class MemoryHookEntry
@@ -134,14 +114,6 @@ namespace Brovan.Core.Emulation
             public ulong End;
             public BackendHookType Type;
             public MemoryHookCallback Callback;
-        }
-
-        private sealed class MmioRegion
-        {
-            public ulong Address;
-            public ulong Size;
-            public MmioReadCallback ReadCallback;
-            public MmioWriteCallback WriteCallback;
         }
 
         private sealed class InstructionHookEntry
@@ -154,6 +126,13 @@ namespace Brovan.Core.Emulation
         private sealed class InterruptHookEntry
         {
             public InterruptHookCallback Callback;
+        }
+
+        private struct WhpRegisters
+        {
+            public ulong Rax, Rbx, Rcx, Rdx, Rsi, Rdi, Rsp, Rbp;
+            public ulong R8, R9, R10, R11, R12, R13, R14, R15;
+            public ulong Rip, Rflags;
         }
 
         private enum GpRegisterName
@@ -172,40 +151,47 @@ namespace Brovan.Core.Emulation
             public readonly bool IsValid => Width != 0;
         }
 
-        public Kvm(Arch arch, Mode mode)
+        private static readonly uint[] GpRegNames =
+        {
+            (uint)WhvRegisterName.Rax, (uint)WhvRegisterName.Rbx, (uint)WhvRegisterName.Rcx, (uint)WhvRegisterName.Rdx,
+            (uint)WhvRegisterName.Rsi, (uint)WhvRegisterName.Rdi, (uint)WhvRegisterName.Rsp, (uint)WhvRegisterName.Rbp,
+            (uint)WhvRegisterName.R8, (uint)WhvRegisterName.R9, (uint)WhvRegisterName.R10, (uint)WhvRegisterName.R11,
+            (uint)WhvRegisterName.R12, (uint)WhvRegisterName.R13, (uint)WhvRegisterName.R14, (uint)WhvRegisterName.R15,
+            (uint)WhvRegisterName.Rip, (uint)WhvRegisterName.Rflags,
+        };
+
+        public Whp(Arch arch, Mode mode)
         {
             if (arch != Arch.X86 || mode != Mode.MODE_64)
-                throw new KvmException("KVM backend only supports x86-64 long mode.");
+                throw new WhpException("WHP backend only supports x86-64 long mode.");
 
             EnsurePlatformSupport();
-            AllocateInternalPool();
             ConfigurePartition();
-            ConfigureVirtualProcessor();
+            AllocateInternalPool();
             InitializeLongModePageTables();
             InitializeGdt();
-            InitializeVirtualProcessorState();
             InitializeSyscallTrapPage();
             InitializeExceptionHandling();
             RebuildMappings();
-            FlushRegisterCache();
+            InitializeVirtualProcessorState();
         }
 
-        public KvmErrors GetLastError() => _error;
+        public WhpErrors GetLastError() => _error;
 
         public bool MapMemory(ulong address, ulong size, MemoryProtection protection)
         {
             if (DisposedCheck()) return false;
 
-            if ((address & KvmConstants.PageMask) != 0 || (size & KvmConstants.PageMask) != 0)
+            if ((address & WhpConstants.PageMask) != 0 || (size & WhpConstants.PageMask) != 0)
             {
-                _error = KvmErrors.InvalidArgument;
+                _error = WhpErrors.InvalidArgument;
                 return false;
             }
 
-            KvmMemoryPermission perm = TranslateProtection(protection);
+            WhpMemoryPermission perm = TranslateProtection(protection);
 
             bool canBatch = true;
-            for (ulong off = 0; off < size; off += KvmConstants.PageSize)
+            for (ulong off = 0; off < size; off += WhpConstants.PageSize)
             {
                 if (_mappedPages.TryGetValue(address + off, out MappedPage existing) && existing.HostPage != IntPtr.Zero)
                 {
@@ -221,10 +207,10 @@ namespace Brovan.Core.Emulation
                 _backingAllocations[backing] = new BackingAllocation
                 {
                     Size = size,
-                    LivePages = (int)(size / KvmConstants.PageSize),
+                    LivePages = (int)(size / WhpConstants.PageSize),
                 };
 
-                for (ulong off = 0; off < size; off += KvmConstants.PageSize)
+                for (ulong off = 0; off < size; off += WhpConstants.PageSize)
                 {
                     ulong guest = address + off;
                     MappedPage page = new MappedPage
@@ -238,11 +224,11 @@ namespace Brovan.Core.Emulation
                 }
 
                 RebuildMappings();
-                _error = KvmErrors.Ok;
+                _error = WhpErrors.Ok;
                 return true;
             }
 
-            for (ulong off = 0; off < size; off += KvmConstants.PageSize)
+            for (ulong off = 0; off < size; off += WhpConstants.PageSize)
             {
                 ulong guest = address + off;
                 if (!_mappedPages.TryGetValue(guest, out MappedPage page))
@@ -253,10 +239,10 @@ namespace Brovan.Core.Emulation
 
                 if (page.HostPage == IntPtr.Zero)
                 {
-                    IntPtr backing = AllocateBackingMemory(KvmConstants.PageSize);
+                    IntPtr backing = AllocateBackingMemory(WhpConstants.PageSize);
                     _backingAllocations[backing] = new BackingAllocation
                     {
-                        Size = KvmConstants.PageSize,
+                        Size = WhpConstants.PageSize,
                         LivePages = 1,
                     };
                     page.HostPage = backing;
@@ -268,7 +254,7 @@ namespace Brovan.Core.Emulation
             }
 
             RebuildMappings();
-            _error = KvmErrors.Ok;
+            _error = WhpErrors.Ok;
             return true;
         }
 
@@ -276,13 +262,13 @@ namespace Brovan.Core.Emulation
         {
             if (DisposedCheck()) return false;
 
-            if ((address & KvmConstants.PageMask) != 0 || (size & KvmConstants.PageMask) != 0)
+            if ((address & WhpConstants.PageMask) != 0 || (size & WhpConstants.PageMask) != 0)
             {
-                _error = KvmErrors.InvalidArgument;
+                _error = WhpErrors.InvalidArgument;
                 return false;
             }
 
-            for (ulong off = 0; off < size; off += KvmConstants.PageSize)
+            for (ulong off = 0; off < size; off += WhpConstants.PageSize)
             {
                 ulong guest = address + off;
                 if (_mappedPages.TryGetValue(guest, out MappedPage page))
@@ -292,45 +278,8 @@ namespace Brovan.Core.Emulation
                 }
             }
 
-            for (int i = _mmioRegions.Count - 1; i >= 0; i--)
-            {
-                MmioRegion region = _mmioRegions[i];
-                if (region.Address >= address && region.Address < address + size)
-                    _mmioRegions.RemoveAt(i);
-            }
-
             RebuildMappings();
-            _error = KvmErrors.Ok;
-            return true;
-        }
-
-        public bool MapMmio(ulong address, ulong size, MmioReadCallback read, MmioWriteCallback write)
-        {
-            if (DisposedCheck()) return false;
-
-            if (read == null || write == null ||
-                (address & KvmConstants.PageMask) != 0 || (size & KvmConstants.PageMask) != 0 || size == 0)
-            {
-                _error = KvmErrors.InvalidArgument;
-                return false;
-            }
-
-            if (!MapMemory(address, size, MemoryProtection.Read))
-                return false;
-
-            MmioRegion region = new MmioRegion
-            {
-                Address = address,
-                Size = size,
-                ReadCallback = read,
-                WriteCallback = write,
-            };
-
-            _mmioRegions.RemoveAll(r => r.Address == address);
-            _mmioRegions.Add(region);
-
-            RefreshMmioRegion(region);
-            _error = KvmErrors.Ok;
+            _error = WhpErrors.Ok;
             return true;
         }
 
@@ -338,15 +287,15 @@ namespace Brovan.Core.Emulation
         {
             if (DisposedCheck()) return false;
 
-            KvmMemoryPermission perm = TranslateProtection(protection);
-            for (ulong off = 0; off < size; off += KvmConstants.PageSize)
+            WhpMemoryPermission perm = TranslateProtection(protection);
+            for (ulong off = 0; off < size; off += WhpConstants.PageSize)
             {
                 if (_mappedPages.TryGetValue(address + off, out MappedPage page))
                     page.Permissions = perm;
             }
 
             RebuildMappings();
-            _error = KvmErrors.Ok;
+            _error = WhpErrors.Ok;
             return true;
         }
 
@@ -366,11 +315,11 @@ namespace Brovan.Core.Emulation
 
             int remaining = value.Length - offset;
             if (length > remaining) length = remaining;
-            if (length == 0) { _error = KvmErrors.Ok; return true; }
+            if (length == 0) { _error = WhpErrors.Ok; return true; }
 
             if (TryGetHostPointer(address, length, out byte* dst, out long dstOffset))
             {
-                _error = KvmErrors.Ok;
+                _error = WhpErrors.Ok;
                 fixed (byte* src = value)
                     Unsafe.CopyBlockUnaligned(dst + dstOffset, src + offset, (uint)length);
                 return true;
@@ -378,11 +327,11 @@ namespace Brovan.Core.Emulation
 
             if (TryWriteMemoryInternal(address, new ReadOnlySpan<byte>(value, offset, length)))
             {
-                _error = KvmErrors.Ok;
+                _error = WhpErrors.Ok;
                 return true;
             }
 
-            _error = KvmErrors.MemoryWriteUnmapped;
+            _error = WhpErrors.MemoryWriteUnmapped;
             return false;
         }
 
@@ -394,7 +343,7 @@ namespace Brovan.Core.Emulation
 
             if (TryGetHostPointer(address, (int)writeLen, out byte* dst, out long offset))
             {
-                _error = KvmErrors.Ok;
+                _error = WhpErrors.Ok;
                 fixed (byte* src = value)
                     Unsafe.CopyBlockUnaligned(dst + offset, src, writeLen);
                 return true;
@@ -402,11 +351,11 @@ namespace Brovan.Core.Emulation
 
             if (TryWriteMemoryInternal(address, value.Slice(0, (int)writeLen)))
             {
-                _error = KvmErrors.Ok;
+                _error = WhpErrors.Ok;
                 return true;
             }
 
-            _error = KvmErrors.MemoryWriteUnmapped;
+            _error = WhpErrors.MemoryWriteUnmapped;
             return false;
         }
 
@@ -488,22 +437,22 @@ namespace Brovan.Core.Emulation
             byte[] value = new byte[length];
             if (length == 0)
             {
-                _error = KvmErrors.Ok;
+                _error = WhpErrors.Ok;
                 return value;
             }
 
             if (TryGetHostPointer(address, (int)length, out byte* src, out long offset))
             {
-                _error = KvmErrors.Ok;
+                _error = WhpErrors.Ok;
                 Unsafe.CopyBlockUnaligned(ref value[0], ref Unsafe.AsRef<byte>(src + offset), length);
             }
             else if (TryReadMemoryInternal(address, value))
             {
-                _error = KvmErrors.Ok;
+                _error = WhpErrors.Ok;
             }
             else
             {
-                _error = KvmErrors.MemoryReadUnmapped;
+                _error = WhpErrors.MemoryReadUnmapped;
             }
             return value;
         }
@@ -516,7 +465,7 @@ namespace Brovan.Core.Emulation
 
             if (TryGetHostPointer(address, (int)readLen, out byte* src, out long offset))
             {
-                _error = KvmErrors.Ok;
+                _error = WhpErrors.Ok;
                 fixed (byte* dst = value)
                     Unsafe.CopyBlockUnaligned(dst, src + offset, readLen);
                 return true;
@@ -524,11 +473,11 @@ namespace Brovan.Core.Emulation
 
             if (TryReadMemoryInternal(address, value.Slice(0, (int)readLen)))
             {
-                _error = KvmErrors.Ok;
+                _error = WhpErrors.Ok;
                 return true;
             }
 
-            _error = KvmErrors.MemoryReadUnmapped;
+            _error = WhpErrors.MemoryReadUnmapped;
             return false;
         }
 
@@ -544,16 +493,16 @@ namespace Brovan.Core.Emulation
             if (DisposedCheck()) return 0;
             if (TryGetHostPointer(address, sizeof(ulong), out byte* ptr, out long offset))
             {
-                _error = KvmErrors.Ok;
+                _error = WhpErrors.Ok;
                 return *(ulong*)(ptr + offset);
             }
             Span<byte> buffer = stackalloc byte[sizeof(ulong)];
             if (TryReadMemoryInternal(address, buffer))
             {
-                _error = KvmErrors.Ok;
+                _error = WhpErrors.Ok;
                 return BitConverter.ToUInt64(buffer);
             }
-            _error = KvmErrors.MemoryReadUnmapped;
+            _error = WhpErrors.MemoryReadUnmapped;
             return 0;
         }
 
@@ -562,16 +511,16 @@ namespace Brovan.Core.Emulation
             if (DisposedCheck()) return 0;
             if (TryGetHostPointer(address, sizeof(uint), out byte* ptr, out long offset))
             {
-                _error = KvmErrors.Ok;
+                _error = WhpErrors.Ok;
                 return *(uint*)(ptr + offset);
             }
             Span<byte> buffer = stackalloc byte[sizeof(uint)];
             if (TryReadMemoryInternal(address, buffer))
             {
-                _error = KvmErrors.Ok;
+                _error = WhpErrors.Ok;
                 return BitConverter.ToUInt32(buffer);
             }
-            _error = KvmErrors.MemoryReadUnmapped;
+            _error = WhpErrors.MemoryReadUnmapped;
             return 0;
         }
 
@@ -580,16 +529,16 @@ namespace Brovan.Core.Emulation
             if (DisposedCheck()) return 0;
             if (TryGetHostPointer(address, sizeof(ushort), out byte* ptr, out long offset))
             {
-                _error = KvmErrors.Ok;
+                _error = WhpErrors.Ok;
                 return *(ushort*)(ptr + offset);
             }
             Span<byte> buffer = stackalloc byte[sizeof(ushort)];
             if (TryReadMemoryInternal(address, buffer))
             {
-                _error = KvmErrors.Ok;
+                _error = WhpErrors.Ok;
                 return BitConverter.ToUInt16(buffer);
             }
-            _error = KvmErrors.MemoryReadUnmapped;
+            _error = WhpErrors.MemoryReadUnmapped;
             return 0;
         }
 
@@ -603,16 +552,16 @@ namespace Brovan.Core.Emulation
             {
                 if (TryGetHostPointer(address, length, out byte* src, out long offset))
                 {
-                    _error = KvmErrors.Ok;
+                    _error = WhpErrors.Ok;
                     Unsafe.CopyBlockUnaligned(ref buffer[0], ref Unsafe.AsRef<byte>(src + offset), (uint)length);
                 }
                 else if (TryReadMemoryInternal(address, buffer.AsSpan(0, length)))
                 {
-                    _error = KvmErrors.Ok;
+                    _error = WhpErrors.Ok;
                 }
                 else
                 {
-                    _error = KvmErrors.MemoryReadUnmapped;
+                    _error = WhpErrors.MemoryReadUnmapped;
                     return string.Empty;
                 }
 
@@ -639,39 +588,27 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        public bool WriteGdtr(ulong Base, uint Limit)
-        {
-            if (DisposedCheck()) return false;
-
-            LinuxKvmSpecialRegisters sregs = GetSpecialRegisters();
-            sregs.Gdt.Base = Base;
-            sregs.Gdt.Limit = (ushort)Limit;
-            SetSpecialRegisters(sregs);
-            _error = KvmErrors.Ok;
-            return true;
-        }
-
         public bool WriteRegister(Registers register, ulong value)
         {
             if (DisposedCheck()) return false;
 
             if (TryWriteSpecialRegister(register, value))
             {
-                _error = KvmErrors.Ok;
+                _error = WhpErrors.Ok;
                 return true;
             }
 
             GpRegisterAccess access = ClassifyGpRegister(register);
             if (!access.IsValid)
             {
-                _error = KvmErrors.InvalidArgument;
+                _error = WhpErrors.InvalidArgument;
                 return false;
             }
 
             ref ulong target = ref GetGpRegisterPointer(ref GetRegistersRef(), access.Name);
             target = WriteGpRegisterField(target, access, value);
             _regsDirty = true;
-            _error = KvmErrors.Ok;
+            _error = WhpErrors.Ok;
             return true;
         }
 
@@ -682,12 +619,12 @@ namespace Brovan.Core.Emulation
             if (DisposedCheck()) return false;
 
             GpRegisterAccess access = ClassifyGpRegister(register);
-            if (!access.IsValid) { _error = KvmErrors.InvalidArgument; return false; }
+            if (!access.IsValid) { _error = WhpErrors.InvalidArgument; return false; }
 
             ref ulong target = ref GetGpRegisterPointer(ref GetRegistersRef(), access.Name);
             target = access.ZeroExtend32 ? value : WriteGpRegisterField(target, access, value);
             _regsDirty = true;
-            _error = KvmErrors.Ok;
+            _error = WhpErrors.Ok;
             return true;
         }
 
@@ -698,13 +635,13 @@ namespace Brovan.Core.Emulation
             if (DisposedCheck()) return false;
 
             GpRegisterAccess access = ClassifyGpRegister(register);
-            if (!access.IsValid) { _error = KvmErrors.InvalidArgument; return false; }
+            if (!access.IsValid) { _error = WhpErrors.InvalidArgument; return false; }
 
             ref ulong target = ref GetGpRegisterPointer(ref GetRegistersRef(), access.Name);
             int shift = access.Offset * 8;
             target = (target & ~(0xFFUL << shift)) | ((ulong)value << shift);
             _regsDirty = true;
-            _error = KvmErrors.Ok;
+            _error = WhpErrors.Ok;
             return true;
         }
 
@@ -714,6 +651,15 @@ namespace Brovan.Core.Emulation
         {
             if (value == null || value.Length == 0) return false;
             return WriteRegisterByte(register, value[0]);
+        }
+
+        public bool WriteGdtr(ulong Base, uint Limit)
+        {
+            if (DisposedCheck()) return false;
+
+            SetSingleRegister(WhvRegisterName.Gdtr, WhvRegisterValue.FromTable(Base, (ushort)Limit));
+            _error = WhpErrors.Ok;
+            return true;
         }
 
         private static ulong WriteGpRegisterField(ulong current, GpRegisterAccess access, ulong value)
@@ -731,15 +677,15 @@ namespace Brovan.Core.Emulation
 
             if (TryReadSpecialRegister(register, out ulong specialValue))
             {
-                _error = KvmErrors.Ok;
+                _error = WhpErrors.Ok;
                 return specialValue;
             }
 
             GpRegisterAccess access = ClassifyGpRegister(register);
-            if (!access.IsValid) { _error = KvmErrors.InvalidArgument; return 0; }
+            if (!access.IsValid) { _error = WhpErrors.InvalidArgument; return 0; }
 
             ulong value = GetGpRegisterPointer(ref GetRegistersRef(), access.Name);
-            _error = KvmErrors.Ok;
+            _error = WhpErrors.Ok;
             int shiftBits = access.Offset * 8;
             int widthBits = access.Width * 8;
             if (widthBits >= sizeof(ulong) * 8) return value >> shiftBits;
@@ -769,8 +715,6 @@ namespace Brovan.Core.Emulation
             FlushRegisterCache();
             _stopRequested = false;
             _singleStepRequested = count == 1;
-            ref LinuxKvmRun run = ref GetRunRef();
-            run.ImmediateExit = 0;
 
             if (_singleStepRequested)
             {
@@ -783,86 +727,41 @@ namespace Brovan.Core.Emulation
             {
                 while (!_stopRequested)
                 {
-                    if (HandlePreRunInstruction()) continue;
-
-                    RefreshMmioBackedRegions();
-
                     FlushRegisterCache();
 
-                    int rc;
-                    lock (_vcpuLock)
-                    {
-                        rc = KvmNative.ioctl(_vcpuFd, KvmConstants.KvmIoRun, IntPtr.Zero);
-                    }
-
+                    ref WhvRunVpExitContext exit = ref RunVirtualProcessor();
                     InvalidateRegisterCache();
 
-                    if (rc < 0)
+                    switch (exit.ExitReason)
                     {
-                        int errno = Marshal.GetLastWin32Error();
-                        if (errno == KvmNative.ErrnoEintr)
-                        {
-                            // KVM never clears immediate_exit; leaving it set makes every further
-                            // KVM_RUN return -EINTR immediately and spins the loop forever.
-                            if (!_stopRequested) run.ImmediateExit = 0;
-                            continue;
-                        }
-
-                        _error = KvmErrors.InternalError;
-                        throw new KvmException("KVM_RUN failed", errno);
-                    }
-
-                    run = ref GetRunRef();
-                    switch (run.ExitReason)
-                    {
-                        case KvmConstants.ExitHlt:
+                        case WhvRunVpExitReason.X64Halt:
                             if (HandleHltExit()) continue;
-                            return _error == KvmErrors.Ok;
-                        case KvmConstants.ExitMmio:
-                            if (HandleMmioExit(ref run))
-                                continue;
-                            _error = KvmErrors.Ok;
+                            return _error == WhpErrors.Ok;
+                        case WhvRunVpExitReason.MemoryAccess:
+                            if (HandleMemoryAccess(ref exit)) continue;
+                            _error = WhpErrors.Ok;
                             return true;
-                        case KvmConstants.ExitException:
-                            {
-                                uint excVector = run.Exit.Exception.Exception;
-                                uint excErrorCode = run.Exit.Exception.ErrorCode;
-                                if (HandleException(excVector, excErrorCode))
-                                {
-                                    FlushRegisterCache();
-                                    ClearPendingExceptionState();
-                                    continue;
-                                }
-                                FlushRegisterCache();
-                                ClearPendingExceptionState();
-                                _error = KvmErrors.Exception;
-                                return false;
-                            }
-                        case KvmConstants.ExitDebug:
-                            if (HandleDebugExit(ref run))
-                                continue;
-                            _error = KvmErrors.Ok;
-                            return true;
-                        case KvmConstants.ExitIntr:
-                            if (_stopRequested) { _error = KvmErrors.Ok; return true; }
-                            run.ImmediateExit = 0;
+                        case WhvRunVpExitReason.Canceled:
+                            if (_stopRequested) { _error = WhpErrors.Ok; return true; }
                             continue;
-                        case KvmConstants.ExitShutdown:
-                            _error = KvmErrors.Exception;
-                            throw new KvmException($"KVM guest triple-faulted (SHUTDOWN) at RIP 0x{ReadRegister(Registers.UC_X86_REG_RIP):X}");
-                        case KvmConstants.ExitFailEntry:
-                            _error = KvmErrors.InternalError;
-                            throw new KvmException($"KVM vCPU failed to enter guest mode (reason=0x{run.Exit.FailEntry.HardwareEntryFailureReason:X}, cpu={run.Exit.FailEntry.Cpu})");
-                        case KvmConstants.ExitInternalError:
-                            _error = KvmErrors.InternalError;
-                            throw new KvmException($"KVM internal error (suberror={run.Exit.InternalError.Suberror})");
+                        case WhvRunVpExitReason.X64InterruptWindow:
+                            continue;
+                        case WhvRunVpExitReason.UnrecoverableException:
+                            _error = WhpErrors.Exception;
+                            throw new WhpException($"WHP guest hit an unrecoverable exception at RIP 0x{ReadRegister(Registers.UC_X86_REG_RIP):X}");
+                        case WhvRunVpExitReason.InvalidVpRegisterValue:
+                            _error = WhpErrors.InternalError;
+                            throw new WhpException("WHP reported an invalid virtual processor register value.");
+                        case WhvRunVpExitReason.UnsupportedFeature:
+                            _error = WhpErrors.InternalError;
+                            throw new WhpException("WHP reported an unsupported feature during guest execution.");
                         default:
-                            _error = KvmErrors.InternalError;
-                            throw new KvmException($"Unhandled KVM exit reason: {run.ExitReason}");
+                            _error = WhpErrors.InternalError;
+                            throw new WhpException($"Unhandled WHP exit reason: {exit.ExitReason}");
                     }
                 }
 
-                _error = KvmErrors.Ok;
+                _error = WhpErrors.Ok;
                 return true;
             }
             finally
@@ -881,11 +780,23 @@ namespace Brovan.Core.Emulation
             if (DisposedCheck()) return false;
 
             _stopRequested = true;
-            ref LinuxKvmRun run = ref GetRunRef();
-            run.ImmediateExit = 1;
+            if (_partition != IntPtr.Zero)
+                WhpNative.WHvCancelRunVirtualProcessor(_partition, VpIndex, 0);
 
-            _error = KvmErrors.Ok;
+            _error = WhpErrors.Ok;
             return true;
+        }
+
+        private unsafe ref WhvRunVpExitContext RunVirtualProcessor()
+        {
+            int hr = WhpNative.WHvRunVirtualProcessor(_partition, VpIndex, (void*)_exitContextPtr,
+                (uint)sizeof(WhvRunVpExitContext));
+            if (WhpNative.Failed(hr))
+            {
+                _error = WhpErrors.InternalError;
+                throw new WhpException("WHvRunVirtualProcessor failed", hr);
+            }
+            return ref Unsafe.AsRef<WhvRunVpExitContext>((void*)_exitContextPtr);
         }
 
         private const BackendHookType FaultMemoryHookTypes =
@@ -905,19 +816,19 @@ namespace Brovan.Core.Emulation
             if (DisposedCheck()) return IntPtr.Zero;
             if (NoHooks && (hookType & FaultMemoryHookTypes) == 0)
             {
-                _error = KvmErrors.Ok;
+                _error = WhpErrors.Ok;
                 return IntPtr.Zero;
             }
 
             if ((hookType & ~SupportedMemoryHookTypes) != 0)
             {
-                _error = KvmErrors.HookError;
+                _error = WhpErrors.HookError;
                 return IntPtr.Zero;
             }
 
             if ((hookType & TrappedMemoryHookTypes) != 0 && IsUnboundedRange(begin, end))
             {
-                _error = KvmErrors.HookError;
+                _error = WhpErrors.HookError;
                 return IntPtr.Zero;
             }
 
@@ -936,6 +847,9 @@ namespace Brovan.Core.Emulation
             return PinHookEntry(entry);
         }
 
+        private const BackendHookType ReadingMemoryHookTypes =
+            BackendHookType.MemoryRead | BackendHookType.MemoryReadAfter;
+
         private void RefreshTrappedPages()
         {
             _trappedPages.Clear();
@@ -946,10 +860,16 @@ namespace Brovan.Core.Emulation
                 if ((entry.Type & TrappedMemoryHookTypes) == 0) continue;
                 if (IsUnboundedRange(entry.Begin, entry.End)) continue;
 
-                ulong first = entry.Begin & ~KvmConstants.PageMask;
-                ulong last = entry.End & ~KvmConstants.PageMask;
-                for (ulong page = first; page <= last; page += KvmConstants.PageSize)
-                    _trappedPages.Add(page);
+                bool hookReads = (entry.Type & ReadingMemoryHookTypes) != 0;
+                ulong first = entry.Begin & ~WhpConstants.PageMask;
+                ulong last = entry.End & ~WhpConstants.PageMask;
+                for (ulong page = first; page <= last; page += WhpConstants.PageSize)
+                {
+                    if (_trappedPages.TryGetValue(page, out bool writeOnly))
+                        _trappedPages[page] = writeOnly && !hookReads;
+                    else
+                        _trappedPages[page] = !hookReads;
+                }
             }
 
             RebuildMappings();
@@ -958,9 +878,9 @@ namespace Brovan.Core.Emulation
         public IntPtr AddCodeHook(ulong begin, ulong end, CodeHookCallback callback)
         {
             if (DisposedCheck()) return IntPtr.Zero;
-            if (NoHooks) { _error = KvmErrors.Ok; return IntPtr.Zero; }
+            if (NoHooks) { _error = WhpErrors.Ok; return IntPtr.Zero; }
 
-            _error = KvmErrors.HookError;
+            _error = WhpErrors.HookError;
             return IntPtr.Zero;
         }
 
@@ -968,7 +888,7 @@ namespace Brovan.Core.Emulation
         {
             if (callback == null) return IntPtr.Zero;
             if (DisposedCheck()) return IntPtr.Zero;
-            if (NoHooks) { _error = KvmErrors.Ok; return IntPtr.Zero; }
+            if (NoHooks) { _error = WhpErrors.Ok; return IntPtr.Zero; }
 
             InterruptHookEntry entry = new InterruptHookEntry { Callback = callback };
             _interruptHooks.Add(entry);
@@ -983,14 +903,12 @@ namespace Brovan.Core.Emulation
             InstructionHookEntry entry = new InstructionHookEntry { Type = instruction, Callback = callback };
             if (instruction == BackendInstructionHook.Syscall)
             {
-
                 if (_syscallHook != null) UnpinHookEntry(_syscallHook);
                 _syscallHook = entry;
             }
             else
             {
                 _instructionHooks.Add(entry);
-                RefreshInstructionHookFlags();
             }
             return PinHookEntry(entry);
         }
@@ -1002,7 +920,6 @@ namespace Brovan.Core.Emulation
 
             InstructionHookEntry entry = new InstructionHookEntry { Type = instruction, BoolCallback = callback };
             _instructionHooks.Add(entry);
-            RefreshInstructionHookFlags();
             return PinHookEntry(entry);
         }
 
@@ -1027,15 +944,14 @@ namespace Brovan.Core.Emulation
                     case InstructionHookEntry ins:
                         _instructionHooks.Remove(ins);
                         if (ReferenceEquals(_syscallHook, ins)) _syscallHook = null;
-                        RefreshInstructionHookFlags();
                         break;
                 }
 
-                _error = KvmErrors.Ok;
+                _error = WhpErrors.Ok;
                 return true;
             }
 
-            _error = KvmErrors.HookError;
+            _error = WhpErrors.HookError;
             return false;
         }
 
@@ -1048,12 +964,11 @@ namespace Brovan.Core.Emulation
             _instructionHooks.Clear();
             _interruptHooks.Clear();
             _syscallHook = null;
-            RefreshInstructionHookFlags();
 
             if (_trappedPages.Count > 0 && !Disposing)
                 RefreshTrappedPages();
 
-            _error = KvmErrors.Ok;
+            _error = WhpErrors.Ok;
             return true;
         }
 
@@ -1074,10 +989,10 @@ namespace Brovan.Core.Emulation
             ulong remaining = size;
             while (remaining > 0)
             {
-                ulong pageBase = current & ~KvmConstants.PageMask;
+                ulong pageBase = current & ~WhpConstants.PageMask;
                 if (!TryLookupPage(pageBase, out _))
                     return false;
-                ulong pageEnd = pageBase + KvmConstants.PageSize;
+                ulong pageEnd = pageBase + WhpConstants.PageSize;
                 ulong chunk = pageEnd - current;
                 if (chunk > remaining) chunk = remaining;
                 current += chunk;
@@ -1094,10 +1009,17 @@ namespace Brovan.Core.Emulation
             {
                 RemoveHooks();
 
-                if (_runMmapPtr != IntPtr.Zero)
+                if (_partition != IntPtr.Zero)
                 {
-                    KvmNative.munmap(_runMmapPtr, (UIntPtr)_runMmapSize);
-                    _runMmapPtr = IntPtr.Zero;
+                    WhpNative.WHvDeleteVirtualProcessor(_partition, VpIndex);
+                    WhpNative.WHvDeletePartition(_partition);
+                    _partition = IntPtr.Zero;
+                }
+
+                if (_exitContextPtr != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(_exitContextPtr);
+                    _exitContextPtr = IntPtr.Zero;
                 }
 
                 foreach (KeyValuePair<IntPtr, BackingAllocation> kv in _backingAllocations)
@@ -1115,10 +1037,6 @@ namespace Brovan.Core.Emulation
                 foreach (var fb in _internalPoolFallbacks)
                     FreeBackingMemory(fb.Ptr, fb.Size);
                 _internalPoolFallbacks.Clear();
-
-                if (_vcpuFd >= 0) { KvmNative.close(_vcpuFd); _vcpuFd = -1; }
-                if (_partitionFd >= 0) { KvmNative.close(_partitionFd); _partitionFd = -1; }
-                if (_systemFd >= 0) { KvmNative.close(_systemFd); _systemFd = -1; }
             }
             finally
             {
@@ -1127,23 +1045,22 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        ~Kvm() { Dispose(); }
+        ~Whp() { Dispose(); }
 
-        private static KvmMemoryPermission TranslateProtection(MemoryProtection protection)
+        private static WhpMemoryPermission TranslateProtection(MemoryProtection protection)
         {
-            KvmMemoryPermission perm = KvmMemoryPermission.None;
-            if ((protection & MemoryProtection.Read) != 0) perm |= KvmMemoryPermission.Read;
-            if ((protection & MemoryProtection.Write) != 0) perm |= KvmMemoryPermission.Write;
-            if ((protection & MemoryProtection.Execute) != 0) perm |= KvmMemoryPermission.Execute;
+            WhpMemoryPermission perm = WhpMemoryPermission.None;
+            if ((protection & MemoryProtection.Read) != 0) perm |= WhpMemoryPermission.Read;
+            if ((protection & MemoryProtection.Write) != 0) perm |= WhpMemoryPermission.Write;
+            if ((protection & MemoryProtection.Execute) != 0) perm |= WhpMemoryPermission.Execute;
             return perm;
         }
 
-        private static uint ToKvmMapFlags(KvmMemoryPermission permissions)
+        private static WhvMapGpaRangeFlags ToWhpMapFlags(WhpMemoryPermission permissions)
         {
-            if (permissions == KvmMemoryPermission.None) return 0;
-            uint flags = 0;
-            if ((permissions & KvmMemoryPermission.Write) == 0)
-                flags |= KvmConstants.MemSlotReadOnly;
+            WhvMapGpaRangeFlags flags = WhvMapGpaRangeFlags.Read | WhvMapGpaRangeFlags.Execute;
+            if ((permissions & WhpMemoryPermission.Write) != 0)
+                flags |= WhvMapGpaRangeFlags.Write;
             return flags;
         }
 
@@ -1165,46 +1082,59 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        private static LinuxKvmSegment MakeSegment(ushort selector, bool isCode, bool isUser)
+        private static ushort SegmentAttributes(bool isCode, bool isUser)
         {
-            return new LinuxKvmSegment
+            int type = isCode ? 0xB : 0x3;
+            int dpl = isUser ? 3 : 0;
+            int db = isCode ? 0 : 1;
+            int l = isCode ? 1 : 0;
+            return (ushort)(type | (1 << 4) | (dpl << 5) | (1 << 7) | (l << 13) | (db << 14) | (1 << 15));
+        }
+
+        private static WhvRegisterValue MakeSegment(ushort selector, bool isCode, bool isUser)
+            => WhvRegisterValue.FromSegment(0, 0xFFFFF, selector, SegmentAttributes(isCode, isUser));
+
+        private static readonly WhvRegisterValue UserCodeSegment =
+            MakeSegment(WhpConstants.UserCodeSelector, true, true);
+        private static readonly WhvRegisterValue UserDataSegment =
+            MakeSegment(WhpConstants.UserDataSelector, false, true);
+
+        private unsafe void SetCsSs(WhvRegisterValue cs, WhvRegisterValue ss)
+        {
+            Span<uint> names = stackalloc uint[2] { (uint)WhvRegisterName.Cs, (uint)WhvRegisterName.Ss };
+            Span<WhvRegisterValue> values = stackalloc WhvRegisterValue[2] { cs, ss };
+            lock (_vcpuLock)
             {
-                Base = 0,
-                Limit = 0xFFFFF,
-                Selector = selector,
-                Type = isCode ? (byte)0xB : (byte)0x3,
-                Present = 1,
-                Dpl = isUser ? (byte)3 : (byte)0,
-                Db = isCode ? (byte)0 : (byte)1,
-                S = 1,
-                L = isCode ? (byte)1 : (byte)0,
-                G = 1,
-                Avl = 0,
-                Unusable = 0,
-            };
+                fixed (uint* n = names)
+                fixed (WhvRegisterValue* v = values)
+                {
+                    int hr = WhpNative.WHvSetVirtualProcessorRegisters(_partition, VpIndex, n, 2, v);
+                    if (WhpNative.Failed(hr))
+                        throw new WhpException("WHvSetVirtualProcessorRegisters(CS/SS) failed", hr);
+                }
+            }
         }
 
         private void ClearTrapFlag()
         {
-            ref LinuxKvmRegisters regs = ref GetRegistersRef();
+            ref WhpRegisters regs = ref GetRegistersRef();
             if ((regs.Rflags & 0x100UL) == 0) return;
             regs.Rflags &= ~0x100UL;
             _regsDirty = true;
             FlushRegisterCache();
         }
 
-        private unsafe IntPtr AllocateBackingMemory(ulong size)
+        private IntPtr AllocateBackingMemory(ulong size)
         {
-            IntPtr ptr = KvmNative.mmap(IntPtr.Zero, (UIntPtr)size,
-                KvmNative.PROT_READ | KvmNative.PROT_WRITE,
-                KvmNative.MAP_PRIVATE | KvmNative.MAP_ANONYMOUS, -1, 0);
-            if (ptr == KvmNative.MAP_FAILED)
-                throw new KvmException("mmap failed", Marshal.GetLastWin32Error());
+            IntPtr ptr = WhpNative.VirtualAlloc(IntPtr.Zero, (UIntPtr)size,
+                WhpNative.MEM_COMMIT | WhpNative.MEM_RESERVE, WhpNative.PAGE_READWRITE);
+            if (ptr == IntPtr.Zero)
+                throw new WhpException("VirtualAlloc failed", Marshal.GetLastWin32Error());
             return ptr;
         }
 
-        private static unsafe void FreeBackingMemory(IntPtr ptr, ulong size)
-            => KvmNative.munmap(ptr, (UIntPtr)size);
+        private static void FreeBackingMemory(IntPtr ptr, ulong size)
+            => WhpNative.VirtualFree(ptr, UIntPtr.Zero, WhpNative.MEM_RELEASE);
 
         private void ReleaseBacking(MappedPage page)
         {
@@ -1216,9 +1146,6 @@ namespace Brovan.Core.Emulation
             FreeBackingMemory(page.OwnedBacking, allocation.Size);
             _backingAllocations.Remove(page.OwnedBacking);
         }
-
-        private unsafe ref LinuxKvmRun GetRunRef()
-            => ref Unsafe.AsRef<LinuxKvmRun>((void*)_runMmapPtr);
 
         private IntPtr PinHookEntry(object entry)
         {
@@ -1242,130 +1169,99 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        private void EnsurePlatformSupport()
+        private unsafe void EnsurePlatformSupport()
         {
-            _systemFd = KvmNative.open("/dev/kvm", KvmNative.O_RDWR | KvmNative.O_CLOEXEC, 0);
-            if (_systemFd < 0)
-                throw new KvmException("open(/dev/kvm) failed", Marshal.GetLastWin32Error());
-
-            int apiVersion = KvmNative.ioctl(_systemFd, KvmConstants.KvmIoGetApiVersion, IntPtr.Zero);
-            if (apiVersion < 0)
-                throw new KvmException("KVM_GET_API_VERSION failed", Marshal.GetLastWin32Error());
-            if (apiVersion != KvmConstants.ExpectedApiVersion)
-                throw new KvmException($"Unexpected KVM API version {apiVersion}");
-
-            _maxMemslots = KvmNative.ioctl(_systemFd, KvmConstants.KvmIoCheckExtension, KvmConstants.CapNrMemslots);
-            if (_maxMemslots <= 0)
-                _maxMemslots = DefaultMemslotCount;
-
-            _supportsXsave = KvmNative.ioctl(_systemFd, KvmConstants.KvmIoCheckExtension, KvmConstants.CapXsave) > 0;
-
-            _runMmapSize = KvmNative.ioctl(_systemFd, KvmConstants.KvmIoGetVcpuMmapSize, IntPtr.Zero);
-            if (_runMmapSize <= 0)
-                throw new KvmException("KVM_GET_VCPU_MMAP_SIZE failed", Marshal.GetLastWin32Error());
+            int present = 0;
+            uint written = 0;
+            int hr = WhpNative.WHvGetCapability(WhvCapabilityCode.HypervisorPresent, &present,
+                sizeof(int), &written);
+            if (WhpNative.Failed(hr))
+                throw new WhpException("WHvGetCapability(HypervisorPresent) failed. The Windows Hypervisor Platform feature must be enabled.", hr);
+            if (written < sizeof(int) || present == 0)
+                throw new WhpException("Windows Hypervisor Platform is not present. Enable the 'Windows Hypervisor Platform' optional feature and ensure virtualization is available.");
         }
 
-        private void ConfigurePartition()
+        private unsafe void ConfigurePartition()
         {
-            _partitionFd = KvmNative.ioctl(_systemFd, KvmConstants.KvmIoCreateVm, IntPtr.Zero);
-            if (_partitionFd < 0)
-                throw new KvmException("KVM_CREATE_VM failed", Marshal.GetLastWin32Error());
-            KvmNative.ioctl(_partitionFd, KvmConstants.KvmIoSetTssAddress, (IntPtr)0xfffbd000);
+            int hr = WhpNative.WHvCreatePartition(out _partition);
+            if (WhpNative.Failed(hr))
+                throw new WhpException("WHvCreatePartition failed", hr);
+
+            uint processorCount = 1;
+            hr = WhpNative.WHvSetPartitionProperty(_partition, WhvPartitionPropertyCode.ProcessorCount,
+                &processorCount, sizeof(uint));
+            if (WhpNative.Failed(hr))
+                throw new WhpException("WHvSetPartitionProperty(ProcessorCount) failed", hr);
+
+            hr = WhpNative.WHvSetupPartition(_partition);
+            if (WhpNative.Failed(hr))
+                throw new WhpException("WHvSetupPartition failed", hr);
+
+            hr = WhpNative.WHvCreateVirtualProcessor(_partition, VpIndex, 0);
+            if (WhpNative.Failed(hr))
+                throw new WhpException("WHvCreateVirtualProcessor failed", hr);
+
+            _exitContextPtr = Marshal.AllocHGlobal(sizeof(WhvRunVpExitContext));
         }
 
-        private void ConfigureVirtualProcessor()
+        private unsafe void InitializeVirtualProcessorState()
         {
-            _vcpuFd = KvmNative.ioctl(_partitionFd, KvmConstants.KvmIoCreateVcpu, 0);
-            if (_vcpuFd < 0)
-                throw new KvmException("KVM_CREATE_VCPU failed", Marshal.GetLastWin32Error());
+            const int count = 16;
+            Span<uint> names = stackalloc uint[count];
+            Span<WhvRegisterValue> values = stackalloc WhvRegisterValue[count];
 
-            _runMmapPtr = KvmNative.mmap(IntPtr.Zero, (UIntPtr)_runMmapSize,
-                KvmNative.PROT_READ | KvmNative.PROT_WRITE, KvmNative.MAP_SHARED, _vcpuFd, 0);
-            if (_runMmapPtr == KvmNative.MAP_FAILED)
+            names[0] = (uint)WhvRegisterName.Cs; values[0] = UserCodeSegment;
+            names[1] = (uint)WhvRegisterName.Ss; values[1] = UserDataSegment;
+            names[2] = (uint)WhvRegisterName.Ds; values[2] = UserDataSegment;
+            names[3] = (uint)WhvRegisterName.Es; values[3] = UserDataSegment;
+            names[4] = (uint)WhvRegisterName.Fs; values[4] = MakeSegment(0x53, false, true);
+            names[5] = (uint)WhvRegisterName.Gs; values[5] = UserDataSegment;
+            names[6] = (uint)WhvRegisterName.Tr;
+            values[6] = WhvRegisterValue.FromSegment(_exceptionTssPageGpa, 0x67, WhpConstants.TssSelector, 0x8B);
+            names[7] = (uint)WhvRegisterName.Gdtr; values[7] = WhvRegisterValue.FromTable(_gdtPageGpa, 0x48);
+            names[8] = (uint)WhvRegisterName.Idtr;
+            values[8] = WhvRegisterValue.FromTable(_exceptionIdtPageGpa, (ushort)(WhpConstants.ExceptionVectorCount * 16 - 1));
+            names[9] = (uint)WhvRegisterName.Cr0; values[9] = WhvRegisterValue.FromReg64(0x80000033UL);
+            names[10] = (uint)WhvRegisterName.Cr3; values[10] = WhvRegisterValue.FromReg64(_pml4Gpa);
+            names[11] = (uint)WhvRegisterName.Cr4; values[11] = WhvRegisterValue.FromReg64(0x620UL);
+            names[12] = (uint)WhvRegisterName.Efer;
+            values[12] = WhvRegisterValue.FromReg64((1UL << 0) | (1UL << 8) | (1UL << 10) | (1UL << 11));
+            names[13] = (uint)WhvRegisterName.Star; values[13] = WhvRegisterValue.FromReg64((0x23UL << 48) | (0x08UL << 32));
+            names[14] = (uint)WhvRegisterName.Lstar; values[14] = WhvRegisterValue.FromReg64(_syscallTrapPageGpa);
+            names[15] = (uint)WhvRegisterName.Sfmask; values[15] = WhvRegisterValue.FromReg64(0);
+
+            lock (_vcpuLock)
             {
-                _runMmapPtr = IntPtr.Zero;
-                throw new KvmException("mmap(KVM_RUN) failed", Marshal.GetLastWin32Error());
-            }
-
-            InitializeCpuid();
-        }
-
-        private unsafe void InitializeCpuid()
-        {
-            const int cpuidEntries = 256;
-            int size = sizeof(LinuxKvmCpuid2) + (cpuidEntries - 1) * sizeof(LinuxKvmCpuidEntry2);
-            byte* buffer = stackalloc byte[size];
-            ref LinuxKvmCpuid2 cpuid = ref Unsafe.AsRef<LinuxKvmCpuid2>(buffer);
-            cpuid.Nent = cpuidEntries;
-            if (KvmNative.ioctl(_systemFd, KvmConstants.KvmIoGetSupportedCpuid, (IntPtr)buffer) < 0)
-                throw new KvmException("KVM_GET_SUPPORTED_CPUID failed", Marshal.GetLastWin32Error());
-            if (KvmNative.ioctl(_vcpuFd, KvmConstants.KvmIoSetCpuid2, (IntPtr)buffer) < 0)
-                throw new KvmException("KVM_SET_CPUID2 failed", Marshal.GetLastWin32Error());
-        }
-
-        private void InitializeVirtualProcessorState()
-        {
-            LinuxKvmSpecialRegisters sregs = GetSpecialRegisters();
-            sregs.Cs = MakeSegment(KvmConstants.UserCodeSelector, true, true);
-            sregs.Ss = MakeSegment(KvmConstants.UserDataSelector, false, true);
-            sregs.Ds = MakeSegment(KvmConstants.UserDataSelector, false, true);
-            sregs.Es = MakeSegment(KvmConstants.UserDataSelector, false, true);
-            sregs.Fs = MakeSegment(0x53, false, true);
-            sregs.Gs = MakeSegment(KvmConstants.UserDataSelector, false, true);
-            sregs.Cr0 = 0x80000033UL;
-            sregs.Cr4 = 0x620UL;
-            sregs.Cr3 = _pml4Gpa;
-
-            sregs.Efer = (1UL << 0) | (1UL << 8) | (1UL << 10) | (1UL << 11);
-            SetSpecialRegisters(sregs);
-
-            LinuxKvmRegisters regs = GetRegisters();
-            regs.Rflags = 0x2UL;
-            SetRegisters(regs);
-
-            unsafe
-            {
-                LinuxKvmFpu fpu = new LinuxKvmFpu
+                fixed (uint* n = names)
+                fixed (WhvRegisterValue* v = values)
                 {
-                    Fcw = 0x037F,
-                    Fsw = 0,
-                    Ftwx = 0xFF,
-                    LastOpcode = 0,
-                    LastIp = 0,
-                    LastDp = 0,
-                    Mxcsr = 0x1F80,
-                };
-                SetFpu(ref fpu);
-            }
-
-            SetMsr(KvmConstants.MsrStar, (0x23UL << 48) | (0x08UL << 32));
-            SetMsr(KvmConstants.MsrSyscallMask, 0);
-        }
-
-        private void InitializeSyscallTrapPage()
-        {
-            _syscallTrapPageGpa = AllocateInternalPage(true);
-            unsafe
-            {
-                if (_mappedPages.TryGetValue(_syscallTrapPageGpa, out MappedPage page))
-                {
-                    byte* code = (byte*)page.HostPage;
-                    code[0] = 0xF4;
+                    int hr = WhpNative.WHvSetVirtualProcessorRegisters(_partition, VpIndex, n, count, v);
+                    if (WhpNative.Failed(hr))
+                        throw new WhpException("WHvSetVirtualProcessorRegisters(initial state) failed", hr);
                 }
             }
-            SetMsr(KvmConstants.MsrLstar, _syscallTrapPageGpa);
+        }
+
+        private unsafe void InitializeSyscallTrapPage()
+        {
+            _syscallTrapPageGpa = AllocateInternalPage(true);
+            if (_mappedPages.TryGetValue(_syscallTrapPageGpa, out MappedPage page))
+            {
+                byte* code = (byte*)page.HostPage;
+                code[0] = 0xF4;
+            }
         }
 
         private void InitializeGdt()
         {
             _gdtPageGpa = AllocateInternalPage(false);
             if (!_mappedPages.TryGetValue(_gdtPageGpa, out MappedPage gdtPage) || gdtPage.HostPage == IntPtr.Zero)
-                throw new KvmException("Failed to allocate GDT page.");
+                throw new WhpException("Failed to allocate GDT page.");
 
             unsafe
             {
                 byte* gdt = (byte*)gdtPage.HostPage;
-                Unsafe.InitBlockUnaligned(gdt, 0, (uint)KvmConstants.PageSize);
+                Unsafe.InitBlockUnaligned(gdt, 0, (uint)WhpConstants.PageSize);
 
                 gdt[0x08] = 0xFF; gdt[0x09] = 0xFF; gdt[0x0A] = 0x00; gdt[0x0B] = 0x00;
                 gdt[0x0C] = 0x00; gdt[0x0D] = 0x9B; gdt[0x0E] = 0xAF; gdt[0x0F] = 0x00;
@@ -1379,11 +1275,6 @@ namespace Brovan.Core.Emulation
                 gdt[0x30] = 0xFF; gdt[0x31] = 0xFF; gdt[0x32] = 0x00; gdt[0x33] = 0x00;
                 gdt[0x34] = 0x00; gdt[0x35] = 0xFB; gdt[0x36] = 0xAF; gdt[0x37] = 0x00;
             }
-
-            LinuxKvmSpecialRegisters sregs = GetSpecialRegisters();
-            sregs.Gdt.Base = _gdtPageGpa;
-            sregs.Gdt.Limit = 0x48;
-            SetSpecialRegisters(sregs);
         }
 
         private void InitializeExceptionHandling()
@@ -1392,29 +1283,29 @@ namespace Brovan.Core.Emulation
             _exceptionIdtPageGpa = AllocateInternalPage(false);
             _exceptionTssPageGpa = AllocateInternalPage(false);
 
-            ulong exceptionStackSize = 16 * KvmConstants.PageSize;
-            _exceptionStackPageGpa = AllocateInternalRange(exceptionStackSize, KvmMemoryPermission.ReadWrite);
+            ulong exceptionStackSize = 16 * WhpConstants.PageSize;
+            _exceptionStackPageGpa = AllocateInternalRange(exceptionStackSize, WhpMemoryPermission.ReadWrite);
 
             unsafe
             {
                 if (_mappedPages.TryGetValue(_exceptionStubPageGpa, out MappedPage stubPage))
                 {
                     byte* stubs = (byte*)stubPage.HostPage;
-                    for (uint vector = 0; vector < KvmConstants.ExceptionVectorCount; vector++)
-                        stubs[vector * (int)KvmConstants.ExceptionStubStride] = 0xF4;
+                    for (uint vector = 0; vector < WhpConstants.ExceptionVectorCount; vector++)
+                        stubs[vector * (int)WhpConstants.ExceptionStubStride] = 0xF4;
                 }
 
                 if (_mappedPages.TryGetValue(_exceptionIdtPageGpa, out MappedPage idtPage))
                 {
                     byte* idt = (byte*)idtPage.HostPage;
-                    for (uint vector = 0; vector < KvmConstants.ExceptionVectorCount; vector++)
+                    for (uint vector = 0; vector < WhpConstants.ExceptionVectorCount; vector++)
                     {
-                        ulong handler = _exceptionStubPageGpa + vector * KvmConstants.ExceptionStubStride;
+                        ulong handler = _exceptionStubPageGpa + vector * WhpConstants.ExceptionStubStride;
 
                         ulong low = (handler & 0xFFFF)
-                                  | ((ulong)KvmConstants.KernelCodeSelector << 16)
-                                  | ((ulong)(KvmConstants.ExceptionIstIndex & 0x7) << 32)
-                                  | ((ulong)KvmConstants.ExceptionGateAttributes << 40)
+                                  | ((ulong)WhpConstants.KernelCodeSelector << 16)
+                                  | ((ulong)(WhpConstants.ExceptionIstIndex & 0x7) << 32)
+                                  | ((ulong)WhpConstants.ExceptionGateAttributes << 40)
                                   | (((handler >> 16) & 0xFFFF) << 48);
                         ulong high = (handler >> 32) & 0xFFFFFFFF;
                         Unsafe.WriteUnaligned(idt + vector * 16, low);
@@ -1438,7 +1329,7 @@ namespace Brovan.Core.Emulation
                 unsafe
                 {
                     byte* gdt = (byte*)gdtMapped.HostPage;
-                    int tssIndex = KvmConstants.TssSelector >> 3;
+                    int tssIndex = WhpConstants.TssSelector >> 3;
                     ulong tssBase = _exceptionTssPageGpa;
                     uint tssLimit = 0x67;
                     gdt[tssIndex * 8 + 0] = (byte)(tssLimit & 0xFF);
@@ -1459,23 +1350,6 @@ namespace Brovan.Core.Emulation
                     gdt[tssIndex * 8 + 15] = 0;
                 }
             }
-
-            LinuxKvmSpecialRegisters sregs = GetSpecialRegisters();
-            sregs.Idt.Base = _exceptionIdtPageGpa;
-            sregs.Idt.Limit = (ushort)(KvmConstants.ExceptionVectorCount * 16 - 1);
-            sregs.Tr.Selector = KvmConstants.TssSelector;
-            sregs.Tr.Base = _exceptionTssPageGpa;
-            sregs.Tr.Limit = 0x67;
-            sregs.Tr.Type = 11;
-            sregs.Tr.S = 0;
-            sregs.Tr.Present = 1;
-            sregs.Tr.Dpl = 0;
-            sregs.Tr.Db = 0;
-            sregs.Tr.L = 0;
-            sregs.Tr.G = 0;
-            sregs.Tr.Avl = 0;
-            sregs.Tr.Unusable = 0;
-            SetSpecialRegisters(sregs);
         }
 
         private void InitializeLongModePageTables()
@@ -1490,13 +1364,13 @@ namespace Brovan.Core.Emulation
         }
 
         private ulong AllocateInternalPage(bool executable = false, bool mapIntoGuest = true)
-            => AllocateInternalRange(KvmConstants.PageSize,
-                executable ? KvmMemoryPermission.All : KvmMemoryPermission.ReadWrite, mapIntoGuest);
+            => AllocateInternalRange(WhpConstants.PageSize,
+                executable ? WhpMemoryPermission.All : WhpMemoryPermission.ReadWrite, mapIntoGuest);
 
-        private ulong AllocateInternalRange(ulong size, KvmMemoryPermission permissions, bool mapIntoGuest = true)
+        private ulong AllocateInternalRange(ulong size, WhpMemoryPermission permissions, bool mapIntoGuest = true)
         {
-            if ((size & KvmConstants.PageMask) != 0)
-                size = (size + KvmConstants.PageMask) & ~KvmConstants.PageMask;
+            if ((size & WhpConstants.PageMask) != 0)
+                size = (size + WhpConstants.PageMask) & ~WhpConstants.PageMask;
 
             IntPtr backing;
             if (_internalPoolPtr != IntPtr.Zero &&
@@ -1515,7 +1389,7 @@ namespace Brovan.Core.Emulation
             _nextInternalGpa += size;
 
             long backingBase = backing.ToInt64();
-            for (ulong off = 0; off < size; off += KvmConstants.PageSize)
+            for (ulong off = 0; off < size; off += WhpConstants.PageSize)
             {
                 ulong pageGpa = baseGpa + off;
                 MappedPage page = new MappedPage
@@ -1536,7 +1410,7 @@ namespace Brovan.Core.Emulation
 
         private void EnsureVirtualMapping(ulong guestAddress)
         {
-            ulong pageBase = guestAddress & ~KvmConstants.PageMask;
+            ulong pageBase = guestAddress & ~WhpConstants.PageMask;
             int pml4Index = (int)((pageBase >> 39) & 0x1FF);
             int pdptIndex = (int)((pageBase >> 30) & 0x1FF);
             int pdIndex = (int)((pageBase >> 21) & 0x1FF);
@@ -1551,9 +1425,9 @@ namespace Brovan.Core.Emulation
             {
                 ulong* pt = (ulong*)ptPtr;
                 pt[ptIndex] = pageBase
-                    | KvmConstants.PageTableEntryPresent
-                    | KvmConstants.PageTableEntryWritable
-                    | KvmConstants.PageTableEntryUser;
+                    | WhpConstants.PageTableEntryPresent
+                    | WhpConstants.PageTableEntryWritable
+                    | WhpConstants.PageTableEntryUser;
             }
         }
 
@@ -1565,16 +1439,16 @@ namespace Brovan.Core.Emulation
             {
                 ulong* entries = (ulong*)tablePtr;
                 ulong entry = entries[index];
-                if ((entry & KvmConstants.PageTableEntryPresent) == 0)
+                if ((entry & WhpConstants.PageTableEntryPresent) == 0)
                 {
                     ulong childGpa = AllocateInternalPage(false, false);
                     entries[index] = childGpa
-                        | KvmConstants.PageTableEntryPresent
-                        | KvmConstants.PageTableEntryWritable
-                        | KvmConstants.PageTableEntryUser;
+                        | WhpConstants.PageTableEntryPresent
+                        | WhpConstants.PageTableEntryWritable
+                        | WhpConstants.PageTableEntryUser;
                     return childGpa;
                 }
-                return entry & KvmConstants.PageTableEntryAddressMask;
+                return entry & WhpConstants.PageTableEntryAddressMask;
             }
         }
 
@@ -1638,7 +1512,7 @@ namespace Brovan.Core.Emulation
             int keyCount = _mappedPages.Count;
             bool anyTrapped = _trappedPages.Count != 0;
 
-            _desiredSlots.Clear();
+            _desiredMaps.Clear();
 
             for (int i = 0; i < keyCount;)
             {
@@ -1646,16 +1520,30 @@ namespace Brovan.Core.Emulation
                 if (!_mappedPages.TryGetValue(runAddress, out MappedPage page)
                     || page == null
                     || page.HostPage == IntPtr.Zero
-                    || page.Permissions == KvmMemoryPermission.None
-                    || (anyTrapped && _trappedPages.Contains(runAddress)))
+                    || page.Permissions == WhpMemoryPermission.None)
                 {
                     i++;
                     continue;
                 }
 
+                if (anyTrapped && _trappedPages.TryGetValue(runAddress, out bool writeOnly))
+                {
+                    if (writeOnly)
+                    {
+                        _desiredMaps[runAddress] = new InstalledMap
+                        {
+                            Size = WhpConstants.PageSize,
+                            Host = page.HostPage,
+                            Flags = WhvMapGpaRangeFlags.Read | WhvMapGpaRangeFlags.Execute,
+                        };
+                    }
+                    i++;
+                    continue;
+                }
+
                 long runHostBaseLong = page.HostPage.ToInt64();
-                uint runFlags = ToKvmMapFlags(page.Permissions);
-                ulong runSize = KvmConstants.PageSize;
+                WhvMapGpaRangeFlags runFlags = ToWhpMapFlags(page.Permissions);
+                ulong runSize = WhpConstants.PageSize;
 
                 int j = i + 1;
                 while (j < keyCount)
@@ -1663,13 +1551,13 @@ namespace Brovan.Core.Emulation
                     if (sortedKeys[j] != runAddress + runSize) break;
                     if (!_mappedPages.TryGetValue(sortedKeys[j], out MappedPage next) || next == null) break;
                     if (next.Permissions != page.Permissions) break;
-                    if (anyTrapped && _trappedPages.Contains(sortedKeys[j])) break;
+                    if (anyTrapped && _trappedPages.ContainsKey(sortedKeys[j])) break;
                     if (next.HostPage.ToInt64() != runHostBaseLong + (long)runSize) break;
-                    runSize += KvmConstants.PageSize;
+                    runSize += WhpConstants.PageSize;
                     j++;
                 }
 
-                _desiredSlots[runAddress] = new InstalledSlot
+                _desiredMaps[runAddress] = new InstalledMap
                 {
                     Size = runSize,
                     Host = new IntPtr(runHostBaseLong),
@@ -1678,144 +1566,41 @@ namespace Brovan.Core.Emulation
                 i = j;
             }
 
-            _staleSlotKeys.Clear();
-            foreach (KeyValuePair<ulong, InstalledSlot> kv in _activeSlots)
+            _staleMapKeys.Clear();
+            foreach (KeyValuePair<ulong, InstalledMap> kv in _activeMaps)
             {
-                if (!_desiredSlots.TryGetValue(kv.Key, out InstalledSlot want)
+                if (!_desiredMaps.TryGetValue(kv.Key, out InstalledMap want)
                     || want.Size != kv.Value.Size
                     || want.Host != kv.Value.Host
                     || want.Flags != kv.Value.Flags)
                 {
-                    DeleteMemslot(kv.Value.Id);
-                    _staleSlotKeys.Add(kv.Key);
+                    UnmapGpaRange(kv.Key, kv.Value.Size);
+                    _staleMapKeys.Add(kv.Key);
                 }
                 else
                 {
-                    _desiredSlots.Remove(kv.Key);
+                    _desiredMaps.Remove(kv.Key);
                 }
             }
-            for (int i = 0; i < _staleSlotKeys.Count; i++)
-                _activeSlots.Remove(_staleSlotKeys[i]);
+            for (int i = 0; i < _staleMapKeys.Count; i++)
+                _activeMaps.Remove(_staleMapKeys[i]);
 
-            foreach (KeyValuePair<ulong, InstalledSlot> kv in _desiredSlots)
+            foreach (KeyValuePair<ulong, InstalledMap> kv in _desiredMaps)
             {
-                int slot = AllocateSlotId();
-                SetMemslot(slot, kv.Key, kv.Value.Size, kv.Value.Host, kv.Value.Flags);
-                _activeSlots[kv.Key] = new InstalledSlot
-                {
-                    Id = slot,
-                    Size = kv.Value.Size,
-                    Host = kv.Value.Host,
-                    Flags = kv.Value.Flags,
-                };
+                MapGpaRange(kv.Key, kv.Value.Size, kv.Value.Host, kv.Value.Flags);
+                _activeMaps[kv.Key] = kv.Value;
             }
         }
 
-        private int AllocateSlotId()
+        private unsafe void MapGpaRange(ulong gpa, ulong size, IntPtr host, WhvMapGpaRangeFlags flags)
         {
-            if (_freeSlotIds.Count > 0)
-            {
-                int slot = _freeSlotIds[_freeSlotIds.Count - 1];
-                _freeSlotIds.RemoveAt(_freeSlotIds.Count - 1);
-                return slot;
-            }
-            if (_nextSlotId >= _maxMemslots)
-                throw new KvmException("Exhausted KVM memory slots");
-            return _nextSlotId++;
+            int hr = WhpNative.WHvMapGpaRange(_partition, (void*)host, gpa, size, flags);
+            if (WhpNative.Failed(hr))
+                throw new WhpException($"WHvMapGpaRange failed (gpa=0x{gpa:X}, size=0x{size:X})", hr);
         }
 
-        private void SetMemslot(int slot, ulong guestAddress, ulong size, IntPtr hostBase, uint flags)
-        {
-            LinuxKvmUserspaceMemoryRegion region = new LinuxKvmUserspaceMemoryRegion
-            {
-                Slot = (uint)slot,
-                Flags = flags,
-                GuestPhysAddr = guestAddress,
-                MemorySize = size,
-                UserspaceAddr = (ulong)hostBase,
-            };
-            if (KvmNative.ioctl(_partitionFd, KvmConstants.KvmIoSetUserMemoryRegion, ref region) < 0)
-                throw new KvmException("KVM_SET_USER_MEMORY_REGION failed", Marshal.GetLastWin32Error());
-        }
-
-        private void DeleteMemslot(int slot)
-        {
-            LinuxKvmUserspaceMemoryRegion region = new LinuxKvmUserspaceMemoryRegion
-            {
-                Slot = (uint)slot,
-                MemorySize = 0,
-            };
-            KvmNative.ioctl(_partitionFd, KvmConstants.KvmIoSetUserMemoryRegion, ref region);
-            _freeSlotIds.Add(slot);
-        }
-
-        private void RefreshMmioBackedRegions()
-        {
-            if (_mmioRegions.Count == 0) return;
-
-            long now = Stopwatch.GetTimestamp();
-            if (now - _lastMmioRefreshTimestamp < MmioRefreshIntervalTicks) return;
-            _lastMmioRefreshTimestamp = now;
-
-            for (int i = 0; i < _mmioRegions.Count; i++)
-                RefreshMmioRegion(_mmioRegions[i]);
-        }
-
-        private unsafe void RefreshMmioRegion(MmioRegion region)
-        {
-            for (ulong offset = 0; offset < region.Size; offset += KvmConstants.PageSize)
-            {
-                if (!_mappedPages.TryGetValue(region.Address + offset, out MappedPage page)
-                    || page == null
-                    || page.HostPage == IntPtr.Zero)
-                    continue;
-
-                int chunk = (int)Math.Min(KvmConstants.PageSize, region.Size - offset);
-                region.ReadCallback(offset, new Span<byte>((void*)page.HostPage, chunk));
-            }
-        }
-
-        private bool HandlePreRunInstruction()
-        {
-            if (!_scanPreRunInstructions) return false;
-
-            ulong rip = ReadRegister(Registers.UC_X86_REG_RIP);
-            Span<byte> opcode = stackalloc byte[3];
-            if (!TryReadMemoryInternal(rip, opcode)) return false;
-
-            if (opcode[0] != 0x0F) return false;
-
-            if (_hasCpuIdHook && opcode[1] == 0xA2)
-                return HandleInstructionHook(BackendInstructionHook.CpuId, 2);
-            if (_hasRdtscHook && opcode[1] == 0x31)
-                return HandleInstructionHook(BackendInstructionHook.Rdtsc, 2);
-            if (_hasRdtscpHook && opcode[1] == 0x01 && opcode[2] == 0xF9)
-                return HandleInstructionHook(BackendInstructionHook.Rdtscp, 3);
-            if (_hasInvalidHook && opcode[1] == 0x0B)
-                return HandleInvalidInstructionHook();
-            return false;
-        }
-
-        private void RefreshInstructionHookFlags()
-        {
-            _hasCpuIdHook = false;
-            _hasRdtscHook = false;
-            _hasRdtscpHook = false;
-            _hasInvalidHook = false;
-
-            for (int i = 0; i < _instructionHooks.Count; i++)
-            {
-                switch (_instructionHooks[i].Type)
-                {
-                    case BackendInstructionHook.CpuId: _hasCpuIdHook = true; break;
-                    case BackendInstructionHook.Rdtsc: _hasRdtscHook = true; break;
-                    case BackendInstructionHook.Rdtscp: _hasRdtscpHook = true; break;
-                    case BackendInstructionHook.Invalid: _hasInvalidHook = true; break;
-                }
-            }
-
-            _scanPreRunInstructions = _hasCpuIdHook || _hasRdtscHook || _hasRdtscpHook || _hasInvalidHook;
-        }
+        private void UnmapGpaRange(ulong gpa, ulong size)
+            => WhpNative.WHvUnmapGpaRange(_partition, gpa, size);
 
         private unsafe bool TryReadMemoryInternal(ulong address, Span<byte> buffer)
         {
@@ -1825,12 +1610,12 @@ namespace Brovan.Core.Emulation
 
             while (remaining > 0)
             {
-                ulong pageBase = current & ~KvmConstants.PageMask;
+                ulong pageBase = current & ~WhpConstants.PageMask;
                 if (!TryLookupPage(pageBase, out MappedPage page))
                     return false;
 
                 ulong pageOffset = current - pageBase;
-                int chunk = (int)Math.Min((ulong)remaining, KvmConstants.PageSize - pageOffset);
+                int chunk = (int)Math.Min((ulong)remaining, WhpConstants.PageSize - pageOffset);
                 Unsafe.CopyBlockUnaligned(
                     ref Unsafe.AsRef<byte>(ref buffer[offset]),
                     ref Unsafe.AsRef<byte>((void*)(page.HostPage + (int)pageOffset)),
@@ -1851,12 +1636,12 @@ namespace Brovan.Core.Emulation
 
             while (remaining > 0)
             {
-                ulong pageBase = current & ~KvmConstants.PageMask;
+                ulong pageBase = current & ~WhpConstants.PageMask;
                 if (!TryLookupPage(pageBase, out MappedPage page))
                     return false;
 
                 ulong pageOffset = current - pageBase;
-                int chunk = (int)Math.Min((ulong)remaining, KvmConstants.PageSize - pageOffset);
+                int chunk = (int)Math.Min((ulong)remaining, WhpConstants.PageSize - pageOffset);
                 Unsafe.CopyBlockUnaligned(
                     ref Unsafe.AsRef<byte>((void*)(page.HostPage + (int)pageOffset)),
                     ref Unsafe.AsRef<byte>(in buffer[offset]),
@@ -1869,46 +1654,11 @@ namespace Brovan.Core.Emulation
             return true;
         }
 
-        private bool HandleInstructionHook(BackendInstructionHook type, ulong instructionSize)
-        {
-            ulong rip = ReadRegister(Registers.UC_X86_REG_RIP);
-            bool handled = false;
-            bool skip = false;
-
-            FlushRegisterCache();
-            for (int i = 0; i < _instructionHooks.Count; i++)
-            {
-                InstructionHookEntry entry = _instructionHooks[i];
-                if (entry.Type != type) continue;
-
-                handled = true;
-                if (entry.Callback != null)
-                {
-                    entry.Callback();
-                    skip = true;
-                }
-                else if (entry.BoolCallback != null)
-                {
-                    if (entry.BoolCallback()) skip = true;
-                }
-            }
-            FlushRegisterCache();
-
-            if (handled && skip)
-            {
-                if (ReadRegister(Registers.UC_X86_REG_RIP) == rip)
-                    AdvanceRip(instructionSize);
-                return true;
-            }
-            return false;
-        }
-
         private bool HandleInvalidInstructionHook()
         {
             bool consumed = false;
             ulong rip = ReadRegister(Registers.UC_X86_REG_RIP);
 
-            FlushRegisterCache();
             for (int i = 0; i < _instructionHooks.Count; i++)
             {
                 InstructionHookEntry entry = _instructionHooks[i];
@@ -1917,7 +1667,6 @@ namespace Brovan.Core.Emulation
                 if (entry.Callback != null) { entry.Callback(); consumed = true; }
                 else if (entry.BoolCallback != null) { if (entry.BoolCallback()) consumed = true; }
             }
-            FlushRegisterCache();
 
             if (consumed && ReadRegister(Registers.UC_X86_REG_RIP) == rip)
                 AdvanceRip(2);
@@ -1931,193 +1680,166 @@ namespace Brovan.Core.Emulation
             if (_syscallHook != null && rip == (_syscallTrapPageGpa + 1))
             {
                 if (HandleSyscallTrap()) return true;
-                _error = KvmErrors.Ok;
+                _error = WhpErrors.Ok;
                 return false;
             }
 
             ulong stubEnd = _exceptionStubPageGpa +
-                KvmConstants.ExceptionVectorCount * KvmConstants.ExceptionStubStride;
+                WhpConstants.ExceptionVectorCount * WhpConstants.ExceptionStubStride;
             if (rip > _exceptionStubPageGpa && rip <= stubEnd)
             {
-                if (_singleStepRequested &&
-                    (uint)((rip - 1 - _exceptionStubPageGpa) / KvmConstants.ExceptionStubStride) == 1)
+                uint vector = (uint)((rip - 1 - _exceptionStubPageGpa) / WhpConstants.ExceptionStubStride);
+
+                if (_completionActive && vector == 1)
+                {
+                    CompleteSteppedAccess(rip);
+                    return true;
+                }
+
+                if (_singleStepRequested && vector == 1)
                 {
                     _singleStepRequested = false;
                     RestoreExceptionFrame(rip);
                     ClearTrapFlag();
-                    FlushRegisterCache();
-                    _error = KvmErrors.Ok;
+                    _error = WhpErrors.Ok;
                     return false;
                 }
 
                 if (HandleExceptionTrap(rip))
-                {
-                    FlushRegisterCache();
-                    ClearPendingExceptionState();
                     return true;
-                }
-                FlushRegisterCache();
-                ClearPendingExceptionState();
-                _error = KvmErrors.Exception;
+                _error = WhpErrors.Exception;
                 return false;
             }
 
-            _error = KvmErrors.Ok;
+            _error = WhpErrors.Ok;
             return false;
         }
 
-        private unsafe bool HandleMmioExit(ref LinuxKvmRun run)
+        private bool HandleMemoryAccess(ref WhvRunVpExitContext exit)
         {
-            ref LinuxKvmMmioExit mmio = ref run.Exit.Mmio;
-            ulong physAddr = mmio.PhysAddr;
-            uint len = mmio.Len;
-            byte isWrite = mmio.IsWrite;
+            if (_completionActive) return false;
 
-            foreach (MmioRegion region in _mmioRegions)
+            ulong gpa = exit.MemGpa;
+            uint info = exit.MemAccessInfo;
+            WhvMemoryAccessType accessType = (WhvMemoryAccessType)(info & 0x3);
+            bool isWrite = accessType == WhvMemoryAccessType.Write;
+            bool isFetch = accessType == WhvMemoryAccessType.Execute;
+            const uint len = 1;
+
+            ulong faultPage = gpa & ~WhpConstants.PageMask;
+            bool mapped = TryLookupPage(faultPage, out _);
+
+            if (mapped && _trappedPages.ContainsKey(faultPage))
             {
-                if (physAddr < region.Address || physAddr >= region.Address + region.Size) continue;
-                if (isWrite == 0) break;
-
-                ulong data = mmio.Data;
-                region.WriteCallback(physAddr - region.Address,
-                    new ReadOnlySpan<byte>(&data, (int)Math.Min(len, sizeof(ulong))));
+                BeginSteppedCompletion(faultPage, gpa, len, isWrite);
                 return true;
             }
 
-            ulong faultPage = physAddr & ~KvmConstants.PageMask;
-            bool mapped = _mappedPages.TryGetValue(faultPage, out MappedPage faulted)
-                          && faulted != null
-                          && faulted.HostPage != IntPtr.Zero;
-
-            if (mapped && _trappedPages.Contains(faultPage))
-                return HandleTrappedAccess(ref mmio, physAddr, len, isWrite != 0);
-
             BackendHookType required = mapped ? BackendHookType.MemoryProtected : BackendHookType.MemoryUnmapped;
             BackendMemoryAccessType type = mapped
-                ? (isWrite != 0 ? BackendMemoryAccessType.WriteProtected : BackendMemoryAccessType.ReadProtected)
-                : (isWrite != 0 ? BackendMemoryAccessType.WriteUnmapped : BackendMemoryAccessType.ReadUnmapped);
+                ? (isFetch ? BackendMemoryAccessType.FetchProtected
+                    : isWrite ? BackendMemoryAccessType.WriteProtected : BackendMemoryAccessType.ReadProtected)
+                : (isFetch ? BackendMemoryAccessType.FetchUnmapped
+                    : isWrite ? BackendMemoryAccessType.WriteUnmapped : BackendMemoryAccessType.ReadUnmapped);
 
             for (int i = 0; i < _memoryHooks.Count; i++)
             {
                 MemoryHookEntry entry = _memoryHooks[i];
                 if ((entry.Type & required) == 0) continue;
-                if (entry.End == 0 || entry.End < entry.Begin || (entry.Begin <= physAddr && entry.End >= physAddr))
+                if (entry.End == 0 || entry.End < entry.Begin || (entry.Begin <= gpa && entry.End >= gpa))
                 {
-                    if (entry.Callback(type, physAddr, len, isWrite != 0 ? mmio.Data : 0))
-                    {
-                        CompleteMmioAccess(ref mmio);
+                    if (entry.Callback(type, gpa, len, 0))
                         return true;
-                    }
                 }
             }
             return false;
         }
 
-        private unsafe bool HandleTrappedAccess(ref LinuxKvmMmioExit mmio, ulong physAddr, uint len, bool isWrite)
+        private unsafe void BeginSteppedCompletion(ulong pageGpa, ulong gpa, uint len, bool isWrite)
         {
+            if (!_mappedPages.TryGetValue(pageGpa, out MappedPage page) || page.HostPage == IntPtr.Zero)
+                return;
+
+            UnmapGpaRange(pageGpa, WhpConstants.PageSize);
+            MapGpaRange(pageGpa, WhpConstants.PageSize, page.HostPage,
+                WhvMapGpaRangeFlags.Read | WhvMapGpaRangeFlags.Write | WhvMapGpaRangeFlags.Execute);
+
+            _completionActive = true;
+            _completionPageGpa = pageGpa;
+            _completionAccessGpa = gpa;
+            _completionLen = len;
+            _completionIsWrite = isWrite;
+
+            ref WhpRegisters regs = ref GetRegistersRef();
+            regs.Rflags |= 0x100UL;
+            _regsDirty = true;
+            FlushRegisterCache();
+        }
+
+        private void CompleteSteppedAccess(ulong stubRip)
+        {
+            RestoreExceptionFrame(stubRip);
+
+            ulong pageGpa = _completionPageGpa;
+            ulong gpa = _completionAccessGpa;
+            uint len = _completionLen;
+            bool isWrite = _completionIsWrite;
+            _completionActive = false;
+
+            ulong value = ReadMemoryULong(gpa);
             BackendHookType required = isWrite ? BackendHookType.MemoryWrite : BackendHookType.MemoryRead;
             BackendMemoryAccessType type = isWrite ? BackendMemoryAccessType.Write : BackendMemoryAccessType.Read;
-
             for (int i = 0; i < _memoryHooks.Count; i++)
             {
                 MemoryHookEntry entry = _memoryHooks[i];
                 if ((entry.Type & required) == 0) continue;
-                if (entry.Begin > physAddr || entry.End < physAddr) continue;
-                entry.Callback(type, physAddr, len, isWrite ? mmio.Data : 0);
+                if (entry.Begin > gpa || entry.End < gpa) continue;
+                entry.Callback(type, gpa, len, value);
             }
-
-            CompleteMmioAccess(ref mmio);
-
             if (!isWrite)
             {
                 for (int i = 0; i < _memoryHooks.Count; i++)
                 {
                     MemoryHookEntry entry = _memoryHooks[i];
                     if ((entry.Type & BackendHookType.MemoryReadAfter) == 0) continue;
-                    if (entry.Begin > physAddr || entry.End < physAddr) continue;
-                    entry.Callback(BackendMemoryAccessType.ReadAfter, physAddr, len, mmio.Data);
+                    if (entry.Begin > gpa || entry.End < gpa) continue;
+                    entry.Callback(BackendMemoryAccessType.ReadAfter, gpa, len, value);
                 }
             }
 
-            return true;
+            ReTrapPage(pageGpa);
+
+            if (!_singleStepRequested)
+                ClearTrapFlag();
+            FlushRegisterCache();
         }
 
-        private unsafe void CompleteMmioAccess(ref LinuxKvmMmioExit mmio)
+        private void ReTrapPage(ulong pageGpa)
         {
-            uint len = mmio.Len;
-            if (len == 0 || len > sizeof(ulong)) return;
-
-            if (mmio.IsWrite != 0)
+            UnmapGpaRange(pageGpa, WhpConstants.PageSize);
+            if (_trappedPages.TryGetValue(pageGpa, out bool writeOnly) && writeOnly
+                && _mappedPages.TryGetValue(pageGpa, out MappedPage page) && page.HostPage != IntPtr.Zero)
             {
-                ulong data = mmio.Data;
-                TryWriteMemoryInternal(mmio.PhysAddr, new ReadOnlySpan<byte>(&data, (int)len));
-                return;
+                MapGpaRange(pageGpa, WhpConstants.PageSize, page.HostPage,
+                    WhvMapGpaRangeFlags.Read | WhvMapGpaRangeFlags.Execute);
             }
-
-            ulong value = 0;
-            if (TryReadMemoryInternal(mmio.PhysAddr, new Span<byte>(&value, (int)len)))
-                mmio.Data = value;
-        }
-
-        private bool HandleException(uint exception, uint errorCode)
-        {
-            if (exception == 6 && HandleInvalidInstructionHook()) return true;
-
-            if (exception == 14)
-            {
-                ulong faultAddress = ReadRegister(Registers.UC_X86_REG_CR2);
-
-                bool present = (errorCode & 0x1) != 0;
-                bool write = (errorCode & 0x2) != 0;
-                bool fetch = (errorCode & 0x10) != 0;
-
-                BackendMemoryAccessType type;
-                if (fetch)
-                    type = present ? BackendMemoryAccessType.FetchProtected : BackendMemoryAccessType.FetchUnmapped;
-                else if (write)
-                    type = present ? BackendMemoryAccessType.WriteProtected : BackendMemoryAccessType.WriteUnmapped;
-                else
-                    type = present ? BackendMemoryAccessType.ReadProtected : BackendMemoryAccessType.ReadUnmapped;
-
-                FlushRegisterCache();
-                for (int i = 0; i < _memoryHooks.Count; i++)
-                {
-                    MemoryHookEntry entry = _memoryHooks[i];
-                    if ((entry.Type & (BackendHookType.MemoryUnmapped | BackendHookType.MemoryProtected)) == 0) continue;
-                    if (entry.End == 0 || entry.End < entry.Begin || (entry.Begin <= faultAddress && entry.End >= faultAddress))
-                    {
-                        if (entry.Callback(type, faultAddress, 1, 0)) return true;
-                    }
-                }
-
-                FlushRegisterCache();
-                return false;
-            }
-
-            FlushRegisterCache();
-            for (int i = 0; i < _interruptHooks.Count; i++)
-                _interruptHooks[i].Callback(exception);
-
-            FlushRegisterCache();
-            return false;
         }
 
         private void RestoreExceptionFrame(ulong stubRip)
-            => ReadExceptionFrame(stubRip, restoreSregs: true, out _, out _);
+            => ReadExceptionFrame(stubRip, out _, out _);
 
         private bool HandleExceptionTrap(ulong stubRip)
         {
-            ReadExceptionFrame(stubRip, restoreSregs: true, out uint vector, out ulong errorCode);
-            FlushRegisterCache();
+            ReadExceptionFrame(stubRip, out uint vector, out ulong errorCode);
             return HandleException(vector, (uint)errorCode);
         }
 
-        private void ReadExceptionFrame(ulong stubRip, bool restoreSregs, out uint vector, out ulong errorCode)
+        private void ReadExceptionFrame(ulong stubRip, out uint vector, out ulong errorCode)
         {
-            vector = (uint)((stubRip - 1 - _exceptionStubPageGpa) / KvmConstants.ExceptionStubStride);
+            vector = (uint)((stubRip - 1 - _exceptionStubPageGpa) / WhpConstants.ExceptionStubStride);
             errorCode = 0;
 
-            LinuxKvmRegisters regs = GetRegisters();
+            ref WhpRegisters regs = ref GetRegistersRef();
             ulong frameAddress = regs.Rsp;
 
             if (ExceptionHasErrorCode(vector))
@@ -2143,57 +1865,17 @@ namespace Brovan.Core.Emulation
             if (vector == 3) regs.Rip -= 1;
             regs.Rsp = frameRsp;
             regs.Rflags = frameRflags;
-            SetRegisters(regs);
+            _regsDirty = true;
 
-            if (restoreSregs)
-            {
-                LinuxKvmSpecialRegisters sregs = GetSpecialRegisters();
-                sregs.Cs = MakeSegment((ushort)frameCs, true, (frameCs & 3) == 3);
-                sregs.Ss = MakeSegment((ushort)frameSs, false, (frameSs & 3) == 3);
-                SetSpecialRegisters(sregs);
-            }
-        }
-
-        private void ClearPendingExceptionState()
-        {
-            lock (_vcpuLock)
-            {
-                LinuxKvmVcpuEvents events = new LinuxKvmVcpuEvents();
-                if (KvmNative.ioctl(_vcpuFd, KvmConstants.KvmIoGetVcpuEvents, ref events) < 0)
-                    return;
-
-                events.Exception.Injected = 0;
-                events.Exception.Pending = 0;
-                events.Exception.HasErrorCode = 0;
-                events.Exception.ErrorCode = 0;
-                events.ExceptionHasPayload = 0;
-                events.ExceptionPayload = 0;
-                events.Interrupt.Injected = 0;
-                events.Interrupt.Shadow = 0;
-                events.Nmi.Injected = 0;
-                events.Nmi.Pending = 0;
-
-                if (KvmNative.ioctl(_vcpuFd, KvmConstants.KvmIoSetVcpuEvents, ref events) < 0)
-                    return;
-            }
-        }
-
-        private bool HandleDebugExit(ref LinuxKvmRun run)
-        {
-            for (int i = 0; i < _interruptHooks.Count; i++)
-            {
-                _interruptHooks[i].Callback(1);
-                return true;
-            }
-            return false;
+            SetCsSs(MakeSegment((ushort)frameCs, true, (frameCs & 3) == 3),
+                MakeSegment((ushort)frameSs, false, (frameSs & 3) == 3));
         }
 
         private bool HandleSyscallTrap()
         {
             if (_syscallHook == null) return false;
 
-            LinuxKvmRegisters regs = GetRegisters();
-            LinuxKvmSpecialRegisters sregs = GetSpecialRegisters();
+            ref WhpRegisters regs = ref GetRegistersRef();
 
             ulong postSyscallRcx = regs.Rcx;
             ulong postSyscallR10 = regs.R10;
@@ -2203,29 +1885,59 @@ namespace Brovan.Core.Emulation
             regs.Rip = preSyscallRip;
             regs.Rcx = postSyscallR10;
             regs.Rflags = savedRflags;
-            sregs.Cs = MakeSegment(KvmConstants.UserCodeSelector, true, true);
-            sregs.Ss = MakeSegment(KvmConstants.UserDataSelector, false, true);
-            SetRegisters(regs);
-            SetSpecialRegisters(sregs);
-            FlushRegisterCache();
+            _regsDirty = true;
 
             if (_syscallHook.Callback != null) _syscallHook.Callback();
             else if (_syscallHook.BoolCallback != null) _syscallHook.BoolCallback();
 
-            FlushRegisterCache();
-
-            regs = GetRegisters();
-            if (regs.Rip == preSyscallRip)
-                regs.Rip = postSyscallRcx;
+            ref WhpRegisters after = ref GetRegistersRef();
+            if (after.Rip == preSyscallRip)
+                after.Rip = postSyscallRcx;
             else
-                regs.Rip += 2;
+                after.Rip += 2;
+            _regsDirty = true;
 
-            sregs = GetSpecialRegisters();
-            sregs.Cs = MakeSegment(KvmConstants.UserCodeSelector, true, true);
-            sregs.Ss = MakeSegment(KvmConstants.UserDataSelector, false, true);
-            SetRegisters(regs);
-            SetSpecialRegisters(sregs);
+            SetCsSs(UserCodeSegment, UserDataSegment);
             return true;
+        }
+
+        private bool HandleException(uint exception, uint errorCode)
+        {
+            if (exception == 6 && HandleInvalidInstructionHook()) return true;
+
+            if (exception == 14)
+            {
+                ulong faultAddress = ReadRegister(Registers.UC_X86_REG_CR2);
+
+                bool present = (errorCode & 0x1) != 0;
+                bool write = (errorCode & 0x2) != 0;
+                bool fetch = (errorCode & 0x10) != 0;
+
+                BackendMemoryAccessType type;
+                if (fetch)
+                    type = present ? BackendMemoryAccessType.FetchProtected : BackendMemoryAccessType.FetchUnmapped;
+                else if (write)
+                    type = present ? BackendMemoryAccessType.WriteProtected : BackendMemoryAccessType.WriteUnmapped;
+                else
+                    type = present ? BackendMemoryAccessType.ReadProtected : BackendMemoryAccessType.ReadUnmapped;
+
+                for (int i = 0; i < _memoryHooks.Count; i++)
+                {
+                    MemoryHookEntry entry = _memoryHooks[i];
+                    if ((entry.Type & (BackendHookType.MemoryUnmapped | BackendHookType.MemoryProtected)) == 0) continue;
+                    if (entry.End == 0 || entry.End < entry.Begin || (entry.Begin <= faultAddress && entry.End >= faultAddress))
+                    {
+                        if (entry.Callback(type, faultAddress, 1, 0)) return true;
+                    }
+                }
+
+                return false;
+            }
+
+            for (int i = 0; i < _interruptHooks.Count; i++)
+                _interruptHooks[i].Callback(exception);
+
+            return false;
         }
 
         private void AdvanceRip(ulong amount)
@@ -2234,158 +1946,122 @@ namespace Brovan.Core.Emulation
             _regsDirty = true;
         }
 
-        private ulong GetMsr(uint msr)
-        {
-            lock (_vcpuLock)
-            {
-                LinuxKvmMsrs msrs = new LinuxKvmMsrs
-                {
-                    Count = 1,
-                    FirstEntry = new LinuxKvmMsrEntry { Index = msr },
-                };
-                if (KvmNative.ioctl(_vcpuFd, KvmConstants.KvmIoGetMsrs, ref msrs) != 1)
-                    throw new KvmException("KVM_GET_MSRS failed", Marshal.GetLastWin32Error());
-                return msrs.FirstEntry.Data;
-            }
-        }
-
-        private void SetMsr(uint msr, ulong value)
-        {
-            lock (_vcpuLock)
-            {
-                LinuxKvmMsrs msrs = new LinuxKvmMsrs
-                {
-                    Count = 1,
-                    FirstEntry = new LinuxKvmMsrEntry { Index = msr, Data = value },
-                };
-                if (KvmNative.ioctl(_vcpuFd, KvmConstants.KvmIoSetMsrs, ref msrs) != 1)
-                    throw new KvmException("KVM_SET_MSRS failed", Marshal.GetLastWin32Error());
-            }
-        }
-
-        private ref LinuxKvmRegisters GetRegistersRef()
+        private unsafe ref WhpRegisters GetRegistersRef()
         {
             if (!_regsValid)
             {
-                lock (_vcpuLock)
-                {
-                    if (KvmNative.ioctl(_vcpuFd, KvmConstants.KvmIoGetRegisters, ref _regsCache) < 0)
-                        throw new KvmException("KVM_GET_REGS failed", Marshal.GetLastWin32Error());
-                }
+                LoadRegisters();
                 _regsValid = true;
             }
             return ref _regsCache;
         }
 
-        private LinuxKvmRegisters GetRegisters() => GetRegistersRef();
-
-        private void SetRegisters(LinuxKvmRegisters regs)
+        private unsafe void LoadRegisters()
         {
+            Span<WhvRegisterValue> values = stackalloc WhvRegisterValue[GpRegNames.Length];
             lock (_vcpuLock)
             {
-                _regsCache = regs;
-                _regsValid = true;
-                _regsDirty = true;
-            }
-        }
-
-        private ref LinuxKvmSpecialRegisters GetSpecialRegistersRef()
-        {
-            if (!_sregsValid)
-            {
-                lock (_vcpuLock)
+                fixed (uint* names = GpRegNames)
+                fixed (WhvRegisterValue* vals = values)
                 {
-                    if (KvmNative.ioctl(_vcpuFd, KvmConstants.KvmIoGetSpecialRegisters, ref _sregsCache) < 0)
-                        throw new KvmException("KVM_GET_SREGS failed", Marshal.GetLastWin32Error());
+                    int hr = WhpNative.WHvGetVirtualProcessorRegisters(_partition, VpIndex, names,
+                        (uint)GpRegNames.Length, vals);
+                    if (WhpNative.Failed(hr))
+                        throw new WhpException("WHvGetVirtualProcessorRegisters(GP) failed", hr);
                 }
-                _sregsValid = true;
             }
-            return ref _sregsCache;
+
+            _regsCache.Rax = values[0].Low;
+            _regsCache.Rbx = values[1].Low;
+            _regsCache.Rcx = values[2].Low;
+            _regsCache.Rdx = values[3].Low;
+            _regsCache.Rsi = values[4].Low;
+            _regsCache.Rdi = values[5].Low;
+            _regsCache.Rsp = values[6].Low;
+            _regsCache.Rbp = values[7].Low;
+            _regsCache.R8 = values[8].Low;
+            _regsCache.R9 = values[9].Low;
+            _regsCache.R10 = values[10].Low;
+            _regsCache.R11 = values[11].Low;
+            _regsCache.R12 = values[12].Low;
+            _regsCache.R13 = values[13].Low;
+            _regsCache.R14 = values[14].Low;
+            _regsCache.R15 = values[15].Low;
+            _regsCache.Rip = values[16].Low;
+            _regsCache.Rflags = values[17].Low;
         }
 
-        private LinuxKvmSpecialRegisters GetSpecialRegisters() => GetSpecialRegistersRef();
-
-        private void SetSpecialRegisters(LinuxKvmSpecialRegisters sregs)
+        private unsafe void StoreRegisters()
         {
+            Span<WhvRegisterValue> values = stackalloc WhvRegisterValue[GpRegNames.Length];
+            values[0] = WhvRegisterValue.FromReg64(_regsCache.Rax);
+            values[1] = WhvRegisterValue.FromReg64(_regsCache.Rbx);
+            values[2] = WhvRegisterValue.FromReg64(_regsCache.Rcx);
+            values[3] = WhvRegisterValue.FromReg64(_regsCache.Rdx);
+            values[4] = WhvRegisterValue.FromReg64(_regsCache.Rsi);
+            values[5] = WhvRegisterValue.FromReg64(_regsCache.Rdi);
+            values[6] = WhvRegisterValue.FromReg64(_regsCache.Rsp);
+            values[7] = WhvRegisterValue.FromReg64(_regsCache.Rbp);
+            values[8] = WhvRegisterValue.FromReg64(_regsCache.R8);
+            values[9] = WhvRegisterValue.FromReg64(_regsCache.R9);
+            values[10] = WhvRegisterValue.FromReg64(_regsCache.R10);
+            values[11] = WhvRegisterValue.FromReg64(_regsCache.R11);
+            values[12] = WhvRegisterValue.FromReg64(_regsCache.R12);
+            values[13] = WhvRegisterValue.FromReg64(_regsCache.R13);
+            values[14] = WhvRegisterValue.FromReg64(_regsCache.R14);
+            values[15] = WhvRegisterValue.FromReg64(_regsCache.R15);
+            values[16] = WhvRegisterValue.FromReg64(_regsCache.Rip);
+            values[17] = WhvRegisterValue.FromReg64(_regsCache.Rflags | 0x2UL);
+
             lock (_vcpuLock)
             {
-                _sregsCache = sregs;
-                _sregsValid = true;
-                _sregsDirty = true;
+                fixed (uint* names = GpRegNames)
+                fixed (WhvRegisterValue* vals = values)
+                {
+                    int hr = WhpNative.WHvSetVirtualProcessorRegisters(_partition, VpIndex, names,
+                        (uint)GpRegNames.Length, vals);
+                    if (WhpNative.Failed(hr))
+                        throw new WhpException("WHvSetVirtualProcessorRegisters(GP) failed", hr);
+                }
             }
         }
 
         private void FlushRegisterCache()
         {
-            lock (_vcpuLock)
+            if (_regsDirty)
             {
-                if (_regsDirty)
-                {
-                    _regsDirty = false;
-                    if (KvmNative.ioctl(_vcpuFd, KvmConstants.KvmIoSetRegisters, ref _regsCache) < 0)
-                        throw new KvmException("KVM_SET_REGS failed", Marshal.GetLastWin32Error());
-                }
-
-                if (_sregsDirty)
-                {
-                    _sregsDirty = false;
-                    if (KvmNative.ioctl(_vcpuFd, KvmConstants.KvmIoSetSpecialRegisters, ref _sregsCache) < 0)
-                        throw new KvmException("KVM_SET_SREGS failed", Marshal.GetLastWin32Error());
-                }
+                _regsDirty = false;
+                StoreRegisters();
             }
         }
 
-        private void InvalidateRegisterCache()
+        private void InvalidateRegisterCache() => _regsValid = false;
+
+        private unsafe void SetSingleRegister(WhvRegisterName name, WhvRegisterValue value)
         {
+            uint n = (uint)name;
             lock (_vcpuLock)
             {
-                _regsValid = false;
-                _sregsValid = false;
+                int hr = WhpNative.WHvSetVirtualProcessorRegisters(_partition, VpIndex, &n, 1, &value);
+                if (WhpNative.Failed(hr))
+                    throw new WhpException($"WHvSetVirtualProcessorRegisters({name}) failed", hr);
             }
         }
 
-        private unsafe void SetFpu(ref LinuxKvmFpu fpu)
+        private unsafe WhvRegisterValue GetSingleRegister(WhvRegisterName name)
         {
+            uint n = (uint)name;
+            WhvRegisterValue value;
             lock (_vcpuLock)
             {
-                fixed (LinuxKvmFpu* p = &fpu)
-                {
-                    if (KvmNative.ioctl(_vcpuFd, KvmConstants.KvmIoSetFpu, (IntPtr)p) < 0)
-                        throw new KvmException("KVM_SET_FPU failed", Marshal.GetLastWin32Error());
-                }
+                int hr = WhpNative.WHvGetVirtualProcessorRegisters(_partition, VpIndex, &n, 1, &value);
+                if (WhpNative.Failed(hr))
+                    throw new WhpException($"WHvGetVirtualProcessorRegisters({name}) failed", hr);
             }
+            return value;
         }
 
-        private void SetVcpuEvents(LinuxKvmVcpuEvents events)
-        {
-            lock (_vcpuLock)
-            {
-                if (KvmNative.ioctl(_vcpuFd, KvmConstants.KvmIoSetVcpuEvents, ref events) < 0)
-                    throw new KvmException("KVM_SET_VCPU_EVENTS failed", Marshal.GetLastWin32Error());
-            }
-        }
-
-        private LinuxKvmDebugRegisters GetDebugRegisters()
-        {
-            lock (_vcpuLock)
-            {
-                LinuxKvmDebugRegisters dr = new LinuxKvmDebugRegisters();
-                if (KvmNative.ioctl(_vcpuFd, KvmConstants.KvmIoGetDebugRegisters, ref dr) < 0)
-                    throw new KvmException("KVM_GET_DEBUGREGS failed", Marshal.GetLastWin32Error());
-                return dr;
-            }
-        }
-
-        private void SetDebugRegisters(LinuxKvmDebugRegisters dr)
-        {
-            lock (_vcpuLock)
-            {
-                if (KvmNative.ioctl(_vcpuFd, KvmConstants.KvmIoSetDebugRegisters, ref dr) < 0)
-                    throw new KvmException("KVM_SET_DEBUGREGS failed", Marshal.GetLastWin32Error());
-            }
-        }
-
-        private static ref ulong GetGpRegisterPointer(ref LinuxKvmRegisters regs, GpRegisterName name)
+        private static ref ulong GetGpRegisterPointer(ref WhpRegisters regs, GpRegisterName name)
         {
             switch (name)
             {
@@ -2407,7 +2083,7 @@ namespace Brovan.Core.Emulation
                 case GpRegisterName.R14: return ref regs.R14;
                 case GpRegisterName.R15: return ref regs.R15;
                 case GpRegisterName.Rflags: return ref regs.Rflags;
-                default: throw new KvmException("Unsupported KVM GP register");
+                default: throw new WhpException("Unsupported WHP GP register");
             }
         }
 
@@ -2419,11 +2095,24 @@ namespace Brovan.Core.Emulation
                 return true;
             }
 
-            if (!IsSregRegister(register)) return false;
-
-            if (!TryApplySregWrite(ref GetSpecialRegistersRef(), register, value)) return false;
-            _sregsDirty = true;
-            return true;
+            switch (register)
+            {
+                case Registers.UC_X86_REG_FS_BASE: WriteSegmentBase(WhvRegisterName.Fs, value); return true;
+                case Registers.UC_X86_REG_GS_BASE: WriteSegmentBase(WhvRegisterName.Gs, value); return true;
+                case Registers.UC_X86_REG_CS: WriteSegmentSelector(WhvRegisterName.Cs, value); return true;
+                case Registers.UC_X86_REG_SS: WriteSegmentSelector(WhvRegisterName.Ss, value); return true;
+                case Registers.UC_X86_REG_DS: WriteSegmentSelector(WhvRegisterName.Ds, value); return true;
+                case Registers.UC_X86_REG_ES: WriteSegmentSelector(WhvRegisterName.Es, value); return true;
+                case Registers.UC_X86_REG_FS: WriteSegmentSelector(WhvRegisterName.Fs, value); return true;
+                case Registers.UC_X86_REG_GS: WriteSegmentSelector(WhvRegisterName.Gs, value); return true;
+                case Registers.UC_X86_REG_CR0: SetSingleRegister(WhvRegisterName.Cr0, WhvRegisterValue.FromReg64(value)); return true;
+                case Registers.UC_X86_REG_CR2: SetSingleRegister(WhvRegisterName.Cr2, WhvRegisterValue.FromReg64(value)); return true;
+                case Registers.UC_X86_REG_CR3: SetSingleRegister(WhvRegisterName.Cr3, WhvRegisterValue.FromReg64(value)); return true;
+                case Registers.UC_X86_REG_CR4: SetSingleRegister(WhvRegisterName.Cr4, WhvRegisterValue.FromReg64(value)); return true;
+                case Registers.UC_X86_REG_CR8: SetSingleRegister(WhvRegisterName.Cr8, WhvRegisterValue.FromReg64(value)); return true;
+                case Registers.UC_X86_REG_MSR: SetSingleRegister(WhvRegisterName.Efer, WhvRegisterValue.FromReg64(value)); return true;
+                default: return false;
+            }
         }
 
         private bool TryReadSpecialRegister(Registers register, out ulong value)
@@ -2434,77 +2123,40 @@ namespace Brovan.Core.Emulation
                 return true;
             }
 
-            if (!IsSregRegister(register))
-            {
-                value = 0;
-                return false;
-            }
-
-            return TryApplySregRead(ref GetSpecialRegistersRef(), register, out value);
-        }
-
-        private static bool IsSregRegister(Registers register) => register switch
-        {
-            Registers.UC_X86_REG_FS_BASE => true,
-            Registers.UC_X86_REG_GS_BASE => true,
-            Registers.UC_X86_REG_CS => true,
-            Registers.UC_X86_REG_SS => true,
-            Registers.UC_X86_REG_DS => true,
-            Registers.UC_X86_REG_ES => true,
-            Registers.UC_X86_REG_FS => true,
-            Registers.UC_X86_REG_GS => true,
-            Registers.UC_X86_REG_CR0 => true,
-            Registers.UC_X86_REG_CR2 => true,
-            Registers.UC_X86_REG_CR3 => true,
-            Registers.UC_X86_REG_CR4 => true,
-            Registers.UC_X86_REG_CR8 => true,
-            Registers.UC_X86_REG_MSR => true,
-            _ => false,
-        };
-
-        private static bool TryApplySregWrite(ref LinuxKvmSpecialRegisters s, Registers register, ulong value)
-        {
             switch (register)
             {
-                case Registers.UC_X86_REG_FS_BASE: s.Fs.Base = value; return true;
-                case Registers.UC_X86_REG_GS_BASE: s.Gs.Base = value; return true;
-                case Registers.UC_X86_REG_CS: s.Cs.Selector = (ushort)value; return true;
-                case Registers.UC_X86_REG_SS: s.Ss.Selector = (ushort)value; return true;
-                case Registers.UC_X86_REG_DS: s.Ds.Selector = (ushort)value; return true;
-                case Registers.UC_X86_REG_ES: s.Es.Selector = (ushort)value; return true;
-                case Registers.UC_X86_REG_FS: s.Fs.Selector = (ushort)value; return true;
-                case Registers.UC_X86_REG_GS: s.Gs.Selector = (ushort)value; return true;
-                case Registers.UC_X86_REG_CR0: s.Cr0 = value; return true;
-                case Registers.UC_X86_REG_CR2: s.Cr2 = value; return true;
-                case Registers.UC_X86_REG_CR3: s.Cr3 = value; return true;
-                case Registers.UC_X86_REG_CR4: s.Cr4 = value; return true;
-                case Registers.UC_X86_REG_CR8: s.Cr8 = value; return true;
-                case Registers.UC_X86_REG_MSR: s.Efer = value; return true;
-                default: return false;
+                case Registers.UC_X86_REG_FS_BASE: value = GetSingleRegister(WhvRegisterName.Fs).Low; return true;
+                case Registers.UC_X86_REG_GS_BASE: value = GetSingleRegister(WhvRegisterName.Gs).Low; return true;
+                case Registers.UC_X86_REG_CS: value = SegmentSelector(WhvRegisterName.Cs); return true;
+                case Registers.UC_X86_REG_SS: value = SegmentSelector(WhvRegisterName.Ss); return true;
+                case Registers.UC_X86_REG_DS: value = SegmentSelector(WhvRegisterName.Ds); return true;
+                case Registers.UC_X86_REG_ES: value = SegmentSelector(WhvRegisterName.Es); return true;
+                case Registers.UC_X86_REG_FS: value = SegmentSelector(WhvRegisterName.Fs); return true;
+                case Registers.UC_X86_REG_GS: value = SegmentSelector(WhvRegisterName.Gs); return true;
+                case Registers.UC_X86_REG_CR0: value = GetSingleRegister(WhvRegisterName.Cr0).Low; return true;
+                case Registers.UC_X86_REG_CR2: value = GetSingleRegister(WhvRegisterName.Cr2).Low; return true;
+                case Registers.UC_X86_REG_CR3: value = GetSingleRegister(WhvRegisterName.Cr3).Low; return true;
+                case Registers.UC_X86_REG_CR4: value = GetSingleRegister(WhvRegisterName.Cr4).Low; return true;
+                case Registers.UC_X86_REG_CR8: value = GetSingleRegister(WhvRegisterName.Cr8).Low; return true;
+                case Registers.UC_X86_REG_MSR: value = GetSingleRegister(WhvRegisterName.Efer).Low; return true;
+                default: value = 0; return false;
             }
         }
 
-        private static bool TryApplySregRead(ref LinuxKvmSpecialRegisters s, Registers register, out ulong value)
+        private ushort SegmentSelector(WhvRegisterName name) => (ushort)(GetSingleRegister(name).High >> 32);
+
+        private void WriteSegmentSelector(WhvRegisterName name, ulong selector)
         {
-            value = 0;
-            switch (register)
-            {
-                case Registers.UC_X86_REG_FS_BASE: value = s.Fs.Base; return true;
-                case Registers.UC_X86_REG_GS_BASE: value = s.Gs.Base; return true;
-                case Registers.UC_X86_REG_CS: value = s.Cs.Selector; return true;
-                case Registers.UC_X86_REG_SS: value = s.Ss.Selector; return true;
-                case Registers.UC_X86_REG_DS: value = s.Ds.Selector; return true;
-                case Registers.UC_X86_REG_ES: value = s.Es.Selector; return true;
-                case Registers.UC_X86_REG_FS: value = s.Fs.Selector; return true;
-                case Registers.UC_X86_REG_GS: value = s.Gs.Selector; return true;
-                case Registers.UC_X86_REG_CR0: value = s.Cr0; return true;
-                case Registers.UC_X86_REG_CR2: value = s.Cr2; return true;
-                case Registers.UC_X86_REG_CR3: value = s.Cr3; return true;
-                case Registers.UC_X86_REG_CR4: value = s.Cr4; return true;
-                case Registers.UC_X86_REG_CR8: value = s.Cr8; return true;
-                case Registers.UC_X86_REG_MSR: value = s.Efer; return true;
-                default: return false;
-            }
+            WhvRegisterValue v = GetSingleRegister(name);
+            v.High = (v.High & ~(0xFFFFUL << 32)) | ((ulong)(ushort)selector << 32);
+            SetSingleRegister(name, v);
+        }
+
+        private void WriteSegmentBase(WhvRegisterName name, ulong baseAddress)
+        {
+            WhvRegisterValue v = GetSingleRegister(name);
+            v.Low = baseAddress;
+            SetSingleRegister(name, v);
         }
 
         private static bool IsDebugRegister(Registers register) => register switch
@@ -2518,34 +2170,34 @@ namespace Brovan.Core.Emulation
             _ => false,
         };
 
-        private unsafe void WriteDebugRegister(Registers register, ulong value)
+        private void WriteDebugRegister(Registers register, ulong value)
         {
-            LinuxKvmDebugRegisters dr = GetDebugRegisters();
-            switch (register)
+            WhvRegisterName name = register switch
             {
-                case Registers.UC_X86_REG_DR0: dr.Db[0] = value; break;
-                case Registers.UC_X86_REG_DR1: dr.Db[1] = value; break;
-                case Registers.UC_X86_REG_DR2: dr.Db[2] = value; break;
-                case Registers.UC_X86_REG_DR3: dr.Db[3] = value; break;
-                case Registers.UC_X86_REG_DR6: dr.Dr6 = value; break;
-                case Registers.UC_X86_REG_DR7: dr.Dr7 = value; break;
-            }
-            SetDebugRegisters(dr);
+                Registers.UC_X86_REG_DR0 => WhvRegisterName.Dr0,
+                Registers.UC_X86_REG_DR1 => WhvRegisterName.Dr1,
+                Registers.UC_X86_REG_DR2 => WhvRegisterName.Dr2,
+                Registers.UC_X86_REG_DR3 => WhvRegisterName.Dr3,
+                Registers.UC_X86_REG_DR6 => WhvRegisterName.Dr6,
+                Registers.UC_X86_REG_DR7 => WhvRegisterName.Dr7,
+                _ => throw new WhpException("Unsupported WHP debug register"),
+            };
+            SetSingleRegister(name, WhvRegisterValue.FromReg64(value));
         }
 
-        private unsafe ulong ReadDebugRegister(Registers register)
+        private ulong ReadDebugRegister(Registers register)
         {
-            LinuxKvmDebugRegisters dr = GetDebugRegisters();
-            return register switch
+            WhvRegisterName name = register switch
             {
-                Registers.UC_X86_REG_DR0 => dr.Db[0],
-                Registers.UC_X86_REG_DR1 => dr.Db[1],
-                Registers.UC_X86_REG_DR2 => dr.Db[2],
-                Registers.UC_X86_REG_DR3 => dr.Db[3],
-                Registers.UC_X86_REG_DR6 => dr.Dr6,
-                Registers.UC_X86_REG_DR7 => dr.Dr7,
-                _ => 0,
+                Registers.UC_X86_REG_DR0 => WhvRegisterName.Dr0,
+                Registers.UC_X86_REG_DR1 => WhvRegisterName.Dr1,
+                Registers.UC_X86_REG_DR2 => WhvRegisterName.Dr2,
+                Registers.UC_X86_REG_DR3 => WhvRegisterName.Dr3,
+                Registers.UC_X86_REG_DR6 => WhvRegisterName.Dr6,
+                Registers.UC_X86_REG_DR7 => WhvRegisterName.Dr7,
+                _ => throw new WhpException("Unsupported WHP debug register"),
             };
+            return GetSingleRegister(name).Low;
         }
 
         private static GpRegisterAccess ClassifyGpRegister(Registers register)
@@ -2636,12 +2288,12 @@ namespace Brovan.Core.Emulation
             offset = 0;
             if (accessSize <= 0) return false;
 
-            ulong pageBase = address & ~KvmConstants.PageMask;
+            ulong pageBase = address & ~WhpConstants.PageMask;
             if (!TryLookupPage(pageBase, out MappedPage page))
                 return false;
 
             ulong accessEnd = address + (ulong)accessSize;
-            ulong firstPageEnd = pageBase + KvmConstants.PageSize;
+            ulong firstPageEnd = pageBase + WhpConstants.PageSize;
             if (accessEnd <= firstPageEnd)
             {
                 ptr = (byte*)page.HostPage;
@@ -2649,7 +2301,7 @@ namespace Brovan.Core.Emulation
                 return true;
             }
 
-            ulong cursor = pageBase + KvmConstants.PageSize;
+            ulong cursor = pageBase + WhpConstants.PageSize;
             while (cursor < accessEnd)
             {
                 if (!_mappedPages.TryGetValue(cursor, out MappedPage next) || next == null || next.HostPage == IntPtr.Zero)
@@ -2657,7 +2309,7 @@ namespace Brovan.Core.Emulation
                 long expectedHost = page.HostPage.ToInt64() + (long)(cursor - pageBase);
                 long actualHost = next.HostPage.ToInt64();
                 if (expectedHost != actualHost) return false;
-                cursor += KvmConstants.PageSize;
+                cursor += WhpConstants.PageSize;
             }
 
             ptr = (byte*)page.HostPage;
@@ -2669,7 +2321,7 @@ namespace Brovan.Core.Emulation
         {
             if (Disposed || Disposing)
             {
-                if (ThrowDisposed) throw new ObjectDisposedException(nameof(Kvm));
+                if (ThrowDisposed) throw new ObjectDisposedException(nameof(Whp));
                 return true;
             }
             return false;

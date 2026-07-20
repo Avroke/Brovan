@@ -13,11 +13,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             ulong WindowNamePtr = Instance.WinHelper.GetArg64(3);
             ulong Unknown = Instance.WinHelper.GetArg64(4, true);
 
-            // ClassName / WindowName are PUNICODE_STRING — 8-byte struct (Buffer @ +4) on x86, 16-byte
-            // (Buffer @ +8) on x64. Was gated to x64 (UNICODE_STRING64 only): on WOW64 the syscall returned
-            // NOT_SUPPORTED, and the 32-bit user32 FindWindowExW wrapper mis-read that error as a non-NULL
-            // HWND — so al-khaser's `FindWindow("VBoxTrayToolWndClass")` deduced a VBox window exists (BAD).
-            // With no such window registered, the correct result is NULL (not detected).
             if (!TryReadOptionalUnicodeString(Instance, ClassNamePtr, out string ClassName, out bool HasClassName))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
@@ -83,8 +78,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Address == 0)
                 return true;
 
-            // UNICODE_STRING is bitness-dependent: { USHORT Length; USHORT MaximumLength; PWSTR Buffer; } —
-            // Buffer at +4 (4 bytes) on x86, at +8 (8 bytes, after 4 pad) on x64.
             bool Is64 = Instance.GuestPointerSize == 8;
             ulong HeaderSize = Is64 ? 16UL : 8UL;
             if (!Instance.IsRegionMapped(Address, HeaderSize))

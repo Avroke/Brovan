@@ -813,8 +813,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         public NTSTATUS Create(BinaryEmulator Instance, string DevicePath, byte[] EaBuffer, out string InternalPath, out WinDeviceDelegate Handler)
         {
             AfdDevice Device = new AfdDevice(EaBuffer);
-            // Deterministic per-endpoint suffix: draw from the emulator's seeded RNG so the
-            // AFD object path is reproducible run-over-run (Guid.NewGuid() leaked host entropy).
             byte[] EndpointIdBytes = new byte[16];
             Instance.SeededRandom.NextBytes(EndpointIdBytes);
             InternalPath = DevicePath + "\\" + new Guid(EndpointIdBytes).ToString("N");

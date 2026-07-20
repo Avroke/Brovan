@@ -80,13 +80,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                             ulong ChangeStamp = 1;
                             Instance._emulator.WriteMemory(SystemInformationPtr + 0x00, ChangeStamp);
 
-                            // Configuration.FeatureId
                             Instance._emulator.WriteMemory(SystemInformationPtr + 0x08, FeatureId);
 
-                            // Configuration.Flags: leave 0 => Priority=0, EnabledState=Default (0), etc.
                             Instance._emulator.WriteMemory(SystemInformationPtr + 0x0C, 0u);
 
-                            // Configuration.VariantPayload
                             Instance._emulator.WriteMemory(SystemInformationPtr + 0x10, 0u);
 
                             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
@@ -118,17 +115,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                             ulong OverallChangeStamp = 1;
                             Instance._emulator.WriteMemory(SystemInformationPtr + 0x00, OverallChangeStamp);
 
-                            // Preserve nonzero previous change stamps for callers tracking section updates.
                             for (uint i = 0; i < SectionTypeCount; i++)
                             {
                                 ulong Prev = Instance.ReadMemoryULong(InputBufferPtr + (i * 8));
                                 ulong EntryBase = SystemInformationPtr + 0x08 + (i * 0x18);
 
-                                // ChangeStamp
                                 Instance._emulator.WriteMemory(EntryBase + 0x00, Prev == 0 ? OverallChangeStamp : Prev);
-                                // Section pointer = 0
                                 Instance._emulator.WriteMemory(EntryBase + 0x08, 0UL);
-                                // Size = 0
                                 Instance._emulator.WriteMemory(EntryBase + 0x10, 0UL);
                             }
 
@@ -262,7 +255,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                             if (Instance._binary.Architecture == BinaryArchitecture.x64)
                             {
-                                // Typical x64 kernel range start.
                                 ulong RangeStart = 0xFFFF800000000000UL;
                                 if (!Instance._emulator.WriteMemory(SystemInformationPtr, RangeStart, 8))
                                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -664,9 +656,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                     case SYSTEM_INFORMATION_CLASS.SystemMemoryUsageInformation:
                         {
-                            // SYSTEM_MEMORY_USAGE_INFORMATION (0x38 bytes) — mirrors the plain
-                            // NtQuerySystemInformation path so RAM totals stay coherent across
-                            // both syscalls. All figures come from the RAM SSOT.
                             const uint RequiredLength = 0x38;
                             if (SystemInformationLength < RequiredLength)
                             {

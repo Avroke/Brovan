@@ -9,10 +9,6 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            // Runs for both bitnesses. Arguments come through GetArg64 (bitness-aware) and the class handlers
-            // that emit pointer-sized fields branch on Architecture internally (SystemBasicInformation,
-            // SystemKernelDebugger, …). This unblocks the WOW64 loader, which queries SystemBasicInformation
-            // early; class-by-class 32-bit struct-size refinements are tracked separately.
             if (Instance._binary.Architecture == BinaryArchitecture.x64 || Instance._binary.Architecture == BinaryArchitecture.x86)
             {
                 SYSTEM_INFORMATION_CLASS SystemInformationClass = (SYSTEM_INFORMATION_CLASS)Instance.WinHelper.GetArg64(0);
@@ -300,7 +296,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                             if (Instance._binary.Architecture == BinaryArchitecture.x64)
                             {
-                                // Typical x64 kernel range start.
                                 ulong RangeStart = 0xFFFF800000000000UL;
                                 if (!Instance._emulator.WriteMemory(SystemInformationPtr, RangeStart, 8))
                                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -360,11 +355,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                             if (Processes == null)
                                 Processes = new List<WinProcess>();
 
-                            // SYSTEM_PROCESS_INFORMATION is bitness-dependent: the x64 header (ImageName
-                            // UNICODE_STRING @ 0x38 with an 8-byte Buffer, PID/PPID @ 0x50/0x58) is laid out
-                            // differently from the x86 header (8-byte UNICODE_STRING, PID/PPID @ 0x44/0x48). A
-                            // WOW64 process-enumeration walk fed the x64 layout gets a corrupt list. Emit the
-                            // layout that matches the guest.
                             bool Wow64Proc = Instance._binary.Architecture != BinaryArchitecture.x64;
                             ulong EntrySize = Wow64Proc ? 0xB8UL : 0x70UL;
                             ulong RequiredLength = (ulong)Processes.Count * EntrySize;
@@ -395,14 +385,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 Instance._emulator.WriteMemory(Current + 0x00, NextEntryOffset); // NextEntryOffset
                                 Instance._emulator.WriteMemory(Current + 0x04, 1u);              // NumberOfThreads
 
-                                // ImageName lives at +0x38 on both bitnesses; the whole entry was zero-filled
-                                // above, so a process with no readable name is left as an empty UNICODE_STRING.
                                 bool HasName = !string.IsNullOrEmpty(P.Name) && P.Status != ProtectionStatus.Unaccessible;
 
                                 if (Wow64Proc)
                                 {
-                                    // x86: ImageName is an 8-byte UNICODE_STRING (Buffer @ +4); BasePriority @
-                                    // 0x40, UniqueProcessId @ 0x44, InheritedFromUniqueProcessId @ 0x48 (4-byte).
                                     if (HasName)
                                         Instance.WinHelper.SetUnicodeString32((uint)(Current + 0x38), P.Name);
                                     Instance._emulator.WriteMemory(Current + 0x40, 8u, 4);           // BasePriority
@@ -411,8 +397,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 }
                                 else
                                 {
-                                    // x64: ImageName is a 16-byte UNICODE_STRING (Buffer @ +8); BasePriority @
-                                    // 0x48, UniqueProcessId @ 0x50, InheritedFromUniqueProcessId @ 0x58 (8-byte).
                                     if (HasName)
                                         Instance.WinHelper.SetUnicodeString(Current + 0x38, P.Name);
                                     Instance._emulator.WriteMemory(Current + 0x48, 8);
@@ -485,10 +469,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                     case SYSTEM_INFORMATION_CLASS.SystemEmulationBasicInformation:
                     case SYSTEM_INFORMATION_CLASS.SystemBasicInformation:
                         {
-                            // SYSTEM_BASIC_INFORMATION has three ULONG_PTR/KAFFINITY tail fields
-                            // (MinimumUserModeAddress, MaximumUserModeAddress, ActiveProcessorsAffinityMask)
-                            // that are 8 bytes on x64 / 4 bytes on x86 — so the struct is 0x40 vs 0x2C and the
-                            // WOW64 loader passes a 44-byte buffer. Size the tail to the guest.
                             bool Wow64 = Instance._binary.Architecture != BinaryArchitecture.x64;
                             uint RequiredLength = Wow64 ? 0x2Cu : 0x40u;
                             if (SystemInformationLength < RequiredLength)
@@ -520,17 +500,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                             if (Wow64)
                             {
-                                // The two user-address bounds must describe the 32-bit *process* address space,
-                                // NOT the emulator's internal allocation window (Instance.BaseAddress/MaxAddress).
-                                // MaximumUserModeAddress in particular is load-bearing: ntdll's CFG-bitmap
-                                // reservation (LdrpProtectMrdata → RtlpAllocateVirtualMemoryEx) reads it back via
-                                // SystemEmulationBasicInformation, does `MaximumUserModeAddress + 1`, then derives
-                                // the bitmap size from that span. (uint)Instance.MaxAddress was 0xFFFFFFFF, whose
-                                // +1 overflows to 0 → a 0-byte bitmap reservation → NtAllocateVirtualMemoryEx
-                                // returns STATUS_INVALID_PARAMETER → ntdll fails process init with
-                                // STATUS_APP_INIT_FAILURE. Report the real Win32 bounds instead: floor 0x10000
-                                // (64 KB), ceiling 0x7FFEFFFF (2 GB − 64 KB), or 0xFFFEFFFF (4 GB − 64 KB) when
-                                // the image is large-address-aware — the extra 2 GB a WOW64 LAA process gets.
                                 bool LargeAddressAware = Instance._binary.PE != null &&
                                     (Instance._binary.PE.Characteristics & System.Reflection.PortableExecutable.Characteristics.LargeAddressAware) != 0;
                                 uint MinimumUserModeAddress = 0x00010000;
@@ -560,10 +529,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                     case SYSTEM_INFORMATION_CLASS.SystemMemoryUsageInformation:
                         {
-                            // SYSTEM_MEMORY_USAGE_INFORMATION (0x38 bytes). This is the ONLY class
-                            // modern kernelbase!GlobalMemoryStatusEx queries; returning
-                            // STATUS_NOT_SUPPORTED left MEMORYSTATUSEX unfilled (ullTotalPhys == 0),
-                            // reading as a sub-2 GB VM. All figures come from the RAM SSOT.
                             const uint RequiredLength = 0x38;
                             if (SystemInformationLength < RequiredLength)
                             {
@@ -597,15 +562,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                         }
                     case SYSTEM_INFORMATION_CLASS.SystemFirmwareTableInformation:
                         {
-                            // GetSystemFirmwareTable / EnumSystemFirmwareTables route here via a
-                            // SYSTEM_FIRMWARE_TABLE_INFORMATION struct: ProviderSignature (+0x00),
-                            // Action (+0x04), TableID (+0x08), TableBufferLength (+0x0C), TableBuffer
-                            // (+0x10). We answer the 'ACPI' provider with a bare-metal-realistic table
-                            // set: a real machine always exposes ACPI tables, so code that reads an
-                            // absent/unenumerable ACPI firmware table as an emulator tell sees a normal
-                            // host. OEM strings are common AMI/desktop values with NO hypervisor
-                            // signature, so a firmware VM-string scan finds nothing. Other providers
-                            // (RSMB / FIRM) fall through to the default path unchanged (still fail).
                             const uint FirmwareHeaderLen = 0x10;
                             if (SystemInformationLength < FirmwareHeaderLen)
                                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
@@ -627,13 +583,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                             else if (FirmwareAction == 1) // SystemFirmwareTable_Get
                             {
                                 FirmwareData = AcpiGetTable(FirmwareTableId);
-                                // Only the tables we actually enumerate exist. A Get for any other
-                                // signature (e.g. a probe that reads a hypervisor-specific table such
-                                // as QEMU's 'PCAF' and inspects a fixed byte) must fail exactly as it
-                                // would on bare metal where that table is absent. Report size 0 so the
-                                // GetSystemFirmwareTable wrapper returns 0 ("table not present") instead
-                                // of leaving the caller's input TableBufferLength in place — which a probe
-                                // would read as "table exists" and then inspect at a fixed offset.
                                 if (FirmwareData == null)
                                 {
                                     Instance._emulator.WriteMemory(SystemInformationPtr + 0x0C, 0u);
@@ -647,7 +596,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 break; // unsupported action (e.g. register handler) -> default
                             }
 
-                            // GetSystemFirmwareTable reads TableBufferLength back as the actual size.
                             Instance._emulator.WriteMemory(SystemInformationPtr + 0x0C, (uint)FirmwareData.Length);
 
                             uint CopyLen = Math.Min(TableBufferLength, (uint)FirmwareData.Length);
@@ -679,11 +627,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private const uint AcpiSigSSDT = 0x54445353; // 'SSDT'
 
-        // Bare-metal-realistic ACPI signature set. Deliberately EXCLUDES 'WAET' (the "Windows ACPI
-        // Emulated devices Table" — its presence is itself a virtualization tell) and INCLUDES 'WSMT'
-        // (Windows SMM Security Mitigations Table — present on real modern machines; its absence is a
-        // tell). Stored as the little-endian DWORDs EnumSystemFirmwareTables returns / GetSystemFirmware
-        // Table takes back as TableID.
         private static readonly uint[] AcpiTableSignatures =
         {
             0x50434146, // 'FACP' (FADT)
@@ -695,9 +638,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             0x544D5357, // 'WSMT'
         };
 
-        // Standard ACPI PnP hardware IDs a real firmware exposes (PS/2, power/sleep buttons, container,
-        // memory). Embedded (as ASCII, the form a firmware string scan matches) in the SSDT body so a
-        // scan that treats the ABSENCE of real PnP devices as a virtualization tell is satisfied.
         private static readonly byte[] AcpiSsdtDeviceIds =
             System.Text.Encoding.ASCII.GetBytes("PNP0000\0PNP0C0C\0PNP0C0E\0PNP0C14\0PNP0D80\0");
 
@@ -719,13 +659,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static byte[] AcpiGetTable(uint TableId)
         {
-            // Only the tables we enumerate exist; anything else is absent (bare-metal behavior).
             if (!IsKnownAcpiTable(TableId))
                 return null;
 
-            // Minimal but well-formed ACPI table: the 36-byte common header + a body, with a corrected
-            // 8-bit checksum (whole table sums to 0 mod 256). OEM fields are the ubiquitous AMI/desktop
-            // strings — bare metal, no VM signature. The SSDT carries the standard PnP device IDs.
             const int HeaderLen = 36;
             byte[] Body = TableId == AcpiSigSSDT ? AcpiSsdtDeviceIds : new byte[16];
             byte[] Table = new byte[HeaderLen + Body.Length];

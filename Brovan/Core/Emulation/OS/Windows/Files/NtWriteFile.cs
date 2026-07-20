@@ -7,9 +7,6 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            // Bitness-agnostic: GetArg64 reads the x86 stack under WOW64 and the IO_STATUS_BLOCK is
-            // pointer-sized-pair (8 bytes on x86, 16 on x64). WOW64 programs (e.g. al-khaser_x86) print
-            // their results through NtWriteFile, so this must run on x86.
             ulong FileHandle = Instance.WinHelper.GetArg64(0);
             ulong EventHandle = Instance.WinHelper.GetArg64(1);
             ulong ApcRoutine = Instance.WinHelper.GetArg64(2);

@@ -9,6 +9,7 @@ using static System.Runtime.InteropServices.JavaScript.JSType;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
+    [GenerateStructSerializer]
     [StructLayout(LayoutKind.Explicit)]
     public struct UNICODE_STRING
     {
@@ -22,6 +23,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public uint Buffer;
     }
 
+    [GenerateStructSerializer]
     [StructLayout(LayoutKind.Explicit)]
     public struct UNICODE_STRING64
     {
@@ -35,6 +37,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong Buffer;
     }
 
+    [GenerateStructSerializer]
     [StructLayout(LayoutKind.Explicit, Size = 48)]
     public struct OBJECT_ATTRIBUTES64
     {
@@ -57,6 +60,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong SecurityQualityOfService;
     }
 
+    [GenerateStructSerializer]
     [StructLayout(LayoutKind.Sequential)]
     public struct MEMORY_REGION_INFORMATION
     {
@@ -69,6 +73,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong NodePreference;
     }
 
+    [GenerateStructSerializer]
     [StructLayout(LayoutKind.Sequential)]
     public struct MEMORY_IMAGE_EXTENSION_INFORMATION
     {
@@ -78,6 +83,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong ExtensionSize;
     }
 
+    [GenerateStructSerializer]
     [StructLayout(LayoutKind.Sequential)]
     public struct MEMORY_WORKING_SET_EX_INFORMATION
     {
@@ -154,6 +160,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong Rip;
     }
 
+    [GenerateStructSerializer]
     [StructLayout(LayoutKind.Sequential)]
     public struct MEMORY_BASIC_INFORMATION
     {
@@ -169,6 +176,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public uint Reserved2; // tail padding to 48 bytes
     }
 
+    [GenerateStructSerializer]
     [StructLayout(LayoutKind.Sequential)]
     public struct MEMORY_IMAGE_INFORMATION
     {
@@ -217,6 +225,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         MutantOwnerInformation = 1
     }
 
+    [GenerateStructSerializer]
     [StructLayout(LayoutKind.Sequential, Pack = 1)]
     public struct MUTANT_BASIC_INFORMATION
     {
@@ -231,6 +240,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         SemaphoreBasicInformation = 0
     }
 
+    [GenerateStructSerializer]
     [StructLayout(LayoutKind.Sequential, Pack = 1)]
     public struct SEMAPHORE_BASIC_INFORMATION
     {
@@ -238,6 +248,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public int MaximumCount;
     }
 
+    [GenerateStructSerializer]
     [StructLayout(LayoutKind.Sequential, Pack = 1)]
     public struct OBJECT_BASIC_INFORMATION_DATA
     {
@@ -256,6 +267,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public long CreationTime;
     }
 
+    [GenerateStructSerializer]
     [StructLayout(LayoutKind.Sequential, Pack = 1)]
     public struct OBJECT_TYPE_INFORMATION64
     {
@@ -284,6 +296,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public uint DefaultNonPagedPoolCharge;
     }
 
+    [GenerateStructSerializer]
     [StructLayout(LayoutKind.Sequential, Pack = 1)]
     public struct OBJECT_TYPE_INFORMATION32
     {
@@ -312,6 +325,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public uint DefaultNonPagedPoolCharge;
     }
 
+    [GenerateStructSerializer]
     [StructLayout(LayoutKind.Explicit, Size = 16)]
     public struct LARGE_STRING64
     {
@@ -325,6 +339,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong Buffer;
     }
 
+    [GenerateStructSerializer]
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT
     {
@@ -334,6 +349,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public int Bottom;
     }
 
+    [GenerateStructSerializer]
     [StructLayout(LayoutKind.Sequential)]
     public struct SYSTEM_BATTERY_STATE
     {
@@ -361,6 +377,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public uint Capacity;
     }
 
+    [GenerateStructSerializer]
     [StructLayout(LayoutKind.Sequential)]
     public struct SYSTEM_POWER_CAPABILITIES
     {

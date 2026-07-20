@@ -30,7 +30,6 @@ namespace Brovan.Core.Emulation.OS.Windows
     /// </summary>
     internal class NtQueryInformationAtom : IWinSyscall
     {
-        // ATOM_INFORMATION_CLASS
         private const uint AtomBasicInformation = 0;
         private const uint AtomTableInformation = 1;
 
@@ -53,16 +52,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (InformationClass == AtomBasicInformation)
             {
-                // Integer atoms (0xC000-0xFFFF, bit-15 set) are always valid; string atoms
-                // aren't in Brovan's (absent) user-atom table. Real Windows: STATUS_INVALID_HANDLE
-                // for the unregistered-string-atom case, which is precisely what al-khaser's
-                // GlobalGetAtomName(bogus atom) probe expects — the API returns 0, no OUT
-                // buffer is written, no page is dirtied.
                 if (Atom < 0xC000)
                     return NTSTATUS.STATUS_INVALID_HANDLE;
 
-                // Integer atom: the name is "#12345"; the payload is ATOM_BASIC_INFORMATION
-                // (USHORT UsageCount + USHORT Flags + USHORT NameLength + WCHAR Name[]).
                 string Name = "#" + Atom.ToString(System.Globalization.CultureInfo.InvariantCulture);
                 uint NameByteCount = (uint)System.Text.Encoding.Unicode.GetByteCount(Name);
                 uint Required = 6 /* header */ + NameByteCount + 2 /* NUL */;
@@ -89,7 +81,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            // AtomTableInformation: return an empty table (NumberOfAtoms=0, no entries).
             const uint HeaderSize = 8;
             if (ReturnLengthPtr != 0)
                 Instance._emulator.WriteMemory(ReturnLengthPtr, HeaderSize, 4);

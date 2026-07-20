@@ -77,6 +77,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             _len += (int)n;
         }
 
+        public void WriteBytes(byte[] src)
+        {
+            Ensure(src.Length);
+            src.CopyTo(_data.AsSpan(_len, src.Length));
+            _len += src.Length;
+        }
+
         public byte[] Finish(int result)
         {
             byte[] outp = new byte[4 + _len];
@@ -93,11 +100,125 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal static extern IntPtr GetModuleHandleW(IntPtr lpModuleName);
     }
 
+    internal static unsafe class BrovVulkGenExt
+    {
+        private const int PropSize = 260;
+
+        private static byte[] _instance;
+        private static byte[] _device;
+        private static IntPtr _devicePd;
+
+        public static int Instance(GenBuf w)
+        {
+            _instance ??= Filter(QueryHost(IntPtr.Zero), BrovVulkExtensions.Instance);
+            w.WriteBytes(_instance);
+            return 0;
+        }
+
+        public static int Device(IntPtr physicalDevice, GenBuf w)
+        {
+            if (_device == null || _devicePd != physicalDevice)
+            {
+                _device = Filter(QueryHost(physicalDevice), BrovVulkExtensions.Device);
+                _devicePd = physicalDevice;
+            }
+            w.WriteBytes(_device);
+            return 0;
+        }
+
+        private static Dictionary<string, uint> QueryHost(IntPtr physicalDevice)
+        {
+            Dictionary<string, uint> map = new Dictionary<string, uint>(StringComparer.Ordinal);
+            uint n = 0;
+            int rr = physicalDevice == IntPtr.Zero
+                ? (int)BrovVulkApi.vkEnumerateInstanceExtensionProperties(IntPtr.Zero, (IntPtr)(&n), IntPtr.Zero)
+                : (int)BrovVulkApi.vkEnumerateDeviceExtensionProperties(physicalDevice, IntPtr.Zero, (IntPtr)(&n), IntPtr.Zero);
+            if (rr < 0 || n == 0)
+                return map;
+            if (n > 4096)
+                n = 4096;
+            IntPtr buf = Marshal.AllocHGlobal((int)(n * PropSize));
+            try
+            {
+                rr = physicalDevice == IntPtr.Zero
+                    ? (int)BrovVulkApi.vkEnumerateInstanceExtensionProperties(IntPtr.Zero, (IntPtr)(&n), buf)
+                    : (int)BrovVulkApi.vkEnumerateDeviceExtensionProperties(physicalDevice, IntPtr.Zero, (IntPtr)(&n), buf);
+                if (rr < 0)
+                    return map;
+                for (uint k = 0; k < n; k++)
+                {
+                    IntPtr rec = buf + (int)(k * PropSize);
+                    string name = Marshal.PtrToStringAnsi(rec);
+                    if (!string.IsNullOrEmpty(name))
+                        map[name] = (uint)Marshal.ReadInt32(rec, 256);
+                }
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buf);
+            }
+            return map;
+        }
+
+        private static byte[] Filter(Dictionary<string, uint> host, (string Name, uint Version)[] advertised)
+        {
+            List<(string Name, uint Version)> keep = new List<(string, uint)>();
+            foreach ((string name, uint ver) in advertised)
+            {
+                string hostName = Brovan.GeneralHelper.IsLinux && name == "VK_KHR_win32_surface" ? "VK_KHR_xcb_surface" : name;
+                if (host.TryGetValue(hostName, out uint hv))
+                    keep.Add((name, Math.Min(ver, hv)));
+            }
+            byte[] payload = new byte[4 + keep.Count * PropSize];
+            BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(0, 4), (uint)keep.Count);
+            for (int k = 0; k < keep.Count; k++)
+            {
+                int off = 4 + k * PropSize;
+                System.Text.Encoding.ASCII.GetBytes(keep[k].Name, payload.AsSpan(off, 255));
+                BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(off + 256, 4), keep[k].Version);
+            }
+            return payload;
+        }
+    }
+
     internal sealed class GenState
     {
+        internal readonly struct MapEntry
+        {
+            public readonly IntPtr HostPtr;
+            public readonly ulong GuestVa;
+            public readonly ulong MapOffset;
+            public readonly ulong Size;
+            public readonly bool Imported;
+
+            public MapEntry(IntPtr hostPtr, ulong guestVa, ulong mapOffset, ulong size, bool imported)
+            {
+                HostPtr = hostPtr;
+                GuestVa = guestVa;
+                MapOffset = mapOffset;
+                Size = size;
+                Imported = imported;
+            }
+        }
+
+        public readonly struct DeviceImport
+        {
+            public readonly IntPtr GetHostPointerProps;
+            public readonly ulong Alignment;
+
+            public DeviceImport(IntPtr getHostPointerProps, ulong alignment)
+            {
+                GetHostPointerProps = getHostPointerProps;
+                Alignment = alignment;
+            }
+        }
+
         private const int ArenaCap = 1 << 20;
 
         private readonly Dictionary<uint, (IntPtr Ptr, string Type)> _handles = new Dictionary<uint, (IntPtr, string)>();
+        private readonly Dictionary<uint, MapEntry> _mappings = new Dictionary<uint, MapEntry>();
+        private readonly HashSet<uint> _importedMem = new HashSet<uint>();
+        private readonly Dictionary<IntPtr, DeviceImport> _deviceImports = new Dictionary<IntPtr, DeviceImport>();
         private uint _next = 1;
 
         private IntPtr _arena;
@@ -116,13 +237,60 @@ namespace Brovan.Core.Emulation.OS.Windows
         public IntPtr Lookup(uint id, string type)
         {
             if (id == 0)
+            {
+                // A dispatchable handle is the object a command operates on and is never VK_NULL_HANDLE
+                if (IsDispatchable(type))
+                    throw new InvalidOperationException($"BrovVulk generic: null dispatchable handle ({type}).");
+
                 return IntPtr.Zero;
+            }
             if (_handles.TryGetValue(id, out (IntPtr Ptr, string Type) e) && e.Type == type)
                 return e.Ptr;
             throw new InvalidOperationException($"BrovVulk generic: bad handle id {id} (expected {type}).");
         }
 
-        public void Forget(uint id) => _handles.Remove(id);
+        private static bool IsDispatchable(string type)
+        {
+            switch (type)
+            {
+                case "VkInstance":
+                case "VkPhysicalDevice":
+                case "VkDevice":
+                case "VkQueue":
+                case "VkCommandBuffer":
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        public void Forget(uint id)
+        {
+            _handles.Remove(id);
+            _mappings.Remove(id);
+            _importedMem.Remove(id);
+        }
+
+        public bool HasMapping(uint id) => _mappings.ContainsKey(id);
+
+        public void MarkImported(uint id) => _importedMem.Add(id);
+
+        public bool IsImportedMemory(uint id) => _importedMem.Contains(id);
+
+        public void SetDeviceImport(IntPtr device, DeviceImport import) => _deviceImports[device] = import;
+
+        public bool TryGetDeviceImport(IntPtr device, out DeviceImport import) => _deviceImports.TryGetValue(device, out import);
+
+        public void AddMapping(uint id, IntPtr hostPtr, ulong guestVa, ulong mapOffset, ulong size, bool imported) =>
+            _mappings[id] = new MapEntry(hostPtr, guestVa, mapOffset, size, imported);
+
+        public bool TryGetMapping(uint id, out MapEntry entry) => _mappings.TryGetValue(id, out entry);
+
+        public void RemoveMapping(uint id) => _mappings.Remove(id);
+
+        public void ClearMappings() => _mappings.Clear();
+
+        public Dictionary<uint, MapEntry>.ValueCollection Mappings => _mappings.Values;
 
         public unsafe IntPtr Alloc(int size)
         {

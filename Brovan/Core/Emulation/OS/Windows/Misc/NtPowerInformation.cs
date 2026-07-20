@@ -2,7 +2,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal class NtPowerInformation : IWinSyscall
     {
-        // Power information classes currently modeled by this syscall handler.
         public enum POWER_INFORMATION_LEVEL
         {
             SystemPowerCapabilities = 4,

@@ -19,7 +19,6 @@ namespace Brovan.Core
     /// </summary>
     public class BinaryFile : IDisposable
     {
-        // public variables (results of analysis)
 
         /// <summary>
         /// Binary format.
@@ -260,10 +259,8 @@ namespace Brovan.Core
 
             if (FileFormat == BinaryFormat.PE)
             {
-                // Read PE Dos Header
                 IMAGE_DOS_HEADER DosHeader = ReadStruct<IMAGE_DOS_HEADER>(Data, 0);
 
-                // Check for magic number again, to be sure.
                 if (DosHeader.e_magic != 0x5A4D)
                 {
                     FileFormat = BinaryFormat.Unknown;
@@ -272,7 +269,6 @@ namespace Brovan.Core
 
                 uint PESignature = ReadStruct<uint>(Data, DosHeader.e_lfanew);
 
-                // do a check to ensure it's a valid PE file.
                 if (PESignature != 0x00004550) // (check for "PE\0\0" which should be available for valid PE binaries)
                 {
                     FileFormat = BinaryFormat.Unknown;
@@ -283,7 +279,6 @@ namespace Brovan.Core
                 PE.FileHeader = FileHeader;
                 bool Is64Bit = false;
 
-                // Determine binary type.
                 switch (FileHeader.Machine)
                 {
                     case 0x014C:
@@ -353,12 +348,10 @@ namespace Brovan.Core
                     Header = OptionalHeader;
                 }
 
-                // Get the offset of the PE sections.
                 int SectionOffset = (DosHeader.e_lfanew + 4) + (Unsafe.SizeOf<IMAGE_FILE_HEADER>() + FileHeader.SizeOfOptionalHeader);
 
                 PE.Sections = new PortableBinarySection[FileHeader.NumberOfSections];
 
-                // Get PE Sections.
                 for (int i = 0; i < FileHeader.NumberOfSections; i++)
                 {
                     if (SectionOffset + Unsafe.SizeOf<IMAGE_SECTION_HEADER>() > Data.Length)
@@ -404,7 +397,6 @@ namespace Brovan.Core
             }
             else if (FileFormat == BinaryFormat.ELF)
             {
-                // Determine Architecture first which is located at the offset (0x4)
                 byte ElfClass = Data[4];
                 bool Is64Bit = ElfClass == 2;
                 if (Is64Bit)
@@ -431,7 +423,6 @@ namespace Brovan.Core
 
                     int SectionCount = ElfHeader.e_shnum;
 
-                    // Set ELF Information.
                     EntryPoint = (uint)ElfHeader.e_entry;
                     ELF.Type = ElfHeader.e_type;
                     ELF.Version = ElfHeader.e_version;
@@ -444,7 +435,6 @@ namespace Brovan.Core
                     ELF.SectionNameIndex = ElfHeader.e_shstrndx;
                     ELF.Sections = new ElfBinarySection[SectionCount];
 
-                    // Read the sections and set it's information.
                     ELF64_SECTION_HEADER StringTableHeader = ReadStruct<ELF64_SECTION_HEADER>(Data, (int)(ElfHeader.e_shoff + ((ulong)ElfHeader.e_shstrndx * (ulong)ElfHeader.e_shentsize)));
                     if (StringTableHeader.sh_size > (ulong)Array.MaxLength || StringTableHeader.sh_size < 0)
                         throw new ArgumentOutOfRangeException(nameof(StringTableHeader.sh_size), "sh_size is out-of-range for a byte array.");
@@ -510,7 +500,6 @@ namespace Brovan.Core
 
                     int SectionCount = ElfHeader.e_shnum;
 
-                    // Set ELF Information.
                     EntryPoint = ElfHeader.e_entry;
                     ELF.Type = ElfHeader.e_type;
                     ELF.Version = ElfHeader.e_version;
@@ -523,7 +512,6 @@ namespace Brovan.Core
                     ELF.SectionNameIndex = ElfHeader.e_shstrndx;
                     ELF.Sections = new ElfBinarySection[SectionCount];
 
-                    // Read the sections and set it's information.
                     ELF32_SECTION_HEADER StringTableHeader = ReadStruct<ELF32_SECTION_HEADER>(Data, (int)(ElfHeader.e_shoff + (ElfHeader.e_shstrndx * ElfHeader.e_shentsize)));
                     if (StringTableHeader.sh_size > Array.MaxLength || StringTableHeader.sh_size < 0)
                         throw new OverflowException("sh_size is out-of-range for a byte array.");
@@ -570,7 +558,6 @@ namespace Brovan.Core
 
                 BuildELFSectionLookupCache();
 
-                // Parse functions and imports
                 ParseELFFunctions();
                 ParseELFImports(Is64Bit);
             }
@@ -585,7 +572,6 @@ namespace Brovan.Core
         /// <param name="Is64Bit">Indicates if the PE is 64-bit.</param>
         private void ParsePEFunctions(IMAGE_DOS_HEADER DosHeader, IMAGE_FILE_HEADER FileHeader, bool Is64Bit)
         {
-            // Parse .pdata section for runtime function information
             var PDataSection = PE.Sections.FirstOrDefault(s => s.SectionName == ".pdata");
             if (PDataSection.SectionName != null)
             {
@@ -648,10 +634,8 @@ namespace Brovan.Core
                 }
             }
 
-            // Parse remaining functions using signature scanning
             ParsePEFunctions();
 
-            // Add entry point as before
             if (Is64Bit)
             {
                 IMAGE_OPTIONAL_HEADER64 OptionalHeader = ReadStruct<IMAGE_OPTIONAL_HEADER64>(DataSpan, DosHeader.e_lfanew + 4 + Unsafe.SizeOf<IMAGE_FILE_HEADER>());
@@ -707,12 +691,10 @@ namespace Brovan.Core
                 IMAGE_OPTIONAL_HEADER32 OptionalHeader = ReadStruct<IMAGE_OPTIONAL_HEADER32>(DataSpan, DosHeader.e_lfanew + 4 + Unsafe.SizeOf<IMAGE_FILE_HEADER>());
                 uint EntryRva = OptionalHeader.AddressOfEntryPoint;
 
-                // Find the section containing the entry point
                 if (TryFindPESectionByRvaFast(EntryRva, out PortableBinarySection EntrySection))
                 {
                     if (EntrySection.SectionName != null)
                     {
-                        // Calculate file offset
                         if (TryRvaToFileOffset(EntryRva, out uint EntryOffset))
                         {
                             if (!Functions.Any(f => f.Offset == EntryOffset))
@@ -795,7 +777,6 @@ namespace Brovan.Core
                 if (EndSearch + 16 > (uint)Data.Length)
                     break;
 
-                // Disassemble a chunk of code at the current position
                 DataSpan.Slice((int)EndSearch, 16).CopyTo(ChunkData);
 
                 X86Instruction[] Instructions = Disassembler.Disassemble(ChunkData, EndSearch);
@@ -803,14 +784,12 @@ namespace Brovan.Core
                 if (Instructions.Length < 1)
                     continue;
 
-                // Check for common epilogues
                 if (IsEpilogue(Instructions))
                 {
                     EndOffset = EndSearch + (uint)Instructions[Instructions.Length - 1].Bytes.Length;
                     break;
                 }
 
-                // Check for proper INT3 padding
                 if (IsInt3Padding(Instructions))
                 {
                     bool IsInt3Sequence = true;
@@ -857,7 +836,6 @@ namespace Brovan.Core
                 if (A1 <= A0)
                     continue;
 
-                // Overlap test
                 if (StartOffset < A1 && EndOffset > A0)
                     return true;
             }
@@ -1726,7 +1704,6 @@ namespace Brovan.Core
             MetadataReader MetadataReader = null;
             try
             {
-                // Gonna use PEReader (no manual parsing for now)
                 PEReader PEReader = new PEReader(Data.BasePtr, Data.Length, true);
                 MetadataReader = PEReader.GetMetadataReader();
                 foreach (TypeDefinitionHandle TypeHandle in MetadataReader.TypeDefinitions)
@@ -1796,7 +1773,6 @@ namespace Brovan.Core
                                 {
                                     StandaloneSignature LocalSignature = MetadataReader.GetStandaloneSignature(MethodBody.LocalSignature);
 
-                                    // Get the signature blob reader to read the local variables count
                                     BlobReader LocalSignatureReader = MetadataReader.GetBlobReader(LocalSignature.Signature);
                                     SignatureHeader SigHeader = LocalSignatureReader.ReadSignatureHeader();
                                     if (SigHeader.Kind == SignatureKind.LocalVariables)
@@ -1892,7 +1868,6 @@ namespace Brovan.Core
                         DeclaringType = ParentHandle.ToString();
                     }
 
-                    // Read method signature blob
                     bool IsInstance = false;
                     BlobReader SignatureReader = MetadataReader.GetBlobReader(MemberRef.Signature);
                     SignatureHeader SignatureHeader = SignatureReader.ReadSignatureHeader();
@@ -1961,11 +1936,9 @@ namespace Brovan.Core
 
                 IMAGE_IMPORT_DESCRIPTOR ImportDescriptor = ReadStruct<IMAGE_IMPORT_DESCRIPTOR>(DataSpan, (int)ImportTableOffset);
 
-                // Check for end of import descriptors (null entry)
                 if (ImportDescriptor.Name == 0 && ImportDescriptor.FirstThunk == 0 && ImportDescriptor.OriginalFirstThunk == 0)
                     break;
 
-                // Get DLL name
                 if (!TryRvaToFileOffset(ImportDescriptor.Name, out uint NameOffset))
                 {
                     ImportTableOffset += DescriptorSize;
@@ -2277,7 +2250,6 @@ namespace Brovan.Core
         private void ParseELFImports(bool Is64Bit)
         {
 
-            // Find .plt, .got.plt, and .rela.plt or .rel.plt sections
             var PltSection = ELF.Sections.FirstOrDefault(s => s.SectionName == ".plt");
             var GotPltSection = ELF.Sections.FirstOrDefault(s => s.SectionName == ".got.plt");
             var RelaPltSection = ELF.Sections.FirstOrDefault(s =>
@@ -2290,7 +2262,6 @@ namespace Brovan.Core
                 DynStrSection.SectionName == null)
                 return;
 
-            // Read dynamic string table
             if (DynStrSection.RawOffset > Data.Length || DynStrSection.RawSize < 0)
                 throw new IndexOutOfRangeException("Invalid .dynstr data.");
 
@@ -2308,7 +2279,6 @@ namespace Brovan.Core
 
             ReadOnlySpan<byte> DynStr = DataSpan.Slice(RawOffset, BytesToCopy);
 
-            // Create a map of symbol index to name
             int SymbolSize = Is64Bit ? 24 : 16; // if 64-bit arch, set to 24 (Elf64_Sym) and if not then use 16 (Elf32_Sym)
             int SymbolCount = (int)(DynSymSection.RawSize / SymbolSize);
             Dictionary<uint, string> SymbolNames = new Dictionary<uint, string>(SymbolCount);
@@ -2345,7 +2315,6 @@ namespace Brovan.Core
                 }
             }
 
-            // Parse relocation entries
             int RelSize = Is64Bit ? 24 : 8;
             int RelCount = (int)(RelaPltSection.RawSize / RelSize);
 
@@ -2369,7 +2338,6 @@ namespace Brovan.Core
 
                 if (SymbolNames.TryGetValue(SymbolIndex, out string SymbolName))
                 {
-                    // PLT entry is 16 bytes on both 32-bit and 64-bit
                     uint VirtualAddress = PltSection.VirtualAddress + 16 + (uint)(i * 16);
                     ulong PltOffset = VirtualAddressToFileOffset(VirtualAddress, PltSection);
                     ELF.ImportFunctions[PltOffset] = new ELFImportFunction
@@ -2594,7 +2562,6 @@ namespace Brovan.Core
             }
             catch
             {
-                // most likely corrupted if it reaches here
                 return BinaryCorruptionStatus.Corrupted;
             }
 
@@ -2982,7 +2949,6 @@ namespace Brovan.Core
             if (IsDisposed)
                 return;
 
-            // Dispose collected binary information
             ELF.ImportFunctions?.Clear();
             PE.ImportFunctions?.Clear();
             ClearArray(Functions);
@@ -2995,7 +2961,6 @@ namespace Brovan.Core
             ClearArray(DotNet.DotNetTypes);
             ClearArray(DotNet.DotNetMembers);
 
-            // Set objects to null
             PE = null;
             ELF = null;
             DotNet = null;

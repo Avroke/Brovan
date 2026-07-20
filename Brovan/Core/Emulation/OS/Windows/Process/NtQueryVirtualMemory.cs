@@ -18,16 +18,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private const ulong PageGuard = 0x00000100UL;
 
-        // x64 user-mode address-space ceiling (MmHighestUserAddress). ntdll returns
-        // STATUS_INVALID_PARAMETER for a MemoryBasicInformation query above this, and the
-        // canonical VirtualQuery region-walk (`while (VirtualQuery(addr)) addr += RegionSize;`)
-        // relies on that failure to terminate.
         private const ulong MmHighestUserAddress = 0x00007FFFFFFEFFFFUL;
 
-        // Start of the x64 kernel-mode canonical range. Addresses at/above this are left on the
-        // existing lookup path so kernel-mode driver queries are not affected by the user-ceiling
-        // termination gate; only the user-space + non-canonical hole above MmHighestUserAddress
-        // is failed (which is what makes a user-mode walk stop).
         private const ulong KernelCanonicalBase = 0xFFFF800000000000UL;
 
         private static ulong AlignDownPage(ulong Address)
@@ -49,18 +41,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            // MemoryBasicInformation is serialized bitness-aware below; the other, less common classes still
-            // emit x64 layouts, so they are gated to x64 for now (an x86 query of them returns unimplemented
-            // rather than corrupting the caller's buffer).
             if (Instance._binary.Architecture == BinaryArchitecture.x64 || Instance._binary.Architecture == BinaryArchitecture.x86)
             {
                 bool Wow64 = Instance._binary.Architecture != BinaryArchitecture.x64;
 
-                // User-mode address ceiling is bitness-dependent. The x64 value (MmHighestUserAddress) never
-                // gates a 32-bit address and would size a WOW64 free region as ~127 TB (truncated to a garbage
-                // 32-bit RegionSize). Use the real x86 ceiling — 0x7FFEFFFF, or 0xFFFEFFFF for a large-address-
-                // aware image (the extra 2 GB a WOW64 LAA process gets) — matching NtQuerySystemInformation's
-                // SystemBasicInformation bounds so the two syscalls stay mutually consistent.
                 ulong UserCeiling = MmHighestUserAddress;
                 if (Wow64)
                 {
@@ -99,17 +83,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (MemoryInformationClass == MEMORY_INFORMATION_CLASS.MemoryBasicInformation || MemoryInformationClass == MEMORY_INFORMATION_CLASS.MemoryPrivilegedBasicInformation)
                 {
-                    // Above the user-mode ceiling (but below the kernel canonical range) ntdll fails
-                    // the query; without this a walk that steps past the highest mapped region would
-                    // get an endless run of 0x1000-byte MEM_FREE regions (see the free-region branch
-                    // below) and never terminate. Kernel addresses stay on the normal path so driver
-                    // queries are unaffected.
                     if (Address > UserCeiling && Address < KernelCanonicalBase)
                         return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-                    // MEMORY_BASIC_INFORMATION size is bitness-dependent (three pointer-sized fields): 0x1C on
-                    // x86, 0x30 on x64. The struct is declared with fixed ulong fields so GetStructSize always
-                    // reports 0x30 — hardcode the guest size so a 32-bit caller's 0x1C buffer isn't rejected.
                     ulong RequiredLength = Wow64 ? 0x1CUL : 0x30UL;
 
                     if (ReturnLength != 0)
@@ -212,12 +188,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                             }
 
                             FreeBase = QueryAddress;
-                            // No further mapped/freed region above: real ntdll reports the whole free
-                            // span up to the user-mode ceiling as ONE region, so the walk advances past
-                            // the ceiling in a single step and the next query fails — instead of marching
-                            // through the address space in 0x1000-byte chunks forever. Only extend to the
-                            // ceiling for user-space bases; a kernel-address query (driver path) keeps the
-                            // single-page fallback so its size can't underflow.
                             if (Next != ulong.MaxValue)
                                 FreeSize = Next - FreeBase;
                             else if (FreeBase <= UserCeiling)
@@ -242,7 +212,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Span<byte> Data = Instance.WinHelper.Shared.GetSpan(RequiredLength);
                     if (Instance._binary.Architecture != BinaryArchitecture.x64)
                     {
-                        // x86 MEMORY_BASIC_INFORMATION — 28 bytes, all pointer fields 4-wide.
                         BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x00, 4), (uint)Info.BaseAddress);
                         BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x04, 4), (uint)Info.AllocationBase);
                         BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x08, 4), Info.AllocationProtect);
@@ -288,11 +257,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (string.IsNullOrEmpty(Path))
                         return NTSTATUS.STATUS_INVALID_ADDRESS;
 
-                    // GetMappedFileName / NtQueryVirtualMemory(MemoryMappedFilenameInformation) returns
-                    // the NT device path (\Device\HarddiskVolumeN\...), NOT a \??\C: DOS-device path.
-                    // al-khaser's "hidden modules" walk gets this name per mapped image and converts it
-                    // back to a drive letter via the device map to match the loader list; the \??\C:
-                    // form doesn't convert, so every System32 module was reported as an injected library.
                     Path = Instance.WinHelper.DosPathToNtDevicePath(Path);
 
                     int StringByteCount = Encoding.Unicode.GetByteCount(Path) + 2;
@@ -301,8 +265,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                     StringData[StringByteCount - 2] = 0;
                     StringData[StringByteCount - 1] = 0;
 
-                    // UNICODE_STRING layout — 8 bytes on x86 (Length/MaxLen/Buffer4), 16 on x64
-                    // (Length/MaxLen/pad4/Buffer8). The string body follows immediately after the header.
                     ulong HeaderSize = Wow64 ? 8UL : 0x10UL;
                     ulong RequiredLength = HeaderSize + (ulong)StringByteCount;
 
@@ -347,8 +309,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (MemoryInformationClass == MEMORY_INFORMATION_CLASS.MemoryWorkingSetExInformation)
                 {
-                    // MEMORY_WORKING_SET_EX_INFORMATION = { PVOID VirtualAddress; ULONG_PTR Flags; } — 8 bytes
-                    // on x86, 16 on x64.
                     ulong ElementSize = Wow64 ? 8UL : 16UL;
 
                     if (ReturnLength != 0)
@@ -471,11 +431,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (MemoryInformationClass == MEMORY_INFORMATION_CLASS.MemoryRegionInformation)
                 {
-                    // MEMORY_REGION_INFORMATION: three pointer-sized fields (AllocationBase / RegionSize /
-                    // CommitSize / PartitionId / NodePreference) ⇒ 0x1C on x86, 0x30 on x64. GetStructSize
-                    // always reports the x64 size, so size to the guest bitness explicitly — a 32-bit caller
-                    // passes a 0x1C buffer (kernelbase!SetUnhandledExceptionFilter's filter validator does
-                    // exactly this), and a 0x30 requirement would wrongly reject it with INFO_LENGTH_MISMATCH.
                     ulong RequiredLength = Wow64 ? 0x1CUL : 0x30UL;
 
                     if (ReturnLength != 0)
@@ -555,7 +510,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Span<byte> Data = Instance.WinHelper.Shared.GetSpan(RequiredLength);
                     if (Wow64)
                     {
-                        // x86 MEMORY_REGION_INFORMATION — 0x1C bytes, pointer fields 4-wide.
                         BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x00, 4), (uint)Info.AllocationBase);
                         BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x04, 4), Info.AllocationProtect);
                         BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x08, 4), Info.RegionType);
@@ -583,8 +537,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (MemoryInformationClass == MEMORY_INFORMATION_CLASS.MemoryImageInformation)
                 {
-                    // MEMORY_IMAGE_INFORMATION: 0x0C on x86, 0x18 on x64 (fixed ulong fields ⇒ GetStructSize
-                    // always reports 0x18, so size to the guest explicitly).
                     ulong RequiredLength = Wow64 ? 0x0CUL : 0x18UL;
 
                     if (ReturnLength != 0)
@@ -611,8 +563,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                         Flags = 0
                     };
 
-                    // MEMORY_IMAGE_INFORMATION: ImageBase (PVOID) + SizeOfImage (SIZE_T) are pointer-sized;
-                    // Flags is a ULONG bitfield union. x86 = 0x0C, x64 = 0x18.
                     Span<byte> Data = Instance.WinHelper.Shared.GetSpan(RequiredLength);
                     if (Wow64)
                     {

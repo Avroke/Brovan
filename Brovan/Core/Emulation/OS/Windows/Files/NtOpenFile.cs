@@ -103,9 +103,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private NTSTATUS Handle32(BinaryEmulator Instance)
         {
-            // WOW64: NtOpenFile args are on the x86 stack; OBJECT_ATTRIBUTES is the 0x18-byte x86 layout
-            // and the OUT FileHandle / IO_STATUS_BLOCK are pointer-sized (4 bytes) — mirrors Handle64 but
-            // through the 32-bit readers/writers so nothing over-writes past the guest structures.
             uint FileHandlePtr = Instance.WinHelper.GetArg32(0);
             uint DesiredAccess = Instance.WinHelper.GetArg32(1);
             uint ObjectAttributes = Instance.WinHelper.GetArg32(2);

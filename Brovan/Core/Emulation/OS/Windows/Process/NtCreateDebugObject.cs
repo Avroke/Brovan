@@ -13,7 +13,6 @@ namespace Brovan.Core.Emulation.OS.Windows
     /// </summary>
     internal class NtCreateDebugObject : IWinSyscall
     {
-        // Only DBGK_KILL_PROCESS_ON_CLOSE (0x1) is defined; any other bit is invalid.
         private const uint DebugKillOnClose = 0x1;
 
         public NTSTATUS Handle(BinaryEmulator Instance)

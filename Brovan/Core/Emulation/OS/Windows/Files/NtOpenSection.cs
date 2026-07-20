@@ -11,8 +11,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            // Bitness-agnostic: args via GetArg64 (delegates to GetArg32 in WOW64); the OUT section HANDLE is
-            // pointer-sized; OBJECT_ATTRIBUTES has 4-byte fields on x86 / 8-byte on x64, so the name read branches.
             ulong SectionHandlePtr = Instance.WinHelper.GetArg64(0);
             AccessMask DesiredAccess = (AccessMask)Instance.WinHelper.GetArg64(1);
             ulong ObjectAttributesPtr = Instance.WinHelper.GetArg64(2);
@@ -43,7 +41,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(Name))
                 return NTSTATUS.STATUS_OBJECT_NAME_INVALID;
 
-            // Normalize \Sessions\X\Windows\SharedSection into a single object.
             if (IsWindowsSharedSection(FullName))
             {
                 FullName = "\\Windows\\SharedSection";

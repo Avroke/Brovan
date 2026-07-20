@@ -6,6 +6,7 @@ namespace Brovan.Core.Emulation
     {
         Unicorn = 0,
         Kvm = 1,
+        Whp = 2,
     }
 
     public enum BackendError
@@ -73,6 +74,8 @@ namespace Brovan.Core.Emulation
     }
 
     public delegate bool MemoryHookCallback(BackendMemoryAccessType type, ulong address, uint size, ulong value);
+    public delegate void MmioReadCallback(ulong offset, Span<byte> destination);
+    public delegate void MmioWriteCallback(ulong offset, ReadOnlySpan<byte> data);
     public delegate void CodeHookCallback(ulong address, uint size);
     public delegate void InterruptHookCallback(uint interruptNumber);
     public delegate void InstructionHookCallback();
@@ -91,6 +94,9 @@ namespace Brovan.Core.Emulation
         bool UnmapMemory(ulong address, ulong size);
         bool SetMemoryProtection(ulong address, ulong size, MemoryProtection protection);
 
+        bool MapMmio(ulong address, ulong size, MmioReadCallback read, MmioWriteCallback write) => false;
+
+        IntPtr GetHostPointer(ulong address, ulong size) => IntPtr.Zero;
         bool WriteMemory(ulong address, byte[] value, uint length = 0);
         bool WriteMemory(ulong address, byte[] value, int offset, int length);
         bool WriteMemory(ulong address, ReadOnlySpan<byte> value, uint length = 0);
@@ -117,8 +123,6 @@ namespace Brovan.Core.Emulation
         bool WriteRegisterByte(int register, byte value);
         bool WriteRegisterByte(Registers register, byte[] value);
 
-        // Writes the GDTR (base + limit). Needed to install a 32-bit FS→TEB segment descriptor, since MODE_32
-        // ignores the FS_BASE pseudo-register and the base must come from a GDT descriptor.
         bool WriteGdtr(ulong Base, uint Limit);
 
         ulong ReadRegister(Registers register);

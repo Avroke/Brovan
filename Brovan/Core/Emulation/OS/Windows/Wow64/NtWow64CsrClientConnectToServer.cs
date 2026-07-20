@@ -24,7 +24,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint ConnectionInfoSize = (uint)Instance.WinHelper.GetArg64(3);
             ulong CalledFromServerPtr = Instance.WinHelper.GetArg64(4);
 
-            // CalledFromServer (OUT BOOLEAN): FALSE — the caller is a normal client, not the CSR server itself.
             if (CalledFromServerPtr != 0 && Instance.IsRegionMapped(CalledFromServerPtr, 1))
                 Instance._emulator.WriteMemory(CalledFromServerPtr, (byte)0, 1);
 
