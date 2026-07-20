@@ -16,7 +16,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             if (Param1 == 0 || !Instance.IsRegionMapped(Param1, 8))
             {
-                Instance.SetRawSyscallReturn(0);
+                Instance.SetRawSyscallReturn(0); // FALSE
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
@@ -28,7 +28,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Instance._emulator.WriteMemory(Param1 + 0x00, (uint)X, 4);
             Instance._emulator.WriteMemory(Param1 + 0x04, (uint)Y, 4);
 
-            Instance.SetRawSyscallReturn(1);
+            Instance.SetRawSyscallReturn(1); // TRUE
             return NTSTATUS.STATUS_SUCCESS;
         }
 

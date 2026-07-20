@@ -139,7 +139,7 @@ namespace Brovan.Analysis
                 return 0.0;
 
             Span<int> Counts = stackalloc int[256];
-            Counts.Clear();
+            Counts.Clear(); // 'Counts' is not guaranteed to be zero-initialized
 
             for (int i = 0; i < Data.Length; i++)
                 Counts[Data[i]]++;

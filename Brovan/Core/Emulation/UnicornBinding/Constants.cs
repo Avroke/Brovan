@@ -34,7 +34,7 @@ namespace Brovan.Core.Emulation
         UC_ERR_RESOURCE,
         UC_ERR_EXCEPTION,
         UC_ERR_OVERFLOW,
-        UC_ERR_CFG
+        UC_ERR_CFG // manually added (this is bad i know)
     }
 
     /// <summary>
@@ -409,16 +409,16 @@ namespace Brovan.Core.Emulation
     /// </summary>
     public enum MemoryType
     {
-        UC_MEM_READ = 16,
-        UC_MEM_WRITE,
-        UC_MEM_FETCH,
-        UC_MEM_READ_UNMAPPED,
-        UC_MEM_WRITE_UNMAPPED,
-        UC_MEM_FETCH_UNMAPPED,
-        UC_MEM_WRITE_PROT,
-        UC_MEM_READ_PROT,
-        UC_MEM_FETCH_PROT,
-        UC_MEM_READ_AFTER,
+        UC_MEM_READ = 16,      // Memory is read from
+        UC_MEM_WRITE,          // Memory is written to
+        UC_MEM_FETCH,          // Memory is fetched
+        UC_MEM_READ_UNMAPPED,  // Unmapped memory is read from
+        UC_MEM_WRITE_UNMAPPED, // Unmapped memory is written to
+        UC_MEM_FETCH_UNMAPPED, // Unmapped memory is fetched
+        UC_MEM_WRITE_PROT,     // Write to write protected, but mapped, memory
+        UC_MEM_READ_PROT,      // Read from read protected, but mapped, memory
+        UC_MEM_FETCH_PROT,     // Fetch from non-executable, but mapped, memory
+        UC_MEM_READ_AFTER,     // Memory is read from (successful access)
     }
 
     public enum UcTlbType : int

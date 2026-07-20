@@ -45,10 +45,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.IsRegionMapped(Buffer, RequiredSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            Instance._emulator.WriteMemory(Buffer + 0x0, (ushort)0, 2);
-            Instance._emulator.WriteMemory(Buffer + 0x2, (ushort)0, 2);
-            Instance._emulator.WriteMemory(Buffer + 0x4, 0u, 4);
-            if (!Instance.WritePointer(Buffer + 0x8, 0UL))
+            Instance._emulator.WriteMemory(Buffer + 0x0, (ushort)0, 2); // Version
+            Instance._emulator.WriteMemory(Buffer + 0x2, (ushort)0, 2); // Reserved
+            Instance._emulator.WriteMemory(Buffer + 0x4, 0u, 4); // AttributeCount
+            if (!Instance.WritePointer(Buffer + 0x8, 0UL)) // Attribute pointer
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             return NTSTATUS.STATUS_SUCCESS;

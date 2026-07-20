@@ -183,14 +183,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                         uint ClearSize = (uint)Math.Min(SystemInformationLength, HeaderSize + GroupAffinitySize);
                         Instance.WinHelper.WriteZeroMemory(SystemInformationPtr, ClearSize);
 
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 0x00, 0u);
+                        Instance._emulator.WriteMemory(SystemInformationPtr + 0x00, 0u); // HighestNodeNumber = 0
 
                         uint ReqSize = sizeof(uint);
 
                         if (SystemInformationLength >= HeaderSize + 8)
                         {
-                            ulong ActiveMask = 0xFFFUL;
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x08, ActiveMask);
+                            ulong ActiveMask = 0xFFFUL; // Single-node active processor mask
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x08, ActiveMask); // Node0 Mask
 
                             if (SystemInformationLength >= HeaderSize + 0x0A)
                                 Instance._emulator.WriteMemory(SystemInformationPtr + 0x10, (ushort)0);
@@ -262,8 +262,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
                             }
 
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 0, (byte)0);
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 1, (byte)1);
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 0, (byte)0); // KernelDebuggerEnabled
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 1, (byte)1); // KernelDebuggerNotPresent
 
                             if (ReturnLengthPtr != 0)
                             {
@@ -330,8 +330,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
                             }
 
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 0, (byte)1);
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 1, (byte)1);
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 0, (byte)1); // SecureBootEnabled
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 1, (byte)1); // SecureBootCapable
 
                             if (ReturnLengthPtr != 0)
                             {
@@ -382,8 +382,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                                 uint NextEntryOffset = (i == Processes.Count - 1) ? 0 : (uint)EntrySize;
 
-                                Instance._emulator.WriteMemory(Current + 0x00, NextEntryOffset);
-                                Instance._emulator.WriteMemory(Current + 0x04, 1u);
+                                Instance._emulator.WriteMemory(Current + 0x00, NextEntryOffset); // NextEntryOffset
+                                Instance._emulator.WriteMemory(Current + 0x04, 1u);              // NumberOfThreads
 
                                 bool HasName = !string.IsNullOrEmpty(P.Name) && P.Status != ProtectionStatus.Unaccessible;
 
@@ -391,9 +391,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 {
                                     if (HasName)
                                         Instance.WinHelper.SetUnicodeString32((uint)(Current + 0x38), P.Name);
-                                    Instance._emulator.WriteMemory(Current + 0x40, 8u, 4);
-                                    Instance._emulator.WriteMemory(Current + 0x44, (uint)P.PID, 4);
-                                    Instance._emulator.WriteMemory(Current + 0x48, (uint)P.PPID, 4);
+                                    Instance._emulator.WriteMemory(Current + 0x40, 8u, 4);           // BasePriority
+                                    Instance._emulator.WriteMemory(Current + 0x44, (uint)P.PID, 4);  // UniqueProcessId
+                                    Instance._emulator.WriteMemory(Current + 0x48, (uint)P.PPID, 4); // InheritedFromUniqueProcessId
                                 }
                                 else
                                 {
@@ -490,11 +490,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                             uint AllocationGranularity = 0x10000;
                             uint TimerResolution = 156250;
 
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x00, 0u);
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x00, 0u); // Reserved
                             Instance._emulator.WriteMemory(SystemInformationPtr + 0x04, TimerResolution);
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x08, 4096);
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x0C, NumberOfPhysicalPages);
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x10, LowestPhysicalPageNumber);
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x08, 4096); // PageSize
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x0C, NumberOfPhysicalPages); // NumberOfPhysicalPages
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x10, LowestPhysicalPageNumber); // LowestPhysicalPageNumber
                             Instance._emulator.WriteMemory(SystemInformationPtr + 0x14, HighestPhysicalPageNumber);
                             Instance._emulator.WriteMemory(SystemInformationPtr + 0x18, AllocationGranularity);
 
@@ -504,9 +504,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                                     (Instance._binary.PE.Characteristics & System.Reflection.PortableExecutable.Characteristics.LargeAddressAware) != 0;
                                 uint MinimumUserModeAddress = 0x00010000;
                                 uint MaximumUserModeAddress = LargeAddressAware ? 0xFFFEFFFFu : 0x7FFEFFFFu;
-                                Instance._emulator.WriteMemory(SystemInformationPtr + 0x1C, MinimumUserModeAddress);
-                                Instance._emulator.WriteMemory(SystemInformationPtr + 0x20, MaximumUserModeAddress);
-                                Instance._emulator.WriteMemory(SystemInformationPtr + 0x24, 0x1u);
+                                Instance._emulator.WriteMemory(SystemInformationPtr + 0x1C, MinimumUserModeAddress);      // MinimumUserModeAddress
+                                Instance._emulator.WriteMemory(SystemInformationPtr + 0x20, MaximumUserModeAddress);      // MaximumUserModeAddress
+                                Instance._emulator.WriteMemory(SystemInformationPtr + 0x24, 0x1u);                        // ActiveProcessorsAffinityMask
                                 Instance._emulator.WriteMemory(SystemInformationPtr + 0x28, (byte)Environment.ProcessorCount);
                             }
                             else
@@ -571,16 +571,16 @@ namespace Brovan.Core.Emulation.OS.Windows
                             uint FirmwareTableId = Instance.ReadMemoryUInt(SystemInformationPtr + 0x08);
                             uint TableBufferLength = Instance.ReadMemoryUInt(SystemInformationPtr + 0x0C);
 
-                            const uint AcpiProvider = 0x41435049;
+                            const uint AcpiProvider = 0x41435049; // 'ACPI'
                             if (ProviderSignature != AcpiProvider)
-                                break;
+                                break; // unsupported provider -> default (unimplemented), unchanged
 
                             byte[] FirmwareData;
-                            if (FirmwareAction == 0)
+                            if (FirmwareAction == 0) // SystemFirmwareTable_Enumerate
                             {
                                 FirmwareData = AcpiEnumerateTables();
                             }
-                            else if (FirmwareAction == 1)
+                            else if (FirmwareAction == 1) // SystemFirmwareTable_Get
                             {
                                 FirmwareData = AcpiGetTable(FirmwareTableId);
                                 if (FirmwareData == null)
@@ -593,7 +593,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                             }
                             else
                             {
-                                break;
+                                break; // unsupported action (e.g. register handler) -> default
                             }
 
                             Instance._emulator.WriteMemory(SystemInformationPtr + 0x0C, (uint)FirmwareData.Length);
@@ -625,17 +625,17 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Instance.WinUnimplemented;
         }
 
-        private const uint AcpiSigSSDT = 0x54445353;
+        private const uint AcpiSigSSDT = 0x54445353; // 'SSDT'
 
         private static readonly uint[] AcpiTableSignatures =
         {
-            0x50434146,
-            0x43495041,
-            0x54455048,
-            0x4746434D,
-            AcpiSigSSDT,
-            0x54524742,
-            0x544D5357,
+            0x50434146, // 'FACP' (FADT)
+            0x43495041, // 'APIC'
+            0x54455048, // 'HPET'
+            0x4746434D, // 'MCFG'
+            AcpiSigSSDT, // 'SSDT'
+            0x54524742, // 'BGRT'
+            0x544D5357, // 'WSMT'
         };
 
         private static readonly byte[] AcpiSsdtDeviceIds =
@@ -667,16 +667,16 @@ namespace Brovan.Core.Emulation.OS.Windows
             byte[] Table = new byte[HeaderLen + Body.Length];
             Span<byte> S = Table;
 
-            BinaryPrimitives.WriteUInt32LittleEndian(S.Slice(0, 4), TableId);
-            BinaryPrimitives.WriteUInt32LittleEndian(S.Slice(4, 4), (uint)Table.Length);
-            S[8] = 3;
-            S[9] = 0;
-            WriteAcpiAscii(S.Slice(10, 6), "ALASKA");
-            WriteAcpiAscii(S.Slice(16, 8), "A M I ");
-            BinaryPrimitives.WriteUInt32LittleEndian(S.Slice(24, 4), 0x01072009);
-            WriteAcpiAscii(S.Slice(28, 4), "AMI ");
-            BinaryPrimitives.WriteUInt32LittleEndian(S.Slice(32, 4), 0x00010013);
-            Body.CopyTo(S.Slice(HeaderLen));
+            BinaryPrimitives.WriteUInt32LittleEndian(S.Slice(0, 4), TableId); // Signature
+            BinaryPrimitives.WriteUInt32LittleEndian(S.Slice(4, 4), (uint)Table.Length);                   // Length
+            S[8] = 3;                                                                                       // Revision
+            S[9] = 0;                                                                                       // Checksum (computed below)
+            WriteAcpiAscii(S.Slice(10, 6), "ALASKA");                                                      // OEMID
+            WriteAcpiAscii(S.Slice(16, 8), "A M I ");                                                       // OEM Table ID
+            BinaryPrimitives.WriteUInt32LittleEndian(S.Slice(24, 4), 0x01072009);                          // OEM Revision
+            WriteAcpiAscii(S.Slice(28, 4), "AMI ");                                                         // Creator ID
+            BinaryPrimitives.WriteUInt32LittleEndian(S.Slice(32, 4), 0x00010013);                          // Creator Revision
+            Body.CopyTo(S.Slice(HeaderLen));                                                                // table-specific body
 
             byte Sum = 0;
             foreach (byte B in Table)

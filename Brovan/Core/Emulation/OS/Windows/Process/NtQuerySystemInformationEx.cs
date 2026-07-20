@@ -94,8 +94,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     case SYSTEM_INFORMATION_CLASS.SystemFeatureConfigurationSectionInformation:
                         {
                             const uint SectionTypeCount = 3;
-                            const uint InputRequired = 8 * SectionTypeCount;
-                            const uint OutputRequired = 0x50;
+                            const uint InputRequired = 8 * SectionTypeCount; // 0x18
+                            const uint OutputRequired = 0x50; // 8 + (3 * 0x18)
 
                             if (InputBufferPtr == 0 || InputBufferLength < InputRequired)
                                 return NTSTATUS.STATUS_INVALID_PARAMETER;
@@ -317,14 +317,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                         uint ClearSize = (uint)Math.Min(SystemInformationLength, HeaderSize + GroupAffinitySize);
                         Instance.WinHelper.WriteZeroMemory(SystemInformationPtr, ClearSize);
 
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 0x00, 0u);
+                        Instance._emulator.WriteMemory(SystemInformationPtr + 0x00, 0u); // HighestNodeNumber = 0
 
                         uint ReqSize = sizeof(uint);
 
                         if (SystemInformationLength >= HeaderSize + 8)
                         {
-                            ulong ActiveMask = 0xFFFUL;
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x08, ActiveMask);
+                            ulong ActiveMask = 0xFFFUL; // Single-node active processor mask
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x08, ActiveMask); // Node0 Mask
 
                             if (SystemInformationLength >= HeaderSize + 0x0A)
                                 Instance._emulator.WriteMemory(SystemInformationPtr + 0x10, (ushort)0);
@@ -388,9 +388,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 Instance._emulator.WriteMemory(SystemInformationPtr + 0x04, RequiredSize);
 
                                 ulong ProcessorBase = SystemInformationPtr + RootSize;
-                                Instance.WinHelper.WriteByte(ProcessorBase + 0x00, 0x01);
-                                Instance.WinHelper.WriteByte(ProcessorBase + 0x01, 0x00);
-                                Instance._emulator.WriteMemory(ProcessorBase + 0x16, (ushort)1);
+                                Instance.WinHelper.WriteByte(ProcessorBase + 0x00, 0x01); // Flags: SMT-capable core.
+                                Instance.WinHelper.WriteByte(ProcessorBase + 0x01, 0x00); // EfficiencyClass.
+                                Instance._emulator.WriteMemory(ProcessorBase + 0x16, (ushort)1); // GroupCount.
 
                                 ulong GroupAffinity = ProcessorBase + 0x18;
                                 Instance._emulator.WriteMemory(GroupAffinity + 0x00, ActiveMask);
@@ -479,8 +479,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
                             }
 
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 0, (byte)0);
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 1, (byte)1);
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 0, (byte)0); // KernelDebuggerEnabled
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 1, (byte)1); // KernelDebuggerNotPresent
 
                             NTSTATUS rl2 = WriteReturnLength(RequiredLength);
                             if (rl2 != NTSTATUS.STATUS_SUCCESS)
@@ -502,8 +502,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
                             }
 
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 0, (byte)1);
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 1, (byte)1);
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 0, (byte)1); // SecureBootEnabled
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 1, (byte)1); // SecureBootCapable
 
                             NTSTATUS rl2 = WriteReturnLength(RequiredLength);
                             if (rl2 != NTSTATUS.STATUS_SUCCESS)

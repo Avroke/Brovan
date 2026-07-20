@@ -1059,7 +1059,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public WinHandle STD_OUT;
         public WinHandle STD_IN;
         public WinHandle ConsoleHandle;
-        public uint CurrentPriority = 0x8;
+        public uint CurrentPriority = 0x8; // Default priority (Normal), changes only if the program changed it explicitly.
         public User CurrentUser = User.Standard;
         public string CurrentUserSid = "S-1-5-21-1000-1000-1000-1001";
 
@@ -1511,9 +1511,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// </summary>
         private void DispatchExceptionX86(ulong DispatcherAddress, NTSTATUS Exception, ExceptionInformation ExceptionInformation)
         {
-            const uint ExceptionRecordSize = 0x50;
-            const uint ContextSize = 0x2CC;
-            const uint PointersSize = 0x8;
+            const uint ExceptionRecordSize = 0x50;      // x86 EXCEPTION_RECORD
+            const uint ContextSize = 0x2CC;             // x86 CONTEXT
+            const uint PointersSize = 0x8;              // [PEXCEPTION_RECORD][PCONTEXT]
 
             const uint CONTEXT_i386 = 0x00010000;
             const uint CONTEXT_CONTROL = 0x00000001;
@@ -1564,13 +1564,13 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Span<byte> Record = Shared.GetSpan(ExceptionRecordSize);
             Record.Clear();
-            WriteUInt32(Record, 0x00, (uint)Exception);
-            WriteUInt32(Record, 0x04, 0u);
-            WriteUInt32(Record, 0x08, 0u);
-            WriteUInt32(Record, 0x0C, InitialEip);
+            WriteUInt32(Record, 0x00, (uint)Exception);      // ExceptionCode
+            WriteUInt32(Record, 0x04, 0u);                   // ExceptionFlags
+            WriteUInt32(Record, 0x08, 0u);                   // ExceptionRecord (chained)
+            WriteUInt32(Record, 0x0C, InitialEip);           // ExceptionAddress
             ulong[] Parameters = ExceptionInformation?.Parameters ?? Array.Empty<ulong>();
             int Count = Math.Min(Parameters.Length, 15);
-            WriteUInt32(Record, 0x10, (uint)Count);
+            WriteUInt32(Record, 0x10, (uint)Count);          // NumberParameters
             for (int i = 0; i < Count; i++)
                 WriteUInt32(Record, 0x14 + (i * 4), (uint)Parameters[i]);
             Emulator.WriteMemory(ExceptionRecordAddress, Record);
@@ -1689,7 +1689,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             uint ContextSize = GuessContextSizeFromDispatcher(DispatcherAddress);
             if (ContextSize == 0)
-                ContextSize = 0x4F0;
+                ContextSize = 0x4F0; // Common on many builds; field offsets remain fixed.
             ContextSize = (uint)BinaryEmulator.AlignUp(ContextSize, 0x10);
 
             ulong CombinedSize = BinaryEmulator.AlignUp((ulong)ContextSize + ExceptionRecordSize, 0x10);
@@ -1807,17 +1807,17 @@ namespace Brovan.Core.Emulation.OS.Windows
             Span<byte> Record = Shared.GetSpan(ExceptionRecordSize);
             Record.Clear();
             WriteUInt32(Record, 0x00, (uint)Exception);
-            WriteUInt32(Record, 0x04, 0u);
-            WriteUInt64(Record, 0x08, 0UL);
-            WriteUInt64(Record, 0x10, InitialRip);
+            WriteUInt32(Record, 0x04, 0u);   // ExceptionFlags
+            WriteUInt64(Record, 0x08, 0UL);  // ExceptionRecord (chained)
+            WriteUInt64(Record, 0x10, InitialRip); // ExceptionAddress
 
             ulong[] Parameters = ExceptionInformation?.Parameters ?? Array.Empty<ulong>();
             int Count = Parameters.Length;
             if (Count > 15)
                 Count = 15;
 
-            WriteUInt32(Record, 0x18, (uint)Count);
-            WriteUInt32(Record, 0x1C, 0u);
+            WriteUInt32(Record, 0x18, (uint)Count); // NumberParameters
+            WriteUInt32(Record, 0x1C, 0u); // __unusedAlignment
 
             for (int i = 0; i < Count; i++)
                 WriteUInt64(Record, 0x20 + (i * 8), Parameters[i]);
@@ -2550,23 +2550,23 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// <returns>Internal memory protection enum with the Protect options.</returns>
         public MemoryProtection ConvertWinProtectToInternal(ulong Protect)
         {
-            Protect &= 0xFF;
+            Protect &= 0xFF; // exclude PAGE_GUARD
 
             switch (Protect)
             {
-                case 0x01:
+                case 0x01: // PAGE_NOACCESS
                     return MemoryProtection.None;
-                case 0x02:
+                case 0x02: // PAGE_READONLY
                     return MemoryProtection.Read;
-                case 0x04:
-                case 0x08:
+                case 0x04: // PAGE_READWRITE
+                case 0x08: // PAGE_WRITECOPY -> treat as ReadWrite
                     return MemoryProtection.ReadWrite;
-                case 0x10:
+                case 0x10: // PAGE_EXECUTE
                     return MemoryProtection.Execute;
-                case 0x20:
+                case 0x20: // PAGE_EXECUTE_READ
                     return MemoryProtection.ReadExecute;
-                case 0x40:
-                case 0x80:
+                case 0x40: // PAGE_EXECUTE_READWRITE
+                case 0x80: // PAGE_EXECUTE_WRITECOPY -> treat as ExecuteReadWrite
                     return MemoryProtection.All;
                 default:
                     return MemoryProtection.None;
@@ -2613,13 +2613,13 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             AllocationType Flags = AllocationType.None;
 
-            if ((AllocTypes & 0x1000) != 0)
+            if ((AllocTypes & 0x1000) != 0) // MEM_COMMIT
                 Flags |= AllocationType.Commited;
 
-            if ((AllocTypes & 0x2000) != 0)
+            if ((AllocTypes & 0x2000) != 0) // MEM_RESERVE
                 Flags |= AllocationType.Reserved;
 
-            if ((AllocTypes & 0x1000000) != 0)
+            if ((AllocTypes & 0x1000000) != 0) // MEM_IMAGE
                 Flags |= AllocationType.Image;
 
             return Flags;

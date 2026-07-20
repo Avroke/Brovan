@@ -43,11 +43,11 @@ namespace Brovan.Core.Emulation.Guests
         private const uint Wow64InfoTebSlotOffset32 = 0xE38;
 
         private ulong _gdt32Base;
-        private const int Wow64FsSelector = 0x50;
+        private const int Wow64FsSelector = 0x50;      // GDT index 10, RPL 0 — FS → TEB
         private const int Wow64FsGdtIndex = 10;
-        private const int Wow64DataSelector = 0x28;
+        private const int Wow64DataSelector = 0x28;    // GDT index 5,  RPL 0 — flat SS/DS/ES
         private const int Wow64DataGdtIndex = 5;
-        private const int Wow64CodeGdtIndex = 4;
+        private const int Wow64CodeGdtIndex = 4;       // GDT index 4 — flat code (CS left at default flat)
 
         private string _guestUserName;
         private string _guestImagePath;
@@ -815,21 +815,21 @@ namespace Brovan.Core.Emulation.Guests
             if (Instance._binary.Architecture != BinaryArchitecture.x64)
             {
                 Instance._emulator.WriteMemoryByte(Teb, 0, 0x2000);
-                Instance._emulator.WriteMemory(Teb + 0x00, 0xFFFFFFFFu);
-                Instance._emulator.WriteMemory(Teb + 0x04, (uint)(Thread.StackAddress + Thread.StackSize));
-                Instance._emulator.WriteMemory(Teb + 0x08, (uint)Thread.StackAddress);
-                Instance._emulator.WriteMemory(Teb + 0x18, (uint)Teb);
-                Instance._emulator.WriteMemory(Teb + 0x20, WinHelper.PID);
-                Instance._emulator.WriteMemory(Teb + 0x24, Thread.ThreadId);
-                Instance._emulator.WriteMemory(Teb + 0x30, (uint)PEB);
-                Instance._emulator.WriteMemory(Teb + 0x34, 0u);
+                Instance._emulator.WriteMemory(Teb + 0x00, 0xFFFFFFFFu);                                  // NtTib.ExceptionList (SEH head sentinel)
+                Instance._emulator.WriteMemory(Teb + 0x04, (uint)(Thread.StackAddress + Thread.StackSize)); // NtTib.StackBase
+                Instance._emulator.WriteMemory(Teb + 0x08, (uint)Thread.StackAddress);                     // NtTib.StackLimit
+                Instance._emulator.WriteMemory(Teb + 0x18, (uint)Teb);                                     // NtTib.Self
+                Instance._emulator.WriteMemory(Teb + 0x20, WinHelper.PID);                                 // ClientId.UniqueProcess
+                Instance._emulator.WriteMemory(Teb + 0x24, Thread.ThreadId);                               // ClientId.UniqueThread
+                Instance._emulator.WriteMemory(Teb + 0x30, (uint)PEB);                                     // ProcessEnvironmentBlock
+                Instance._emulator.WriteMemory(Teb + 0x34, 0u);                                            // LastErrorValue
 
                 Instance._emulator.WriteMemory(Teb + 0x60, (uint)PEB);
 
                 if (_wow64SyscallTrampoline != 0)
                     Instance._emulator.WriteMemory(Teb + 0xC0, (uint)_wow64SyscallTrampoline);
 
-                Instance._emulator.WriteMemory(Teb + 0xC4, (uint)0x0409u);
+                Instance._emulator.WriteMemory(Teb + 0xC4, (uint)0x0409u);                                 // CurrentLocale
 
                 if (_wow64InfoPtr != 0)
                     Instance._emulator.WriteMemory(Teb + Wow64InfoTebSlotOffset32, (uint)_wow64InfoPtr);
@@ -1035,13 +1035,13 @@ namespace Brovan.Core.Emulation.Guests
             else
             {
                 ulong StackTop = (Thread.StackAddress + Thread.StackSize) & ~0xFUL;
-                ulong RuntimeEsp = StackTop - 0x100;
+                ulong RuntimeEsp = StackTop - 0x100;                 // ESP the thread runs on after NtContinue
                 contextAddress = BuildInitialContext32(Instance, RtlUserThreadStart, RuntimeEsp, StartAddress, Parameter);
 
                 InitialRSP = StackTop - 0x20;
-                Instance._emulator.WriteMemory(InitialRSP + 0x0, 0u);
-                Instance._emulator.WriteMemory(InitialRSP + 0x4, (uint)contextAddress);
-                Instance._emulator.WriteMemory(InitialRSP + 0x8, (uint)(_ntdllModule?.MappedBase ?? 0));
+                Instance._emulator.WriteMemory(InitialRSP + 0x0, 0u);                                   // return sentinel (LdrInitializeThunk never returns)
+                Instance._emulator.WriteMemory(InitialRSP + 0x4, (uint)contextAddress);                 // arg1: PCONTEXT
+                Instance._emulator.WriteMemory(InitialRSP + 0x8, (uint)(_ntdllModule?.MappedBase ?? 0)); // arg2: ntdll base
             }
 
             Thread.Context.RIP = LdrInitializeThunk;
@@ -1386,24 +1386,24 @@ namespace Brovan.Core.Emulation.Guests
         {
             bool IsPeImage = Instance._binary.FileFormat == BinaryFormat.PE;
 
-            Instance._emulator.WriteMemory(PEB + 0x00, (byte)0, 1);
-            Instance._emulator.WriteMemory(PEB + 0x01, (byte)0, 1);
-            Instance._emulator.WriteMemory(PEB + 0x02, (byte)0, 1);
-            Instance._emulator.WriteMemory(PEB + 0x03, (byte)0, 1);
-            Instance._emulator.WriteMemory(PEB + 0x04, 0xFFFFFFFFu);
-            Instance._emulator.WriteMemory(PEB + 0x08, (uint)MainModule.MappedBase);
-            Instance._emulator.WriteMemory(PEB + 0x0C, 0u);
-            Instance._emulator.WriteMemory(PEB + 0x38, (uint)ApiSetMap);
-            Instance._emulator.WriteMemory(PEB + 0x64, 8u, 4);
-            Instance._emulator.WriteMemory(PEB + 0xA4, WindowsVersionInfo.MajorVersion, 4);
-            Instance._emulator.WriteMemory(PEB + 0xA8, WindowsVersionInfo.MinorVersion, 4);
-            Instance._emulator.WriteMemory(PEB + 0xAC, WindowsVersionInfo.BuildNumberShort, 2);
-            Instance._emulator.WriteMemory(PEB + 0xAE, (ushort)0, 2);
-            Instance._emulator.WriteMemory(PEB + 0xB0, WindowsVersionInfo.PlatformIdWin32Nt, 4);
+            Instance._emulator.WriteMemory(PEB + 0x00, (byte)0, 1);                                  // InheritedAddressSpace
+            Instance._emulator.WriteMemory(PEB + 0x01, (byte)0, 1);                                  // ReadImageFileExecOptions
+            Instance._emulator.WriteMemory(PEB + 0x02, (byte)0, 1);                                  // BeingDebugged
+            Instance._emulator.WriteMemory(PEB + 0x03, (byte)0, 1);                                  // BitField
+            Instance._emulator.WriteMemory(PEB + 0x04, 0xFFFFFFFFu);                                 // Mutant
+            Instance._emulator.WriteMemory(PEB + 0x08, (uint)MainModule.MappedBase);                 // ImageBaseAddress
+            Instance._emulator.WriteMemory(PEB + 0x0C, 0u);                                          // Ldr (filled by the loader)
+            Instance._emulator.WriteMemory(PEB + 0x38, (uint)ApiSetMap);                             // ApiSetMap
+            Instance._emulator.WriteMemory(PEB + 0x64, 8u, 4);                                       // NumberOfProcessors (x86 PEB @ 0x64; x64 uses 0xB8)
+            Instance._emulator.WriteMemory(PEB + 0xA4, WindowsVersionInfo.MajorVersion, 4);          // OSMajorVersion
+            Instance._emulator.WriteMemory(PEB + 0xA8, WindowsVersionInfo.MinorVersion, 4);          // OSMinorVersion
+            Instance._emulator.WriteMemory(PEB + 0xAC, WindowsVersionInfo.BuildNumberShort, 2);      // OSBuildNumber
+            Instance._emulator.WriteMemory(PEB + 0xAE, (ushort)0, 2);                                // OSCSDVersion
+            Instance._emulator.WriteMemory(PEB + 0xB0, WindowsVersionInfo.PlatformIdWin32Nt, 4);     // OSPlatformId
 
             if (!IsPeImage && !UsesDirectBlobStartup)
             {
-                Instance._emulator.WriteMemory(PEB + 0x10, 0u);
+                Instance._emulator.WriteMemory(PEB + 0x10, 0u);                                      // ProcessParameters (none)
                 return;
             }
 
@@ -1442,31 +1442,31 @@ namespace Brovan.Core.Emulation.Guests
                 Cursor = BinaryEmulator.AlignUp(Cursor, 2);
             }
 
-            Instance._emulator.WriteMemory(ProcessParams + 0x08, 0x6001u, 4);
+            Instance._emulator.WriteMemory(ProcessParams + 0x08, 0x6001u, 4);                        // Flags (normalized)
             if (UsesDirectBlobStartup || (IsPeImage && Instance._binary.PE.Subsystem.HasFlag(Subsystem.WindowsCui)))
             {
-                Instance._emulator.WriteMemory(ProcessParams + 0x10, (uint)WinHelper.ConsoleHandle.Handle, 4);
-                Instance._emulator.WriteMemory(ProcessParams + 0x14, 0u, 4);
-                Instance._emulator.WriteMemory(ProcessParams + 0x18, (uint)WinHelper.STD_IN.Handle, 4);
-                Instance._emulator.WriteMemory(ProcessParams + 0x1C, (uint)WinHelper.STD_OUT.Handle, 4);
-                Instance._emulator.WriteMemory(ProcessParams + 0x20, (uint)WinHelper.STD_OUT.Handle, 4);
+                Instance._emulator.WriteMemory(ProcessParams + 0x10, (uint)WinHelper.ConsoleHandle.Handle, 4); // ConsoleHandle
+                Instance._emulator.WriteMemory(ProcessParams + 0x14, 0u, 4);                          // ConsoleFlags
+                Instance._emulator.WriteMemory(ProcessParams + 0x18, (uint)WinHelper.STD_IN.Handle, 4);  // StandardInput
+                Instance._emulator.WriteMemory(ProcessParams + 0x1C, (uint)WinHelper.STD_OUT.Handle, 4); // StandardOutput
+                Instance._emulator.WriteMemory(ProcessParams + 0x20, (uint)WinHelper.STD_OUT.Handle, 4); // StandardError
             }
-            WriteInlineUnicodeString(0x24, CurrentDir, ForcedMax: 1024);
-            WriteInlineUnicodeString(0x38, ImagePath);
-            WriteInlineUnicodeString(0x40, CommandLine);
+            WriteInlineUnicodeString(0x24, CurrentDir, ForcedMax: 1024);                             // CurrentDirectory.DosPath
+            WriteInlineUnicodeString(0x38, ImagePath);                                               // ImagePathName
+            WriteInlineUnicodeString(0x40, CommandLine);                                             // CommandLine
             ulong EnvPtr = Cursor;
             Instance._emulator.WriteMemory(EnvPtr, EnvBlock);
-            Instance._emulator.WriteMemory(ProcessParams + 0x48, (uint)EnvPtr, 4);
+            Instance._emulator.WriteMemory(ProcessParams + 0x48, (uint)EnvPtr, 4);                   // Environment
             Cursor += envSize;
             Cursor = BinaryEmulator.AlignUp(Cursor, 2);
-            WriteInlineUnicodeString(0x70, WindowTitle);
-            WriteInlineUnicodeString(0x78, DesktopInfo);
-            Instance._emulator.WriteMemory(ProcessParams + 0x290, (uint)envSize, 4);
+            WriteInlineUnicodeString(0x70, WindowTitle);                                             // WindowTitle
+            WriteInlineUnicodeString(0x78, DesktopInfo);                                             // DesktopInfo
+            Instance._emulator.WriteMemory(ProcessParams + 0x290, (uint)envSize, 4);                 // EnvironmentSize
 
             uint Used = (uint)(Cursor - ProcessParams);
             uint Length = Used < (uint)HeaderSize ? (uint)HeaderSize : Used;
-            Instance._emulator.WriteMemory(ProcessParams + 0x0, (uint)TotalSize, 4);
-            Instance._emulator.WriteMemory(ProcessParams + 0x4, Length, 4);
+            Instance._emulator.WriteMemory(ProcessParams + 0x0, (uint)TotalSize, 4);                 // MaximumLength
+            Instance._emulator.WriteMemory(ProcessParams + 0x4, Length, 4);                          // Length
 
             SetupCsrReadOnlySharedSection32(Instance);
             SetupGdiSharedHandleTable32(Instance);
@@ -1520,9 +1520,9 @@ namespace Brovan.Core.Emulation.Guests
 
             NtMapViewOfSection.InitializeWindowsSharedSection(Instance, Base);
 
-            Instance._emulator.WriteMemory(PEB + 0x4C, (uint)Base, 4);
-            Instance._emulator.WriteMemory(PEB + 0x54, (uint)(Base + 0x10), 4);
-            Instance._emulator.WriteMemory(PEB + 0x248, (uint)Base, 4);
+            Instance._emulator.WriteMemory(PEB + 0x4C, (uint)Base, 4);          // ReadOnlySharedMemoryBase (client base)
+            Instance._emulator.WriteMemory(PEB + 0x54, (uint)(Base + 0x10), 4); // ReadOnlyStaticServerData (server-data descriptor)
+            Instance._emulator.WriteMemory(PEB + 0x248, (uint)Base, 4);         // server-view base (identity → remap is a no-op)
         }
 
         /// <summary>
@@ -1575,18 +1575,18 @@ namespace Brovan.Core.Emulation.Guests
             if (_wow64InfoPtr != 0)
                 return;
 
-            const int Wow64InfoSize = 0x40;
-            const ushort ImageFileMachineAmd64 = 0x8664;
-            const ushort ImageFileMachineI386 = 0x014C;
-            const uint CpuFlagsUseSyscallQpc = 0x2;
-            const uint NativeSystemPageSize = 0x1000;
+            const int Wow64InfoSize = 0x40;                 // >= 0x24 (last field EmulatedMachine@0x22); page-rounded by the allocator.
+            const ushort ImageFileMachineAmd64 = 0x8664;    // native machine of the x64 host running WOW64.
+            const ushort ImageFileMachineI386 = 0x014C;     // emulated machine of the 32-bit process.
+            const uint CpuFlagsUseSyscallQpc = 0x2;         // bit 0x2 → syscall QPC path (not the `int 0x81` fast path).
+            const uint NativeSystemPageSize = 0x1000;       // x64 host native page size = 4096 (ntdll bit-scans it → page shift 12).
 
             ulong Block = Instance.MapUniqueAddress(Wow64InfoSize, MemoryProtection.ReadWrite);
             Instance._emulator.WriteMemory(Block, new byte[Wow64InfoSize]);
-            Instance._emulator.WriteMemory(Block + 0x00, NativeSystemPageSize);
-            Instance._emulator.WriteMemory(Block + 0x04, CpuFlagsUseSyscallQpc);
-            Instance._emulator.WriteMemory(Block + 0x20, ImageFileMachineAmd64, 2);
-            Instance._emulator.WriteMemory(Block + 0x22, ImageFileMachineI386, 2);
+            Instance._emulator.WriteMemory(Block + 0x00, NativeSystemPageSize);          // NativeSystemPageSize (0x1000 → page shift 12)
+            Instance._emulator.WriteMemory(Block + 0x04, CpuFlagsUseSyscallQpc);         // CpuFlags
+            Instance._emulator.WriteMemory(Block + 0x20, ImageFileMachineAmd64, 2);      // NativeMachine
+            Instance._emulator.WriteMemory(Block + 0x22, ImageFileMachineI386, 2);       // EmulatedMachine
             _wow64InfoPtr = Block;
         }
 
@@ -1611,9 +1611,9 @@ namespace Brovan.Core.Emulation.Guests
                 return D;
             }
 
-            const byte AccessDpl0Code = 0x9A;
-            const byte AccessDpl0Data = 0x92;
-            const byte Flags4KB32 = 0xC;
+            const byte AccessDpl0Code = 0x9A;    // present, DPL0, code, readable
+            const byte AccessDpl0Data = 0x92;    // present, DPL0, data, writable
+            const byte Flags4KB32 = 0xC;         // 4KB granularity, 32-bit
 
             if (_gdt32Base == 0)
             {
@@ -1643,21 +1643,21 @@ namespace Brovan.Core.Emulation.Guests
             const uint CONTEXT_INTEGER = 0x2;
             const uint CONTEXT_SEGMENTS = 0x4;
 
-            ulong ContextSize = 0x2CC;
+            ulong ContextSize = 0x2CC;                                   // sizeof(CONTEXT) on x86
             ulong ContextAddress = Instance.MapUniqueAddress(ContextSize, MemoryProtection.ReadWrite);
             Instance._emulator.WriteMemory(ContextAddress, new byte[ContextSize]);
-            Instance._emulator.WriteMemory(ContextAddress + 0x00, CONTEXT_i386 | CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_SEGMENTS, 4);
-            Instance._emulator.WriteMemory(ContextAddress + 0x8C, 0x0000u, 4);
-            Instance._emulator.WriteMemory(ContextAddress + 0x90, 0x0053u, 4);
-            Instance._emulator.WriteMemory(ContextAddress + 0x94, 0x002Bu, 4);
-            Instance._emulator.WriteMemory(ContextAddress + 0x98, 0x002Bu, 4);
-            Instance._emulator.WriteMemory(ContextAddress + 0xA4, (uint)Ebx, 4);
-            Instance._emulator.WriteMemory(ContextAddress + 0xB0, (uint)Eax, 4);
-            Instance._emulator.WriteMemory(ContextAddress + 0xB8, (uint)Eip, 4);
-            Instance._emulator.WriteMemory(ContextAddress + 0xBC, 0x0023u, 4);
-            Instance._emulator.WriteMemory(ContextAddress + 0xC0, 0x0202u, 4);
-            Instance._emulator.WriteMemory(ContextAddress + 0xC4, (uint)Esp, 4);
-            Instance._emulator.WriteMemory(ContextAddress + 0xC8, 0x002Bu, 4);
+            Instance._emulator.WriteMemory(ContextAddress + 0x00, CONTEXT_i386 | CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_SEGMENTS, 4); // ContextFlags
+            Instance._emulator.WriteMemory(ContextAddress + 0x8C, 0x0000u, 4);   // SegGs
+            Instance._emulator.WriteMemory(ContextAddress + 0x90, 0x0053u, 4);   // SegFs
+            Instance._emulator.WriteMemory(ContextAddress + 0x94, 0x002Bu, 4);   // SegEs
+            Instance._emulator.WriteMemory(ContextAddress + 0x98, 0x002Bu, 4);   // SegDs
+            Instance._emulator.WriteMemory(ContextAddress + 0xA4, (uint)Ebx, 4); // Ebx
+            Instance._emulator.WriteMemory(ContextAddress + 0xB0, (uint)Eax, 4); // Eax
+            Instance._emulator.WriteMemory(ContextAddress + 0xB8, (uint)Eip, 4); // Eip
+            Instance._emulator.WriteMemory(ContextAddress + 0xBC, 0x0023u, 4);   // SegCs
+            Instance._emulator.WriteMemory(ContextAddress + 0xC0, 0x0202u, 4);   // EFlags
+            Instance._emulator.WriteMemory(ContextAddress + 0xC4, (uint)Esp, 4); // Esp
+            Instance._emulator.WriteMemory(ContextAddress + 0xC8, 0x002Bu, 4);   // SegSs
             return ContextAddress;
         }
 

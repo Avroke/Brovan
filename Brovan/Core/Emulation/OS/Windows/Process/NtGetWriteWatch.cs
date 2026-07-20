@@ -10,13 +10,13 @@ namespace Brovan.Core.Emulation.OS.Windows
     ///
     /// <code>
     /// NTSTATUS NtGetWriteWatch(
-    ///   HANDLE ProcessHandle,
-    ///   ULONG  Flags,
-    ///   PVOID  BaseAddress,
-    ///   SIZE_T RegionSize,
-    ///   PVOID *UserAddressArray,
-    ///   PULONG_PTR EntriesInArray,
-    ///   PULONG Granularity)
+    ///   HANDLE ProcessHandle,        // arg0
+    ///   ULONG  Flags,                // arg1  (WRITE_WATCH_FLAG_RESET = 1)
+    ///   PVOID  BaseAddress,          // arg2
+    ///   SIZE_T RegionSize,           // arg3
+    ///   PVOID *UserAddressArray,     // arg4  (OUT: page addresses)
+    ///   PULONG_PTR EntriesInArray,   // arg5  (IN: capacity, OUT: count written)
+    ///   PULONG Granularity)          // arg6  (OUT: page size)
     /// </code>
     ///
     /// Only guest STORE instructions dirty a page (host-side stub writes bypass Unicorn's

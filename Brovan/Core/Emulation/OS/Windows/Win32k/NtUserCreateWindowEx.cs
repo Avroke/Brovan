@@ -56,7 +56,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 ClassAtom = WindowClass?.Atom ?? 0,
                 Title = title,
                 ClassName = string.IsNullOrEmpty(ClassName) ? "#UNNAMED" : ClassName,
-                Visible = ((uint)StyleArg & 0x10000000U) != 0,
+                Visible = ((uint)StyleArg & 0x10000000U) != 0, // WS_VISIBLE
                 Style = (uint)StyleArg,
                 ExStyle = (uint)exStyleArg,
                 X = x,

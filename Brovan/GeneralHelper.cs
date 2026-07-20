@@ -1190,39 +1190,39 @@ namespace Brovan
 
                 Buffer[0] = (byte)'M';
                 Buffer[1] = (byte)'Z';
-                BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x3C), 0x40);
+                BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x3C), 0x40); // e_lfanew
 
                 int PeOff = 0x40;
                 Buffer[PeOff] = (byte)'P';
                 Buffer[PeOff + 1] = (byte)'E';
 
                 int CoffOff = PeOff + 4;
-                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(CoffOff + 0x00), 0x8664);
-                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(CoffOff + 0x02), 1);
-                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(CoffOff + 0x10), OptSize);
-                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(CoffOff + 0x12), 0x22);
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(CoffOff + 0x00), 0x8664);  // Machine x64
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(CoffOff + 0x02), 1);       // NumberOfSections
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(CoffOff + 0x10), OptSize); // SizeOfOptionalHeader
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(CoffOff + 0x12), 0x22);    // EXECUTABLE_IMAGE | LARGE_ADDRESS_AWARE
 
                 int OptOff = CoffOff + 0x14;
-                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(OptOff + 0x00), 0x20B);
-                Buffer[OptOff + 0x02] = 14;
-                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x04), 0x200);
-                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x10), TextRva);
-                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x14), TextRva);
-                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(OptOff + 0x18), 0x140000000);
-                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x20), 0x1000);
-                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x24), 0x200);
-                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(OptOff + 0x28), 10);
-                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(OptOff + 0x2C), 10);
-                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(OptOff + 0x30), 6);
-                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x38), TextRva + 0x1000);
-                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x3C), HeadersSize);
-                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(OptOff + 0x44), 2);
-                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(OptOff + 0x46), 0x8160);
-                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(OptOff + 0x48), 0x100000);
-                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(OptOff + 0x50), 0x1000);
-                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(OptOff + 0x58), 0x100000);
-                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(OptOff + 0x60), 0x1000);
-                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x6C), 16);
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(OptOff + 0x00), 0x20B);        // Magic PE32+
+                Buffer[OptOff + 0x02] = 14;                                                          // MajorLinkerVersion
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x04), 0x200);        // SizeOfCode
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x10), TextRva);      // AddressOfEntryPoint
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x14), TextRva);      // BaseOfCode
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(OptOff + 0x18), 0x140000000);  // ImageBase
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x20), 0x1000);       // SectionAlignment
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x24), 0x200);        // FileAlignment
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(OptOff + 0x28), 10);           // MajorOperatingSystemVersion
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(OptOff + 0x2C), 10);           // MajorImageVersion
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(OptOff + 0x30), 6);            // MajorSubsystemVersion
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x38), TextRva + 0x1000); // SizeOfImage
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x3C), HeadersSize);  // SizeOfHeaders
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(OptOff + 0x44), 2);            // Subsystem WINDOWS_GUI
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(OptOff + 0x46), 0x8160);       // DllCharacteristics
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(OptOff + 0x48), 0x100000);     // SizeOfStackReserve
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(OptOff + 0x50), 0x1000);       // SizeOfStackCommit
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(OptOff + 0x58), 0x100000);     // SizeOfHeapReserve
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(OptOff + 0x60), 0x1000);       // SizeOfHeapCommit
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(OptOff + 0x6C), 16);           // NumberOfRvaAndSizes
 
                 int SecOff = OptOff + OptSize;
                 Buffer[SecOff + 0] = (byte)'.';
@@ -1230,11 +1230,11 @@ namespace Brovan
                 Buffer[SecOff + 2] = (byte)'e';
                 Buffer[SecOff + 3] = (byte)'x';
                 Buffer[SecOff + 4] = (byte)'t';
-                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(SecOff + 0x08), 0x200);
-                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(SecOff + 0x0C), TextRva);
-                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(SecOff + 0x10), 0x200);
-                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(SecOff + 0x14), TextRaw);
-                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(SecOff + 0x24), 0x60000020);
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(SecOff + 0x08), 0x200);        // VirtualSize
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(SecOff + 0x0C), TextRva);      // VirtualAddress
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(SecOff + 0x10), 0x200);        // SizeOfRawData
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(SecOff + 0x14), TextRaw);      // PointerToRawData
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(SecOff + 0x24), 0x60000020);   // CODE | EXECUTE | READ
 
                 Image[TextRaw + 0] = 0x31;
                 Image[TextRaw + 1] = 0xC0;

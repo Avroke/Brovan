@@ -1474,7 +1474,7 @@ namespace Brovan.Core.Emulation
         {
             for (int i = 0; i < bytes.Length; i++)
             {
-                if (bytes[i] == 0xB8)
+                if (bytes[i] == 0xB8) // mov eax,
                 {
                     if ((uint)(i + 5) > (uint)bytes.Length)
                         return uint.MaxValue;

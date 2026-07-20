@@ -318,7 +318,7 @@ namespace Brovan.Core.Helpers
         {
             Console.SetCursorPosition(0, 0);
             Console.Clear();
-            Console.Write("\u001b[H\u001b[2J\u001b[3J");
+            Console.Write("\u001b[H\u001b[2J\u001b[3J"); // Virtual console support
         }
     }
 }

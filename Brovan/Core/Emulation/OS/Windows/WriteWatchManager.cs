@@ -29,10 +29,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private sealed class Watched
         {
-            public ulong Base;
-            public ulong End;
-            public IntPtr Hook;
-            public MemoryHookCallback Callback;
+            public ulong Base;                 // page-aligned start
+            public ulong End;                  // page-aligned end (exclusive)
+            public IntPtr Hook;                // ranged write hook handle
+            public MemoryHookCallback Callback; // kept alive for the hook's lifetime
             public readonly SortedSet<ulong> Dirty = new SortedSet<ulong>();
         }
 

@@ -115,7 +115,7 @@ namespace Brovan.Core.Emulation
         private static ulong[] CreateIretqMemo()
         {
             ulong[] Memo = new ulong[IretqMemoMask + 1];
-            Array.Fill(Memo, ulong.MaxValue);
+            Array.Fill(Memo, ulong.MaxValue); // ulong.MaxValue is never a code address, so slot 0 does not false-hit
             return Memo;
         }
 

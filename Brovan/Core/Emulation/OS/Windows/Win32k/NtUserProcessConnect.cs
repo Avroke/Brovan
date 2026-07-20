@@ -57,7 +57,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             Instance.WinHelper.EnsureUserClientThreadInfo(Instance.CurrentThread, 0);
 
-            Instance.SetRawSyscallReturn(0);
+            Instance.SetRawSyscallReturn(0); // STATUS_SUCCESS — the connect succeeded.
             return NTSTATUS.STATUS_SUCCESS;
         }
     }

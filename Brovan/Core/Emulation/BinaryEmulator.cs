@@ -418,8 +418,8 @@ namespace Brovan.Core.Emulation
         public bool IsArmGuest => BackendArch == Arch.ARM;
         public bool IsX64Guest => BackendArch == Arch.X86 && BackendMode == Mode.MODE_64;
         public bool IsArchX86Guest => BackendArch == Arch.X86;
-        public readonly ulong BaseAddress = 0x10000000UL;
-        public readonly ulong MaxAddress = 0x7FFFFFFFFUL;
+        public readonly ulong BaseAddress = 0x10000000UL; // Base Start
+        public readonly ulong MaxAddress = 0x7FFFFFFFFUL;  // Max address limit
         private ulong _timestampCounter = 0x100000000UL;
 
         private const ulong TscCyclesPerInstruction = 3;
@@ -436,7 +436,7 @@ namespace Brovan.Core.Emulation
         internal void SeedEmulatedClockBase(ulong Seed)
         {
             long WindowStart = new DateTime(2024, 1, 1, 0, 0, 0, DateTimeKind.Utc).ToFileTimeUtc();
-            long WindowSpan = TimeSpan.FromDays(300).Ticks;
+            long WindowSpan = TimeSpan.FromDays(300).Ticks; // 100 ns units
             EmulatedSystemTimeBaseFileTimeUtc = WindowStart + (long)(Seed % (ulong)WindowSpan);
         }
 
@@ -459,7 +459,7 @@ namespace Brovan.Core.Emulation
         /// <summary>Frequency reported by QueryPerformanceFrequency (10 MHz), matching QueryPerformanceCounter below.</summary>
         internal const ulong EmulatedQpcFrequency = 10_000_000UL;
 
-        private const ulong TscCyclesPerQpcTick = TscCyclesPerMillisecond / (EmulatedQpcFrequency / 1000);
+        private const ulong TscCyclesPerQpcTick = TscCyclesPerMillisecond / (EmulatedQpcFrequency / 1000); // 300
 
         /// <summary>
         /// Deterministic QueryPerformanceCounter value, derived from the same emulated TSC as

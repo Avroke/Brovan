@@ -1989,45 +1989,45 @@ namespace Brovan.Core.Emulation.Guests
             Entries.Add(0);
             Entries.AddRange(new ulong[]
             {
-                3,
+                3, // AT_PHDR
                 ProgramHeaderAddress,
-                4,
+                4, // AT_PHENT
                 ProgramHeaderEntrySize,
-                5,
+                5, // AT_PHNUM
                 ProgramHeaderCount,
-                6,
+                6, // AT_PAGESZ
                 0x1000,
-                7,
+                7, // AT_BASE
                 InterpreterBase,
-                9,
+                9, // AT_ENTRY
                 ProgramEntry,
-                11,
+                11, // AT_UID
                 1000,
-                12,
+                12, // AT_EUID
                 1000,
-                13,
+                13, // AT_GID
                 1000,
-                14,
+                14, // AT_EGID
                 1000,
-                15,
+                15, // AT_PLATFORM
                 PlatformAddress,
-                16,
+                16, // AT_HWCAP
                 2,
-                17,
+                17, // AT_CLKTCK
                 100,
-                23,
+                23, // AT_SECURE
                 0,
-                25,
+                25, // AT_RANDOM
                 RandomAddress,
-                26,
+                26, // AT_HWCAP2
                 0,
-                27,
+                27, // AT_RSEQ_FEATURE_SIZE
                 RseqMinimumFeatureSize,
-                28,
+                28, // AT_RSEQ_ALIGN
                 RseqAlignment,
-                31,
+                31, // AT_EXECFN
                 ExecFnAddress,
-                0,
+                0, // AT_NULL
                 0
             });
 
@@ -2098,33 +2098,33 @@ namespace Brovan.Core.Emulation.Guests
             Entries.Add(0);
             Entries.AddRange(new uint[]
             {
-                3,
+                3, // AT_PHDR
                 ProgramHeaderAddress,
-                4,
+                4, // AT_PHENT
                 ProgramHeaderEntrySize,
-                5,
+                5, // AT_PHNUM
                 ProgramHeaderCount,
-                6,
+                6, // AT_PAGESZ
                 0x1000,
-                7,
+                7, // AT_BASE
                 InterpreterBase,
-                9,
+                9, // AT_ENTRY
                 ProgramEntry,
-                11,
+                11, // AT_UID
                 1000,
-                12,
+                12, // AT_EUID
                 1000,
-                13,
+                13, // AT_GID
                 1000,
-                14,
+                14, // AT_EGID
                 1000,
-                23,
+                23, // AT_SECURE
                 0,
-                25,
+                25, // AT_RANDOM
                 RandomAddress,
-                31,
+                31, // AT_EXECFN
                 ExecFnAddress,
-                0,
+                0, // AT_NULL
                 0
             });
 

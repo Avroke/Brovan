@@ -9,9 +9,9 @@ namespace Brovan.Core.Emulation.OS.Windows
     ///
     /// <code>
     /// NTSTATUS NtResetWriteWatch(
-    ///   HANDLE ProcessHandle,
-    ///   PVOID  BaseAddress,
-    ///   SIZE_T RegionSize)
+    ///   HANDLE ProcessHandle,   // arg0
+    ///   PVOID  BaseAddress,     // arg1
+    ///   SIZE_T RegionSize)      // arg2
     /// </code>
     ///
     /// al-khaser's write-watch "code write" probe relies on this: it writes generated code into

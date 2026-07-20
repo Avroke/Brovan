@@ -109,7 +109,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 ulong ProcessHandle = Instance.WinHelper.GetArg64(0);
                 ulong BaseAddressPtr = Instance.WinHelper.GetArg64(1);
-                ulong ZeroBits = Instance.WinHelper.GetArg64(2);
+                ulong ZeroBits = Instance.WinHelper.GetArg64(2); // ignored for now
                 ulong RegionSizePtr = Instance.WinHelper.GetArg64(3);
                 ulong AllocationTypeValue = (uint)Instance.WinHelper.GetArg64(4);
                 ulong ProtectValue = (uint)Instance.WinHelper.GetArg64(5);
@@ -146,8 +146,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 ulong BaseAddress = Instance.ReadMemoryULong(BaseAddressPtr);
 
-                bool Reserve = (AllocationTypeValue & 0x2000UL) != 0;
-                bool Commit = (AllocationTypeValue & 0x1000UL) != 0;
+                bool Reserve = (AllocationTypeValue & 0x2000UL) != 0; // MEM_RESERVE
+                bool Commit = (AllocationTypeValue & 0x1000UL) != 0;  // MEM_COMMIT
 
                 bool Reset = (AllocationTypeValue & MemReset) != 0;
                 bool ResetUndo = (AllocationTypeValue & MemResetUndo) != 0;
@@ -220,7 +220,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 uint ProcessHandle = Instance.ReadMemoryUInt(SP + 4);
                 uint BaseAddressPtr = Instance.ReadMemoryUInt(SP + 8);
-                uint ZeroBits = Instance.ReadMemoryUInt(SP + 12);
+                uint ZeroBits = Instance.ReadMemoryUInt(SP + 12); // ignored for now
                 uint RegionSizePtr = Instance.ReadMemoryUInt(SP + 16);
                 uint AllocationTypeValue = Instance.ReadMemoryUInt(SP + 20);
                 uint ProtectValue = Instance.ReadMemoryUInt(SP + 24);
@@ -260,8 +260,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 uint BaseAddress32 = Instance.ReadMemoryUInt(BaseAddressPtr);
                 ulong BaseAddress = BaseAddress32;
 
-                bool Reserve = (AllocationTypeValue & 0x2000U) != 0;
-                bool Commit = (AllocationTypeValue & 0x1000U) != 0;
+                bool Reserve = (AllocationTypeValue & 0x2000U) != 0; // MEM_RESERVE
+                bool Commit = (AllocationTypeValue & 0x1000U) != 0;  // MEM_COMMIT
 
                 bool Reset = (AllocationTypeValue & MemReset) != 0;
                 bool ResetUndo = (AllocationTypeValue & MemResetUndo) != 0;

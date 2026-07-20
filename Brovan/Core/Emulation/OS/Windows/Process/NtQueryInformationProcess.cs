@@ -787,21 +787,21 @@ namespace Brovan.Core.Emulation.OS.Windows
                             uint SubSystemVersion = ((uint)Pe.OptionalHeader32.MinorSubsystemVersion << 16) | (uint)Pe.OptionalHeader32.MajorSubsystemVersion;
 
                             Span<byte> Buffer = GetSharedWriteBuffer(Instance, StructSize);
-                            WriteUInt32(Buffer, 0x00, TransferAddress);
-                            WriteUInt32(Buffer, 0x04, 0u);
-                            WriteUInt32(Buffer, 0x08, (uint)Instance.StackSize);
-                            WriteUInt32(Buffer, 0x0C, (uint)Instance.StackSize);
-                            WriteUInt32(Buffer, 0x10, (uint)Pe.OptionalHeader32.Subsystem);
-                            WriteUInt32(Buffer, 0x14, SubSystemVersion);
-                            WriteUInt32(Buffer, 0x18, 0u);
-                            WriteUInt16(Buffer, 0x1C, (ushort)Pe.FileHeader.Characteristics);
-                            WriteUInt16(Buffer, 0x1E, (ushort)Pe.OptionalHeader32.DllCharacteristics);
-                            WriteUInt16(Buffer, 0x20, (ushort)Pe.FileHeader.Machine);
-                            Buffer[0x22] = 1;
-                            Buffer[0x23] = 0;
-                            WriteUInt32(Buffer, 0x24, 0u);
-                            WriteUInt32(Buffer, 0x28, 0u);
-                            WriteUInt32(Buffer, 0x2C, 0u);
+                            WriteUInt32(Buffer, 0x00, TransferAddress);                 // TransferAddress
+                            WriteUInt32(Buffer, 0x04, 0u);                              // ZeroBits
+                            WriteUInt32(Buffer, 0x08, (uint)Instance.StackSize);        // MaximumStackSize
+                            WriteUInt32(Buffer, 0x0C, (uint)Instance.StackSize);        // CommittedStackSize
+                            WriteUInt32(Buffer, 0x10, (uint)Pe.OptionalHeader32.Subsystem); // SubSystemType
+                            WriteUInt32(Buffer, 0x14, SubSystemVersion);                // SubSystemVersion
+                            WriteUInt32(Buffer, 0x18, 0u);                              // GpValue
+                            WriteUInt16(Buffer, 0x1C, (ushort)Pe.FileHeader.Characteristics);        // ImageCharacteristics
+                            WriteUInt16(Buffer, 0x1E, (ushort)Pe.OptionalHeader32.DllCharacteristics); // DllCharacteristics
+                            WriteUInt16(Buffer, 0x20, (ushort)Pe.FileHeader.Machine);   // Machine
+                            Buffer[0x22] = 1;                                           // ImageContainsCode
+                            Buffer[0x23] = 0;                                           // ImageFlags
+                            WriteUInt32(Buffer, 0x24, 0u);                              // LoaderFlags
+                            WriteUInt32(Buffer, 0x28, 0u);                              // ImageFileSize
+                            WriteUInt32(Buffer, 0x2C, 0u);                              // CheckSum
 
                             if (!Instance.WriteMemory(OutBufferPtr, Buffer))
                                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -821,7 +821,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                             uint Policy = Instance.ReadMemoryUInt(OutBufferPtr);
-                            uint PolicyFlags = Policy == 0 ? 1u : 0u;
+                            uint PolicyFlags = Policy == 0 ? 1u : 0u; // ProcessDEPPolicy: DEP permanently on; others default/off.
 
                             Span<byte> Buffer = GetSharedWriteBuffer(Instance, StructSize);
                             WriteUInt32(Buffer, 0, Policy);
@@ -852,14 +852,14 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                             Span<byte> Buffer = GetSharedWriteBuffer(Instance, StructSize);
                             Buffer.Slice(0, (int)StructSize).Clear();
-                            const uint SizeMax = 0xFFFFFFFFu;
-                            const uint MinWs   = 200 * 4096;
-                            const uint MaxWs   = 1345 * 4096;
-                            WriteUInt32(Buffer, 0x00, SizeMax);
-                            WriteUInt32(Buffer, 0x04, SizeMax);
-                            WriteUInt32(Buffer, 0x08, MinWs);
-                            WriteUInt32(Buffer, 0x0C, MaxWs);
-                            WriteUInt32(Buffer, 0x10, SizeMax);
+                            const uint SizeMax = 0xFFFFFFFFu;   // "unlimited" on 32-bit
+                            const uint MinWs   = 200 * 4096;    // 200 pages
+                            const uint MaxWs   = 1345 * 4096;   // 1345 pages (standard Win10 default)
+                            WriteUInt32(Buffer, 0x00, SizeMax); // PagedPoolLimit
+                            WriteUInt32(Buffer, 0x04, SizeMax); // NonPagedPoolLimit
+                            WriteUInt32(Buffer, 0x08, MinWs);   // MinimumWorkingSetSize
+                            WriteUInt32(Buffer, 0x0C, MaxWs);   // MaximumWorkingSetSize
+                            WriteUInt32(Buffer, 0x10, SizeMax); // PagefileLimit
                             if (!Instance.WriteMemory(OutBufferPtr, Buffer))
                                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
                             SetReturnLength(StructSize);

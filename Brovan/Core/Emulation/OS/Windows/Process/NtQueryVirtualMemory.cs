@@ -335,17 +335,17 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                         ulong ShareCount = Shared ? 1UL : 0UL;
 
-                        Flags |= 1UL;
+                        Flags |= 1UL; // Valid
                         Flags |= (ShareCount & 0x7UL) << 1;
                         Flags |= (Win32Protect & 0x7FFUL) << 4;
                         Flags |= (Shared ? 1UL : 0UL) << 15;
-                        Flags |= 0UL << 16;
-                        Flags |= 0UL << 22;
-                        Flags |= 0UL << 23;
-                        Flags |= 0UL << 24;
-                        Flags |= 0UL << 27;
-                        Flags |= (Shared ? 1UL : 0UL) << 30;
-                        Flags |= 0UL << 31;
+                        Flags |= 0UL << 16; // Node
+                        Flags |= 0UL << 22; // Locked
+                        Flags |= 0UL << 23; // LargePage
+                        Flags |= 0UL << 24; // Priority
+                        Flags |= 0UL << 27; // Reserved
+                        Flags |= (Shared ? 1UL : 0UL) << 30; // SharedOriginal
+                        Flags |= 0UL << 31; // Bad
                         return Flags;
                     }
 
@@ -489,11 +489,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                     uint RegionType = 0;
                     if (AnyImage)
                     {
-                        RegionType |= (1u << 2);
+                        RegionType |= (1u << 2); // MappedImage
                     }
                     else
                     {
-                        RegionType |= 1u;
+                        RegionType |= 1u; // Private
                     }
 
                     MEMORY_REGION_INFORMATION Info = new MEMORY_REGION_INFORMATION

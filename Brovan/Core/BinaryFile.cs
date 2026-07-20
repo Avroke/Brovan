@@ -269,7 +269,7 @@ namespace Brovan.Core
 
                 uint PESignature = ReadStruct<uint>(Data, DosHeader.e_lfanew);
 
-                if (PESignature != 0x00004550)
+                if (PESignature != 0x00004550) // (check for "PE\0\0" which should be available for valid PE binaries)
                 {
                     FileFormat = BinaryFormat.Unknown;
                     return;
@@ -1058,29 +1058,29 @@ namespace Brovan.Core
 
         private static readonly byte[][] X86FunctionSignatures = new[]
         {
-            new byte[] { 0x55, 0x89, 0xE5 },
-            new byte[] { 0x53, 0x56, 0x57 },
-            new byte[] { 0x83, 0xEC },
-            new byte[] { 0x56, 0x8B, 0xF1 },
-            new byte[] { 0x57, 0x8B, 0xF9 },
-            new byte[] { 0x55, 0x8B, 0xEC },
-            new byte[] { 0x53, 0x8B, 0xDC },
+            new byte[] { 0x55, 0x89, 0xE5 }, // push ebp; mov ebp, esp
+            new byte[] { 0x53, 0x56, 0x57 }, // push ebx; push esi; push edi
+            new byte[] { 0x83, 0xEC }, // sub esp, XX
+            new byte[] { 0x56, 0x8B, 0xF1 }, // push esi; mov esi, ecx (common C++ method prologue)
+            new byte[] { 0x57, 0x8B, 0xF9 }, // push edi; mov edi, ecx (common C++ method prologue)
+            new byte[] { 0x55, 0x8B, 0xEC }, // push ebp; mov ebp, esp (MSVC style)
+            new byte[] { 0x53, 0x8B, 0xDC }, // push ebx; mov ebx, esp
         };
 
         private static readonly byte[][] X64FunctionSignatures = new[]
         {
-            new byte[] { 0x55, 0x48, 0x89, 0xE5 },
-            new byte[] { 0x48, 0x83, 0xEC },
-            new byte[] { 0x40, 0x53 },
-            new byte[] { 0x40, 0x55 },
-            new byte[] { 0x40, 0x56 },
-            new byte[] { 0x40, 0x57 },
-            new byte[] { 0x48, 0x89, 0x5C, 0x24 },
-            new byte[] { 0x48, 0x89, 0x6C, 0x24 },
-            new byte[] { 0x48, 0x89, 0x74, 0x24 },
-            new byte[] { 0x48, 0x89, 0x7C, 0x24 },
-            new byte[] { 0x4C, 0x89, 0x44, 0x24 },
-            new byte[] { 0x4C, 0x89, 0x4C, 0x24 },
+            new byte[] { 0x55, 0x48, 0x89, 0xE5 }, // push rbp; mov rbp, rsp
+            new byte[] { 0x48, 0x83, 0xEC }, // sub rsp, XX
+            new byte[] { 0x40, 0x53 }, // push rbx
+            new byte[] { 0x40, 0x55 }, // push rbp
+            new byte[] { 0x40, 0x56 }, // push rsi
+            new byte[] { 0x40, 0x57 }, // push rdi
+            new byte[] { 0x48, 0x89, 0x5C, 0x24 }, // mov [rsp+XX], rbx
+            new byte[] { 0x48, 0x89, 0x6C, 0x24 }, // mov [rsp+XX], rbp
+            new byte[] { 0x48, 0x89, 0x74, 0x24 }, // mov [rsp+XX], rsi
+            new byte[] { 0x48, 0x89, 0x7C, 0x24 }, // mov [rsp+XX], rdi
+            new byte[] { 0x4C, 0x89, 0x44, 0x24 }, // mov [rsp+XX], r8
+            new byte[] { 0x4C, 0x89, 0x4C, 0x24 }, // mov [rsp+XX], r9
         };
 
         private static readonly Dictionary<byte, byte[][]> X86FunctionSignatureLookup = BuildFunctionSignatureLookup(X86FunctionSignatures);
@@ -2279,7 +2279,7 @@ namespace Brovan.Core
 
             ReadOnlySpan<byte> DynStr = DataSpan.Slice(RawOffset, BytesToCopy);
 
-            int SymbolSize = Is64Bit ? 24 : 16;
+            int SymbolSize = Is64Bit ? 24 : 16; // if 64-bit arch, set to 24 (Elf64_Sym) and if not then use 16 (Elf32_Sym)
             int SymbolCount = (int)(DynSymSection.RawSize / SymbolSize);
             Dictionary<uint, string> SymbolNames = new Dictionary<uint, string>(SymbolCount);
 

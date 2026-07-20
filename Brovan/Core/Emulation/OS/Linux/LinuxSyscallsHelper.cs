@@ -1873,8 +1873,8 @@ namespace Brovan.Core.Emulation.OS.Linux
 
         public LinuxTerminalState()
         {
-            Termios[5] = 0;
-            Termios[6] = 1;
+            Termios[5] = 0; // VTIME
+            Termios[6] = 1; // VMIN
         }
     }
 

@@ -94,9 +94,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             int Ptr = Instance.GuestPointerSize;
             const uint HeaderSize = 0x10;
-            uint EntryTlsDataOffset = (uint)Ptr;
+            uint EntryTlsDataOffset = (uint)Ptr;                        // 4-byte Flags, then the pointer (aligned)
             uint EntryThreadIdOffset = EntryTlsDataOffset + (uint)Ptr;
-            uint EntrySize = EntryThreadIdOffset + (uint)Ptr;
+            uint EntrySize = EntryThreadIdOffset + (uint)Ptr;           // x86 → 0xC, x64 → 0x18
 
             if (ProcessInformation == 0)
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;

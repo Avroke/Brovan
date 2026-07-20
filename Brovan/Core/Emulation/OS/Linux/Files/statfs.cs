@@ -60,16 +60,16 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             Span<byte> buf = stackalloc byte[SIZE_64];
             buf.Clear();
 
-            BinaryPrimitives.WriteInt64LittleEndian(buf.Slice(0, 8), EXT4_MAGIC);
-            BinaryPrimitives.WriteInt64LittleEndian(buf.Slice(8, 8), BLOCK_SIZE);
-            BinaryPrimitives.WriteInt64LittleEndian(buf.Slice(16, 8), TOTAL_BLOCKS);
-            BinaryPrimitives.WriteInt64LittleEndian(buf.Slice(24, 8), FREE_BLOCKS);
-            BinaryPrimitives.WriteInt64LittleEndian(buf.Slice(32, 8), AVAIL_BLOCKS);
-            BinaryPrimitives.WriteInt64LittleEndian(buf.Slice(40, 8), TOTAL_INODES);
-            BinaryPrimitives.WriteInt64LittleEndian(buf.Slice(48, 8), FREE_INODES);
-            BinaryPrimitives.WriteInt64LittleEndian(buf.Slice(64, 8), NAME_MAX);
-            BinaryPrimitives.WriteInt64LittleEndian(buf.Slice(72, 8), FRAG_SIZE);
-            BinaryPrimitives.WriteInt64LittleEndian(buf.Slice(80, 8), FLAGS);
+            BinaryPrimitives.WriteInt64LittleEndian(buf.Slice(0, 8), EXT4_MAGIC); // f_type
+            BinaryPrimitives.WriteInt64LittleEndian(buf.Slice(8, 8), BLOCK_SIZE); // f_bsize
+            BinaryPrimitives.WriteInt64LittleEndian(buf.Slice(16, 8), TOTAL_BLOCKS); // f_blocks
+            BinaryPrimitives.WriteInt64LittleEndian(buf.Slice(24, 8), FREE_BLOCKS); // f_bfree
+            BinaryPrimitives.WriteInt64LittleEndian(buf.Slice(32, 8), AVAIL_BLOCKS); // f_bavail
+            BinaryPrimitives.WriteInt64LittleEndian(buf.Slice(40, 8), TOTAL_INODES); // f_files
+            BinaryPrimitives.WriteInt64LittleEndian(buf.Slice(48, 8), FREE_INODES); // f_ffree
+            BinaryPrimitives.WriteInt64LittleEndian(buf.Slice(64, 8), NAME_MAX); // f_namelen
+            BinaryPrimitives.WriteInt64LittleEndian(buf.Slice(72, 8), FRAG_SIZE); // f_frsize
+            BinaryPrimitives.WriteInt64LittleEndian(buf.Slice(80, 8), FLAGS); // f_flags
 
             if (!Instance.WriteMemory(bufPtr, buf))
             {
@@ -91,16 +91,16 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             Span<byte> buf = stackalloc byte[SIZE_32];
             buf.Clear();
 
-            BinaryPrimitives.WriteInt32LittleEndian(buf.Slice(0, 4), (int)EXT4_MAGIC);
-            BinaryPrimitives.WriteInt32LittleEndian(buf.Slice(4, 4), (int)BLOCK_SIZE);
-            BinaryPrimitives.WriteInt32LittleEndian(buf.Slice(8, 4), (int)TOTAL_BLOCKS);
-            BinaryPrimitives.WriteInt32LittleEndian(buf.Slice(12, 4), (int)FREE_BLOCKS);
-            BinaryPrimitives.WriteInt32LittleEndian(buf.Slice(16, 4), (int)AVAIL_BLOCKS);
-            BinaryPrimitives.WriteInt32LittleEndian(buf.Slice(20, 4), (int)TOTAL_INODES);
-            BinaryPrimitives.WriteInt32LittleEndian(buf.Slice(24, 4), (int)FREE_INODES);
-            BinaryPrimitives.WriteInt32LittleEndian(buf.Slice(36, 4), (int)NAME_MAX);
-            BinaryPrimitives.WriteInt32LittleEndian(buf.Slice(40, 4), (int)FRAG_SIZE);
-            BinaryPrimitives.WriteInt32LittleEndian(buf.Slice(44, 4), (int)FLAGS);
+            BinaryPrimitives.WriteInt32LittleEndian(buf.Slice(0, 4), (int)EXT4_MAGIC); // f_type
+            BinaryPrimitives.WriteInt32LittleEndian(buf.Slice(4, 4), (int)BLOCK_SIZE); // f_bsize
+            BinaryPrimitives.WriteInt32LittleEndian(buf.Slice(8, 4), (int)TOTAL_BLOCKS); // f_blocks
+            BinaryPrimitives.WriteInt32LittleEndian(buf.Slice(12, 4), (int)FREE_BLOCKS); // f_bfree
+            BinaryPrimitives.WriteInt32LittleEndian(buf.Slice(16, 4), (int)AVAIL_BLOCKS); // f_bavail
+            BinaryPrimitives.WriteInt32LittleEndian(buf.Slice(20, 4), (int)TOTAL_INODES); // f_files
+            BinaryPrimitives.WriteInt32LittleEndian(buf.Slice(24, 4), (int)FREE_INODES); // f_ffree
+            BinaryPrimitives.WriteInt32LittleEndian(buf.Slice(36, 4), (int)NAME_MAX); // f_namelen
+            BinaryPrimitives.WriteInt32LittleEndian(buf.Slice(40, 4), (int)FRAG_SIZE); // f_frsize
+            BinaryPrimitives.WriteInt32LittleEndian(buf.Slice(44, 4), (int)FLAGS); // f_flags
 
             if (!Instance.WriteMemory(bufPtr, buf))
             {

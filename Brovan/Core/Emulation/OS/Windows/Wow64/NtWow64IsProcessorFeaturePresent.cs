@@ -11,8 +11,8 @@ namespace Brovan.Core.Emulation.OS.Windows
     /// </summary>
     internal class NtWow64IsProcessorFeaturePresent : IWinSyscall
     {
-        private const uint ProcessorFeatureMax = 64;
-        private const ulong ProcessorFeaturesOffset = 0x274;
+        private const uint ProcessorFeatureMax = 64;        // PROCESSOR_FEATURE_MAX — array length.
+        private const ulong ProcessorFeaturesOffset = 0x274; // KUSER_SHARED_DATA.ProcessorFeatures.
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {

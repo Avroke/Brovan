@@ -161,12 +161,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong AllocationBase;
         public uint AllocationProtect;
         public ushort PartitionId;
-        public ushort Reserved;
+        public ushort Reserved; // padding so RegionSize stays aligned
         public ulong RegionSize;
         public uint State;
         public uint Protect;
         public uint Type;
-        public uint Reserved2;
+        public uint Reserved2; // tail padding to 48 bytes
     }
 
     [StructLayout(LayoutKind.Sequential)]

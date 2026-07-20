@@ -11,11 +11,11 @@ namespace Brovan.Core.Emulation.OS.Windows
     ///
     /// <code>
     /// NTSTATUS NtQueryInformationAtom(
-    ///   RTL_ATOM              Atom,
-    ///   ATOM_INFORMATION_CLASS InformationClass,
-    ///   PVOID                 AtomInformation,
-    ///   ULONG                 AtomInformationLength,
-    ///   PULONG                ReturnLength)
+    ///   RTL_ATOM              Atom,                    // arg0 (USHORT-in-ULONG)
+    ///   ATOM_INFORMATION_CLASS InformationClass,       // arg1
+    ///   PVOID                 AtomInformation,          // arg2
+    ///   ULONG                 AtomInformationLength,    // arg3
+    ///   PULONG                ReturnLength)             // arg4
     /// </code>
     ///
     /// Brovan doesn't emulate the process-wide atom table (would need
@@ -70,8 +70,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 System.Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(Required);
                 Buffer.Slice(0, (int)Required).Clear();
-                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(0, 2), 1);
-                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(2, 2), 0);
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(0, 2), 1);                    // UsageCount = 1
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(2, 2), 0);                    // Flags
                 BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(4, 2), (ushort)NameByteCount);
                 System.Text.Encoding.Unicode.GetBytes(Name, Buffer.Slice(6));
 

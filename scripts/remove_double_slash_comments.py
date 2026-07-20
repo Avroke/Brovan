@@ -32,6 +32,8 @@ Options:
     -n, --dry-run     Report what would change without writing files.
     --keep-blank-lines  Leave an empty line where a whole-line comment was,
                       instead of deleting the line.
+    --only-full-line  Remove only comments that occupy a whole line; keep
+                      inline (trailing) comments that annotate code.
     -q, --quiet       Only print the final summary.
 """
 
@@ -40,11 +42,16 @@ import os
 import sys
 
 
-def strip_double_slash_comments(source: str, keep_blank_lines: bool = False) -> str:
+def strip_double_slash_comments(source: str, keep_blank_lines: bool = False,
+                                only_full_line: bool = False) -> str:
     """Return ``source`` with every exactly-two-slash line comment removed.
 
     A hand-rolled C# scan avoids touching `//` sequences that live inside
     string/char literals or block comments, and skips `///`+ doc comments.
+
+    When ``only_full_line`` is true, a `//` that *trails* code on its line
+    (an inline annotation) is kept; only comments occupying a whole line are
+    removed.
     """
     out = []
     i = 0
@@ -137,10 +144,24 @@ def strip_double_slash_comments(source: str, keep_blank_lines: bool = False) -> 
                 i = j
                 continue
 
-            # Exactly `//`: drop from here to end of physical line.
+            # Exactly `//`. Look back over any pending whitespace to see whether
+            # code precedes the comment on this physical line.
+            k = len(out) - 1
+            while k >= 0 and out[k] in " \t":
+                k -= 1
+            line_is_blank = k < 0 or out[k] == '\n'
+
+            if only_full_line and not line_is_blank:
+                # Inline annotation trailing real code: keep it verbatim.
+                eol = source.find('\n', i)
+                eol = n if eol == -1 else eol
+                out.append(source[i:eol])
+                i = eol
+                continue
+
+            # Otherwise drop from here to end of physical line.
             while out and out[-1] in " \t":       # trim whitespace before comment
                 out.pop()
-            line_is_blank = (not out) or out[-1] == '\n'
 
             eol = source.find('\n', i)
             eol = n if eol == -1 else eol
@@ -187,6 +208,8 @@ def main(argv=None):
                         help="report changes without writing files")
     parser.add_argument("--keep-blank-lines", action="store_true",
                         help="leave an empty line where a whole-line comment was")
+    parser.add_argument("--only-full-line", action="store_true",
+                        help="remove only whole-line comments; keep inline (trailing) ones")
     parser.add_argument("-q", "--quiet", action="store_true",
                         help="only print the final summary")
     args = parser.parse_args(argv)
@@ -213,7 +236,8 @@ def main(argv=None):
             print(f"[!] skipping {filepath}: {exc}", file=sys.stderr)
             continue
 
-        stripped = strip_double_slash_comments(original, args.keep_blank_lines)
+        stripped = strip_double_slash_comments(
+            original, args.keep_blank_lines, args.only_full_line)
         if stripped == original:
             continue
 

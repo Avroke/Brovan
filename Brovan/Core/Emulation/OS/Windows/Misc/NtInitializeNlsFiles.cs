@@ -45,7 +45,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 ulong CasingSize = 0;
                 if (data.Length >= 0x14)
                 {
-                    uint localesOffset = BitConverter.ToUInt32(data, 0x10);
+                    uint localesOffset = BitConverter.ToUInt32(data, 0x10); // header->locales
                     CasingSize = localesOffset;
                 }
 
@@ -66,7 +66,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 uint BaseAddressPtr = Instance.ReadMemoryUInt(esp + 4);
                 uint DefaultLcidPtr = Instance.ReadMemoryUInt(esp + 8);
                 uint CasingSizePtr = Instance.ReadMemoryUInt(esp + 12);
-                uint CurrentVerPtr = Instance.ReadMemoryUInt(esp + 16);
+                uint CurrentVerPtr = Instance.ReadMemoryUInt(esp + 16); // optional
 
                 if (BaseAddressPtr != 0 && !Instance.IsRegionMapped(BaseAddressPtr, 4))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;

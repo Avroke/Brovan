@@ -425,7 +425,7 @@ namespace Brovan
                         Environment.Exit(-1);
                     }
 
-                    Environment.Exit(0);
+                    Environment.Exit(0); // it should exit by itself inside RestartProcessWithCfgDisabled but keep this here too just in case
                 }
 
                 if (Arg.StartsWith("--net=", StringComparison.OrdinalIgnoreCase))

@@ -483,13 +483,13 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Array.Clear(Page, OffsetXStateConfiguration, Page.Length - OffsetXStateConfiguration);
 
-            Page[OffsetProcessorFeatures + 6] = 1;
-            Page[OffsetProcessorFeatures + 10] = 1;
-            Page[OffsetProcessorFeatures + 13] = 1;
-            Page[OffsetProcessorFeatures + 12] = 1;
-            Page[OffsetProcessorFeatures + 23] = 1;
-            Page[OffsetProcessorFeatures + 28] = 1;
-            Page[OffsetProcessorFeatures + 32] = 1;
+            Page[OffsetProcessorFeatures + 6] = 1;  // SSE
+            Page[OffsetProcessorFeatures + 10] = 1; // SSE2
+            Page[OffsetProcessorFeatures + 13] = 1; // SSE3
+            Page[OffsetProcessorFeatures + 12] = 1; // NX
+            Page[OffsetProcessorFeatures + 23] = 1; // FASTFAIL
+            Page[OffsetProcessorFeatures + 28] = 1; // RDRAND
+            Page[OffsetProcessorFeatures + 32] = 1; // RDTSCP
 
             return Page;
         }
@@ -537,14 +537,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int LdrEntryOffsetInLoadOrderLinks = 0x00;
         private const int LdrEntryOffsetDllBase = 0x30;
         private const int LdrEntryOffsetSizeOfImage = 0x40;
-        private const int LdrEntryOffsetFullDllName = 0x48;
-        private const int LdrEntryOffsetBaseDllName = 0x58;
+        private const int LdrEntryOffsetFullDllName = 0x48; // UNICODE_STRING
+        private const int LdrEntryOffsetBaseDllName = 0x58; // UNICODE_STRING
 
         private const int UnicodeStringSize = 0x10;
         private const int UnicodeStringOffsetLength = 0x0;
         private const int UnicodeStringOffsetBuffer = 0x8;
 
-        private const int MaxUnicodeStringBytes = 0x800;
+        private const int MaxUnicodeStringBytes = 0x800; // hard cap (bytes)
 
         private readonly BinaryEmulator Emulator;
         private readonly WinSysHelper WinHelper;
@@ -658,7 +658,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal void Pump()
         {
             long Now = Emulator.EmulatedTickCount64;
-            const long MinDelta = 1;
+            const long MinDelta = 1; // ~1 ms of emulated time between refreshes
             if (LastPumpTicks != 0 && (Now - LastPumpTicks) < MinDelta)
                 return;
 
